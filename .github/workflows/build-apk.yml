@@ -1,10 +1,18 @@
-# Builds (1) the payload library and (2) the patcher APK with the payload bundled inside it.
-# NOT fully tested: the APK part worked for you; the payload part is new.
-# If the payload step fails, the APK is still built (without a payload, so Install stays greyed out).
+# Builds (1) the payload library, (2) the patcher APK with the payload inside it, and
+# (3) publishes the APK as the GitHub release "latest" so the app's Update button can fetch it.
+#
+# One-time setup for step 3 (see UPDATES.md): add a repository secret named TZ_KEYSTORE_B64.
+# Without it the build still works, but nothing is published (Update needs the fixed signing key).
 name: Build APK
 on:
   workflow_dispatch:   # lets you press a "Run workflow" button
   push:
+    branches: [main]
+permissions:
+  contents: write      # needed to publish the "latest" release
+concurrency:
+  group: tz-build
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,14 +40,48 @@ jobs:
           mkdir -p app/src/main/assets/payload
           cp payload/build/libmain_payload.so app/src/main/assets/payload/libmain_payload.so
 
-      - run: gradle assembleDebug --no-daemon
+      - name: Set up the fixed signing key (only if the secret exists)
+        env:
+          KS_B64: ${{ secrets.TZ_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/tz.keystore"
+            echo "TZ_KEYSTORE_PATH=$RUNNER_TEMP/tz.keystore" >> "$GITHUB_ENV"
+            echo "TZ_KEYSTORE_PASSWORD=tzupdate" >> "$GITHUB_ENV"
+            echo "HAVE_KEY=yes" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No TZ_KEYSTORE_B64 secret found. The APK gets a random key and will NOT be published for the Update button. See UPDATES.md."
+          fi
+
+      - name: Build the app
+        run: gradle assembleDebug --no-daemon -PtzVersionCode=${{ github.run_number }} -PtzVersionName=0.2.${{ github.run_number }}
+
+      - name: Name the files
+        run: |
+          N=${{ github.run_number }}
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk "out/Timmyzstuff-$N.apk"
+          (cd out && sha256sum "Timmyzstuff-$N.apk" > "Timmyzstuff-$N.apk.sha256")
+          ls -l out
 
       - uses: actions/upload-artifact@v4
         with:
           name: Timmyzstuff-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: out/Timmyzstuff-*.apk
       - uses: actions/upload-artifact@v4
         if: steps.payload.outcome == 'success'
         with:
           name: payload-libmain_payload-so
           path: payload/build/libmain_payload.so
+
+      - name: Publish the "latest" release (for the Update button)
+        if: env.HAVE_KEY == 'yes' && steps.payload.outcome == 'success' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          N=${{ github.run_number }}
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest "out/Timmyzstuff-$N.apk" "out/Timmyzstuff-$N.apk.sha256" \
+            --title "Latest build ($N)" \
+            --notes "Build $N. Open the Timmyzstuff app on the Quest and press Update." \
+            --target "$GITHUB_SHA"
