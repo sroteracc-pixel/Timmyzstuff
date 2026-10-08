@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simple placeholder icon: purple rounded square with a white "T". Replace any time. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+    <path
+        android:fillColor="#7C5CFF"
+        android:pathData="M20,8h56a12,12 0 0,1 12,12v56a12,12 0 0,1 -12,12h-56a12,12 0 0,1 -12,-12v-56a12,12 0 0,1 12,-12z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M28,28h40v10h-15v32h-10v-32h-15z" />
+</vector>

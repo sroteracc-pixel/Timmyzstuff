@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="tz_bg">#12101A</color>
+    <color name="tz_card">#1E1B2B</color>
+    <color name="tz_accent">#7C5CFF</color>
+    <color name="tz_accent_dark">#4B3AA8</color>
+    <color name="tz_text">#F2F0FA</color>
+    <color name="tz_muted">#A8A3BD</color>
+    <color name="tz_ok">#59D98E</color>
+    <color name="tz_bad">#FF6B6B</color>
+</resources>
