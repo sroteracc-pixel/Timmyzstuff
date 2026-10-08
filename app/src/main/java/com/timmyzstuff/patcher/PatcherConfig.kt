@@ -19,4 +19,10 @@ object PatcherConfig {
 
     /** The CPU type the game's library must be built for. Quest headsets are arm64. */
     const val REQUIRED_ABI = "arm64-v8a"
+
+    /** GitHub repository the Update button reads from (owner/name). It must be public. */
+    const val UPDATE_REPO = "sroteracc-pixel/Timmyzstuff"
+
+    /** The GitHub release the build publishes every time (the workflow keeps it named "latest"). */
+    const val UPDATE_TAG = "latest"
 }

@@ -26,6 +26,8 @@ class MainActivity : Activity() {
     private lateinit var btnStatus: Button
     private lateinit var btnInstall: Button
     private lateinit var btnRestore: Button
+    private lateinit var btnUpdate: Button
+    private lateinit var btnFacts: Button
 
     // Remember the last status so we know which buttons to allow.
     private var canInstall = false
@@ -42,10 +44,29 @@ class MainActivity : Activity() {
         btnStatus = findViewById(R.id.btnStatus)
         btnInstall = findViewById(R.id.btnInstall)
         btnRestore = findViewById(R.id.btnRestore)
+        btnUpdate = findViewById(R.id.btnUpdate)
+        btnFacts = findViewById(R.id.btnFacts)
+
+        // Show which build this is, so you can see an update really happened.
+        val build = try { packageManager.getPackageInfo(packageName, 0).longVersionCode } catch (e: Exception) { 0L }
+        findViewById<TextView>(R.id.tagline).text = "Patcher - build $build"
 
         btnStatus.setOnClickListener { runJob("Checking status") { patcher -> showStatus(patcher) } }
         btnInstall.setOnClickListener { runJob("Installing") { patcher -> showResult(patcher.install()) } }
         btnRestore.setOnClickListener { runJob("Restoring") { patcher -> showResult(patcher.restore()) } }
+
+        btnUpdate.setOnClickListener {
+            runJob("Updating") { _ ->
+                val r = Updater(this) { message -> appendLog(message) }.run()
+                appendLog(if (r.success) "DONE: ${r.message}" else "FAILED: ${r.message}")
+            }
+        }
+        btnFacts.setOnClickListener {
+            runJob("Getting facts") { _ ->
+                val r = Facts.collect(this) { line -> appendLog(line) }
+                appendLog(if (r.success) "DONE: ${r.message}" else "FAILED: ${r.message}")
+            }
+        }
 
         applyButtons(busy = false)
         // Check things as soon as the app opens. (This is when the root prompt appears.)
@@ -98,6 +119,8 @@ class MainActivity : Activity() {
         btnStatus.isEnabled = !busy
         btnInstall.isEnabled = !busy && canInstall
         btnRestore.isEnabled = !busy && canRestore
+        btnUpdate.isEnabled = !busy
+        btnFacts.isEnabled = !busy
     }
 
     /** Adds a line to the progress log (safe to call from any thread). */

@@ -4,5 +4,7 @@
     <string name="btn_status">Status</string>
     <string name="btn_install">Install</string>
     <string name="btn_restore">Restore</string>
+    <string name="btn_update">Update</string>
+    <string name="btn_facts">Get facts</string>
     <string name="log_title">Progress</string>
 </resources>
