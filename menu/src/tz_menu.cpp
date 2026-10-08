@@ -1,4 +1,5 @@
 #include "tz_menu.h"
+#include <cfloat>
 #include "imgui.h"
 #include "integration.h"
 #include "menu_ui.h"
@@ -14,7 +15,15 @@ void TzMenu::frame() {
     input_.setMenuEnabled(settings_.menuEnabled);
 
     ControllerState pad;
-    if (Integration_ReadControllers(pad)) input_.update(pad, dt);   // no input available -> menu stays closed
+    const bool haveInput = Integration_ReadControllers(pad);
+    if (haveInput) input_.update(pad, dt);          // no input available -> menu stays closed
+
+    // Tell ImGui where the pointer is and whether A ("select") is pressed, like a mouse.
+    if (haveInput && input_.visible()) {
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddMousePosEvent(pad.pointerOnMenu ? pad.pointerX : -FLT_MAX, pad.pointerOnMenu ? pad.pointerY : -FLT_MAX);
+        io.AddMouseButtonEvent(0, input_.selectDown());
+    }
 
     const bool nowVisible = input_.visible();
     if (nowVisible != wasVisible_) {                                  // opened or closed this frame

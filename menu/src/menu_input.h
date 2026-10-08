@@ -8,6 +8,11 @@ struct ControllerState {
     float rightTrigger = 0.0f;
     bool  buttonA = false;       // true while A is held down
     bool  buttonB = false;       // true while B is held down
+
+    // Where the controller's pointing ray hits the menu, in menu pixels (0,0 = top-left of the menu).
+    // The INTEGRATION works this out (it needs the controller pose + where the menu floats). Not done yet.
+    float pointerX = 0.0f, pointerY = 0.0f;
+    bool  pointerOnMenu = false;
 };
 
 class MenuInput {
@@ -22,10 +27,15 @@ public:
     // both triggers + A for 3 seconds. (So switching it off can never lock you out.)
     void setMenuEnabled(bool on) { enabled_ = on; }
 
+    // A = "select" while the menu is open. True while A is held, BUT only after A has been let go
+    // once since the menu opened - so the very A click that opened the menu never presses a button.
+    bool selectDown() const { return visible_ && prevA_ && !waitForAReleaseAfterOpen_; }
+
 private:
     bool held(float value, bool wasHeld) const;
     bool visible_ = false, enabled_ = true;
     bool leftHeld_ = false, rightHeld_ = false;
     bool prevA_ = false, prevB_ = false;
     float holdSeconds_ = 0.0f;
+    bool waitForAReleaseAfterOpen_ = false;
 };

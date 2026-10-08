@@ -33,6 +33,16 @@ int main() {
     { MenuInput m; m.update(S(0.5f,0.5f,false,false), F); m.update(S(0.5f,0.5f,true,false), F);
       CHECK("half-pressed triggers never count", !m.visible()); }
 
+    std::printf("== A selects\n");
+    { MenuInput m; m.update(S(1,1,false,false), F); m.update(S(1,1,true,false), F);
+      CHECK("the A click that opened the menu does NOT select", m.visible() && !m.selectDown());
+      m.update(S(1,1,true,false), F); CHECK("...even while A is still held", !m.selectDown());
+      m.update(S(0,0,false,false), F); CHECK("A released: nothing selected", !m.selectDown());
+      m.update(S(0,0,true,false), F);  CHECK("A pressed again: selects", m.selectDown());
+      m.update(S(0,0,false,false), F); CHECK("A released: select ends", !m.selectDown());
+      m.update(S(0,0,true,false), F); m.close(); m.update(S(0,0,true,false), F);
+      CHECK("closed menu never selects", !m.selectDown()); }
+
     std::printf("== Menu Enabled = off (3-second safety hold)\n");
     { MenuInput m; m.setMenuEnabled(false);
       m.update(S(1,1,false,false), F); m.update(S(1,1,true,false), F);

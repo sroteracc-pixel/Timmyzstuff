@@ -37,3 +37,19 @@ Needs the real payload plus the 3 placeholders in `menu/src/integration_stubs.cp
 
 ## What to send me
 1. Status screenshot  2. Progress log  3. Any red build error  4. Whether root prompt appeared
+
+
+---
+# UPDATE: test checklist for the first payload (Stage A)
+Do these in order. Stop at the first problem and send me what you see.
+
+1. **Game starts normally BEFORE patching.** Open Gym Class, let it reach the main menu, close it.
+2. **Status in the patcher** should now say `Payload: [OK] ...` (the payload is inside the new APK). Install becomes available.
+3. **Install.** Read the Progress log. Good = "Backup saved and verified", then "Copying the payload", then SUCCESS.
+   Status should then say `Game library: patched` and `Backup: original saved`.
+4. **Start the game.** It should start and behave exactly like before. (There is NO menu yet - nothing visible changes.)
+   Optional proof: `adb logcat -s Timmyzstuff` shows the three lines listed in NEXT_STEPS.md.
+5. **Restore.** Press Restore. Status should say `original (not patched)` again.
+6. **Start the game again.** It should start normally.
+If step 4 fails (crash/black screen): close the game, open the patcher, press **Restore**, confirm step 6 works, and send me
+the logcat lines. Restore does not need the game to run.

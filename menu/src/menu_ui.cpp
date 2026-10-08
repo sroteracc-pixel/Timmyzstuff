@@ -99,6 +99,13 @@ void TzDrawMenu(MenuInput& input, Theme& theme, MenuSettings& settings, const st
         ImGui::TextUnformatted("Settings");
         ImGui::Separator();
         bool changed = false;
+
+        // Harmless self-test: proves the pointer + A "select" really reach the menu.
+        static int testClicks = 0;
+        if (ImGui::Button("Test button")) ++testClicks;
+        ImGui::SameLine();
+        ImGui::TextDisabled("clicked %d times", testClicks);
+        ImGui::Spacing();
         changed |= Toggle("Menu Enabled", &settings.menuEnabled, theme);
         if (!settings.menuEnabled) ImGui::TextDisabled("Off: open the menu by holding both triggers + A for 3 seconds.");
         changed |= Toggle("Show Menu Button", &settings.showMenuButton, theme);

@@ -16,6 +16,7 @@ bool MenuInput::update(const ControllerState& now, float dt) {
     prevA_ = now.buttonA;
     prevB_ = now.buttonB;
 
+    const bool wasVisible = visible_;
     if (!visible_) {
         const bool chordHeld = leftHeld_ && rightHeld_ && now.buttonA;
         if (enabled_) {
@@ -28,5 +29,9 @@ bool MenuInput::update(const ControllerState& now, float dt) {
     } else if (bClicked) {
         visible_ = false;                                                  // CLOSE: B (the X button calls close())
     }
+
+    // The A press that opened the menu must not also "select" something.
+    if (visible_ && !wasVisible) waitForAReleaseAfterOpen_ = true;
+    if (!now.buttonA) waitForAReleaseAfterOpen_ = false;
     return visible_;
 }
