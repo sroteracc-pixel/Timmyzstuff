@@ -9,7 +9,7 @@ pass=0; failn=0
 check() { if eval "$2"; then pass=$((pass+1)); echo "  PASS  $1"; else failn=$((failn+1)); echo "  FAIL  $1"; fi; }
 
 g++ -std=c++17 -shared -fPIC -fvisibility=hidden -I"$HERE/fake_jni" -I"$HERE/../src" -I"$HERE/../../menu/src" -DTZ_FAST_TEST \
-  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../../menu/src/menu_input.cpp" \
+  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" "$HERE/../../menu/src/menu_input.cpp" \
   -ldl -pthread -Wl,--version-script="$HERE/../exports.map" -o "$W/libmain.so" || exit 2
 cat > "$W/orig.cpp" <<'C'
 extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void*, void*) { return 0x00010006; }
@@ -21,7 +21,7 @@ cat > "$W/ovr.cpp" <<'C'
 static long endCalls = 0, beginCalls = 0, waitCalls = 0;
 extern "C" int ovrp_GetInitialized() { return 1; }
 extern "C" int ovrp_GetControllerState4(unsigned int, void* out) { unsigned char* p = (unsigned char*)out; for (int i = 0; i < 64; ++i) p[i] = 0; return 0; }
-extern "C" long ovrp_EndFrame4(long a, long b, long c, long d, long e, long f, long g, long h) { ++endCalls; return a * 1 + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8; }
+extern "C" long ovrp_EndFrame4(int a, long b, int c, long d) { ++endCalls; return a * 1 + b * 2 + c * 3 + d * 4; }
 extern "C" long ovrp_BeginFrame4(long a, long b) { ++beginCalls; return a + b; }
 extern "C" long ovrp_WaitToBeginFrame(long a) { ++waitCalls; return a * 10; }
 extern "C" long fake_end_calls() { return endCalls; }
@@ -52,8 +52,8 @@ int main(int, char** argv) {
   std::printf("RESULT=%d\n", f(nullptr, nullptr));
   long hostEnd = 0, bad = 0;
   for (int i = 0; i < 160; ++i) {                          // ~8 seconds of "frames"
-    long r = ((long(*)(long,long,long,long,long,long,long,long))t[0])(i, 2, 3, 4, 5, 6, 7, 8);
-    if (r != i + 4 + 9 + 16 + 25 + 36 + 49 + 64) ++bad;    // must equal what the real function returns
+    long r = ((long(*)(int,long,int,long))t[0])(i, 2, 3, 4);
+    if (r != i + 4 + 9 + 16) ++bad;    // must equal what the real function returns
     ++hostEnd;
     if (((long(*)(long,long))t[1])(i, 1) != i + 1) ++bad;
     if (((long(*)(long))t[2])(i) != i * 10) ++bad;
@@ -77,8 +77,9 @@ check "no memory addresses written (no 0x)" '! grep -q "0x" "$F"'
 check "every call still reached the REAL function with the right answer (BAD=0)" '[[ "$out" == *"BAD=0"* ]]'
 check "real function saw every call the host made" '( h=$(echo "$out" | sed -n "s/.*HOST_END=\([0-9]*\) REAL_END=\([0-9]*\).*/\1 \2/p"); set -- $h; [ "$1" = "$2" ] && [ "$1" -gt 100 ] )'
 check "watcher counted calls (EndFrame4 count > 0 in the file)" 'grep -E "frame watch ovrp_EndFrame4: installed, [1-9][0-9]* calls" "$F" >/dev/null'
+check "overlay tried to start and failed politely on a PC (no crash, game unaffected)" 'grep -q "overlay: init FAILED" "$F"'
 check "frames-per-second line is written" 'grep -q "^frames t=" "$F"'
-check "latest args are recorded as small numbers" 'grep -q "EndFrame4 latest args: [0-9]* 2 3 4 5 6 7 8" "$F"'
+check "latest args are recorded as small numbers" 'grep -q "EndFrame4 latest args: [0-9]* 2 3 4 " "$F"'
 check "still exports exactly JNI_OnLoad" '[ "$(nm -D --defined-only "$W/libmain.so" | wc -l)" = 1 ]'
 
 echo "== plugin never saves the addresses"
@@ -101,7 +102,6 @@ g++ -o "$W/host3" "$W/host3.cpp" -ldl
 out3=$(cd "$W" && LD_LIBRARY_PATH="$W" TZ_FACTS_DIR="$W/facts" "$W/host3" "$W/libmain.so" "$W/libOculusXRPlugin.so" 2>&1)
 check "game still starts normally" '[[ "$out3" == *"RESULT=65542"* ]]'
 check "honestly says NOT installed" 'grep -q "NOT installed" "$F"'
-check "diagnostic report ran and finished without crashing" 'grep -q "^diag" "$F" && grep -q "^done:" "$F"'
 cp -f "$F" /tmp/lastfacts.txt
 
 echo; echo "passed: $pass  failed: $failn"; [ "$failn" -eq 0 ]

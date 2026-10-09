@@ -40,7 +40,8 @@
 #include <vector>
 
 #include "menu_input.h"   // the open/close rules (pure C++, tested on a PC)
-#include "frame_stubs.h"  // counting doorways for ovrp_EndFrame4 / BeginFrame4 / WaitToBeginFrame
+#include "frame_stubs.h"
+#include "overlay.h"      // shows the menu picture in the headset (stage D2)  // counting doorways for ovrp_EndFrame4 / BeginFrame4 / WaitToBeginFrame
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -77,6 +78,7 @@ const int kSettleSeconds = 1;
 const int kBeatSeconds = 1;
 const int kWatchTrySeconds = 3;
 const int kWatchFirstSeconds = 1;
+const double kOverlayDelay = 0.3;
 const double kWatchEvery = 1.0;
 #else
 const int kWaitForLibSeconds = 600;   // wait up to 10 min for the game to load its VR library
@@ -84,6 +86,7 @@ const int kWaitForInitSeconds = 120;  // then up to 2 min for it to finish start
 const int kSampleMillis = 600 * 1000; // then watch the controllers for 10 minutes
 const int kSettleSeconds = 10;        // pause so the graphics drivers finish loading
 const int kBeatSeconds = 10;          // how often a "frames per second" line is written
+const double kOverlayDelay = 3.0;      // after the frame watcher is running, wait this long before creating the panel
 const int kWatchFirstSeconds = 8;      // wait for the game to finish setting up before the first search
 const double kWatchEvery = 10.0;       // each search reads the whole heap, so do it rarely
 const int kWatchTrySeconds = 90;      // keep looking for the plugin's function list this long
@@ -275,6 +278,18 @@ std::vector<MapRegion> readMaps() {
 
 bool gWatchPatched[3] = {false, false, false};
 
+// The doorway for ovrp_EndFrame4 (index 0). Same counting as the asm stub, then the overlay code
+// (which adds our menu panel to the layer list while the menu is open) calls the real function.
+extern "C" int tzEndFrame4Hook(int frame, const void* const* layers, int n, void* extra) {
+    FrameWatch* w = frameWatch(0);
+    *w->count = *w->count + 1;
+    w->args[0] = static_cast<uint64_t>(static_cast<unsigned>(frame));
+    w->args[1] = reinterpret_cast<uint64_t>(layers);
+    w->args[2] = static_cast<uint64_t>(static_cast<unsigned>(n));
+    w->args[3] = reinterpret_cast<uint64_t>(extra);
+    return tzoverlay::hookEndFrame4(frame, layers, n, extra);
+}
+
 // Only the program's own heap is touched: that is where the game's VR plugin keeps its table of
 // saved Meta function addresses (found by the stage D1c report). The plugin's own data, other
 // libraries, stacks and OUR OWN variables are never touched.
@@ -316,8 +331,10 @@ bool tryInstallWatches(void* ovr) {
         void* real = dlsym(ovr, w->name);
         if (!real) { all = false; continue; }
         *w->orig = reinterpret_cast<uint64_t>(real);           // set BEFORE patching, so the stub can always jump on
+        if (i == 0) tzoverlay::setRealEndFrame4(reinterpret_cast<uint64_t>(real));
+        void* doorway = (i == 0) ? reinterpret_cast<void*>(&tzEndFrame4Hook) : w->stub;
         std::vector<unsigned long> where;
-        const int n = patchHeapSlot(reinterpret_cast<uint64_t>(real), reinterpret_cast<uint64_t>(w->stub), &where);
+        const int n = patchHeapSlot(reinterpret_cast<uint64_t>(real), reinterpret_cast<uint64_t>(doorway), &where);
         if (n > 0) {
             gWatchPatched[i] = true;
             fact("frame watch %s: installed in %d heap slot(s), first at %lx", w->name, n, where.empty() ? 0UL : where[0]);
@@ -400,6 +417,30 @@ void writeFrameLine(const char* tag, double now, double sinceLast, const uint64_
     fact("%s", line);
 }
 
+// Writes down what the GAME itself hands to ovrp_EndFrame4 (its own layers), so the record layout can be
+// checked against real data. Read-only and crash-proof.
+void dumpGameLayers() {
+    FrameWatch* e = frameWatch(0);
+    const uint64_t arr = e->args[1];
+    const int n = static_cast<int>(e->args[2]);
+    fact("--- game layers: EndFrame4 latest call had %d layer(s), list at %s ---", n, arr ? "an address" : "NULL");
+    if (!arr || n < 1 || n > 8) return;
+    static unsigned char buf[0x1c0];
+    uint64_t ptrs[8] = {0};
+    if (!safeCopy(arr, reinterpret_cast<unsigned char*>(ptrs), sizeof(uint64_t) * n)) { fact("could not read the layer list"); return; }
+    for (int i = 0; i < n; ++i) {
+        std::memset(buf, 0, sizeof buf);
+        if (!safeCopy(ptrs[i], buf, sizeof buf)) { fact("layer %d: unreadable", i); continue; }
+        char hx[2 * 0x1c0 + 1];
+        hex(buf, sizeof buf, hx, sizeof hx);
+        int id, stage, vp[8]; float pose[7];
+        std::memcpy(&id, buf, 4); std::memcpy(&stage, buf + 4, 4); std::memcpy(vp, buf + 8, 32); std::memcpy(pose, buf + 40, 28);
+        fact("layer %d: id=%d stage=%d viewports=(%d,%d,%d,%d)(%d,%d,%d,%d) pose q=(%.2f %.2f %.2f %.2f) p=(%.2f %.2f %.2f)",
+             i, id, stage, vp[0], vp[1], vp[2], vp[3], vp[4], vp[5], vp[6], vp[7], pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], pose[6]);
+        fact("layer %d bytes=%s", i, hx);
+    }
+}
+
 void* probeMain(void*) {
     secondsSinceStart();                               // start the clock
     std::string where;
@@ -407,7 +448,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D1: input probe + frame watcher) - draws nothing");
+    fact("Timmyzstuff facts (stage D2: input probe + frame watcher + menu panel)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     writeLoadedLibraries("at start");
@@ -488,6 +529,8 @@ void* probeMain(void*) {
     const double watchGiveUp = last + kWatchTrySeconds;
     bool watchesDone = false;
     bool diag2 = false;
+    int overlayTries = 0;
+    double overlayNextTry = 0;
     uint64_t lastCounts[3] = {0, 0, 0};
     double lastBeatTime = last;
     const double endAt = last + kSampleMillis / 1000.0;
@@ -507,8 +550,20 @@ void* probeMain(void*) {
         const bool bPressed = pad.buttonB && !(*reinterpret_cast<const unsigned int*>(prev + 4) & 0x2u);
         const bool visible = menu.update(pad, static_cast<float>(now - last));
         last = now;
-        if (visible && !wasVisible) { ++opens; fact("t=%.2f MENU OPEN  (#%d) - both triggers + A", now, opens); }
-        if (!visible && wasVisible) { ++closes; fact("t=%.2f MENU CLOSE (#%d) - B pressed", now, closes); }
+        if (visible && !wasVisible) {
+            ++opens; fact("t=%.2f MENU OPEN  (#%d) - both triggers + A", now, opens);
+            float head[7] = {0, 0, 0, 1, 0, 1.6f, 0};            // used only if the pose call fails
+            bool gotHead = false;
+            if (poseFn) {
+                alignas(16) unsigned char pb[256]; std::memset(pb, 0, sizeof pb);
+                const int prc = poseFn(-1, -1, 0, pb);               // node 0 = head (confirmed in stage C)
+                if (prc >= 0) { std::memcpy(head, pb, 16); std::memcpy(head + 4, pb + 16, 12); gotHead = true; }
+            }
+            if (opens <= 6) fact("overlay: head %s q=(%.2f %.2f %.2f %.2f) p=(%.2f %.2f %.2f) -> panel %s", gotHead ? "pose" : "pose UNAVAILABLE, using a default",
+                                 head[0], head[1], head[2], head[3], head[4], head[5], head[6], tzoverlay::ready() ? "shown" : "NOT READY, nothing to show");
+            tzoverlay::show(head);
+        }
+        if (!visible && wasVisible) { ++closes; fact("t=%.2f MENU CLOSE (#%d) - B pressed", now, closes); tzoverlay::hide(); }
         wasVisible = visible;
         if (aPressed) poseSnapshot("A pressed");
         else if (bPressed) poseSnapshot("B pressed");
@@ -525,18 +580,30 @@ void* probeMain(void*) {
         if (!watchesDone && now >= nextWatchTry && now < watchGiveUp) {
             watchesDone = tryInstallWatches(ovr);
             nextWatchTry = now + kWatchEvery;
-            if (watchesDone) fact("t=%.1f all frame watches are installed", now);
+            if (watchesDone) { fact("t=%.1f all frame watches are installed", now); overlayNextTry = now + kOverlayDelay; }
         }
         if (!diag2 && now >= watchGiveUp) {
             diag2 = true;
             for (int i = 0; i < frameWatchCount(); ++i)
                 if (!gWatchPatched[i]) fact("frame watch %s: NOT installed after %d seconds of searching", frameWatch(i)->name, kWatchTrySeconds);
-            diagnoseWatches(ovr, "search ended");
         }
+        // ---- stage D2: create the menu panel once the frame watcher is running
+        if (watchesDone && overlayTries < 2 && now >= overlayNextTry) {
+            if (overlayTries == 0) dumpGameLayers();
+            ++overlayTries;
+            fact("--- overlay: creating the menu panel (try %d) at t=%.1f ---", overlayTries, now);
+            const bool okOverlay = tzoverlay::init(ovr, fact);
+            fact("overlay: init %s", okOverlay ? "OK" : "FAILED");
+            overlayNextTry = now + 15.0;
+        }
+        tzoverlay::tick(now, fact);
         if (now >= nextBeat) {
             fact("t=%.0f still sampling (%ld samples, menu opened %d times, closed %d times)", now, samples, opens, closes);
             if (gWatchPatched[0] || gWatchPatched[1] || gWatchPatched[2]) {
                 writeFrameLine("frames", now, now - lastBeatTime, lastCounts);
+                { const tzoverlay::Stats st = tzoverlay::stats();
+                  fact("overlay: ready=%d menuVisible=%d frames-with-panel=%llu lastRc=%d firstBadRc=%d broken=%d",
+                       tzoverlay::ready() ? 1 : 0, tzoverlay::visible() ? 1 : 0, (unsigned long long)st.withOverlay, st.lastRc, st.firstBadRc, st.broken ? 1 : 0); }
                 for (int i = 0; i < frameWatchCount(); ++i) lastCounts[i] = *frameWatch(i)->count;
                 lastBeatTime = now;
             }
@@ -544,7 +611,6 @@ void* probeMain(void*) {
         }
         usleep(20 * 1000);                              // 50 samples per second
     }
-    if (!diag2) { diag2 = true; diagnoseWatches(ovr, "end of sampling"); }
     fact("summary: menu opened %d times, closed %d times", opens, closes);
     for (int i = 0; i < frameWatchCount(); ++i)
         fact("frame watch %s: %s, %llu calls counted in total", frameWatch(i)->name, gWatchPatched[i] ? "installed" : "NOT installed (the plugin never saved that address)", static_cast<unsigned long long>(*frameWatch(i)->count));
@@ -566,7 +632,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D1: pass-through + input probe + frame watcher)");
+    logf_("payload loaded (stage D2: pass-through + input probe + frame watcher + menu panel)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {
@@ -590,6 +656,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
         return JNI_VERSION_1_6;
     }
 
+    tzoverlay::setJavaVM(vm);
     const jint result = realOnLoad(vm, reserved);
     logf_("original JNI_OnLoad returned 0x%x", static_cast<unsigned>(result));
     if (result > 0) startProbe();                          // only after the game started fine
