@@ -100,5 +100,7 @@ g++ -o "$W/host3" "$W/host3.cpp" -ldl
 out3=$(cd "$W" && LD_LIBRARY_PATH="$W" TZ_FACTS_DIR="$W/facts" "$W/host3" "$W/libmain.so" "$W/libOculusXRPlugin.so" 2>&1)
 check "game still starts normally" '[[ "$out3" == *"RESULT=65542"* ]]'
 check "honestly says NOT installed" 'grep -q "NOT installed" "$F"'
+check "diagnostic report ran and finished without crashing" 'grep -q "^diag" "$F" && grep -q "^done:" "$F"'
+cp -f "$F" /tmp/lastfacts.txt
 
 echo; echo "passed: $pass  failed: $failn"; [ "$failn" -eq 0 ]

@@ -25,6 +25,7 @@
 #include <dlfcn.h>
 #include <jni.h>
 #include <pthread.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
@@ -308,8 +309,27 @@ bool tryInstallWatches(void* ovr) {
 }
 
 
+
+// Copies memory without ever crashing: the kernel does the read through a pipe and just says "no" for a bad address.
+bool safeCopy(uintptr_t from, unsigned char* to, size_t n) {
+    static int pfd[2] = {-1, -1};
+    if (pfd[0] < 0) {
+        if (pipe(pfd) != 0) { pfd[0] = pfd[1] = -1; return false; }
+#ifdef F_SETPIPE_SZ
+        fcntl(pfd[1], F_SETPIPE_SZ, 1 << 17);
+#endif
+    }
+    if (n > 65536) n = 65536;
+    const ssize_t w = write(pfd[1], reinterpret_cast<const void*>(from), n);
+    if (w != static_cast<ssize_t>(n)) { unsigned char d[4096]; if (w > 0) { ssize_t left = w; while (left > 0) { ssize_t r = read(pfd[0], d, left > 4096 ? 4096 : left); if (r <= 0) break; left -= r; } } return false; }
+    size_t got = 0;
+    while (got < n) { const ssize_t r = read(pfd[0], to + got, n - got); if (r <= 0) return false; got += r; }
+    return true;
+}
+
 // Read-only report: where are the plugin's regions, and where does each Meta address appear in memory?
 void diagnoseWatches(void* ovr, const char* when) {
+    static unsigned char chunk[65536];
     const std::vector<MapRegion> maps = readMaps();
     fact("diag (%s): plugin and neighbouring regions:", when);
     int shown = 0;
@@ -328,12 +348,25 @@ void diagnoseWatches(void* ovr, const char* when) {
         int found = 0;
         for (const MapRegion& r : maps) {
             if (!r.rw || r.end - r.start > (256UL << 20)) continue;
-            if (r.path.compare(0, 5, "/dev/") == 0) continue;
-            for (uintptr_t p = (r.start + 7) & ~static_cast<uintptr_t>(7); p + 8 <= r.end; p += 8) {
-                if (*reinterpret_cast<volatile uint64_t*>(p) == target && found < 8) {
-                    fact("diag %s: address %llx found at %lx in region %lx-%lx name='%s'", w->name,
-                         (unsigned long long)target, (unsigned long)p, (unsigned long)r.start, (unsigned long)r.end, r.path.c_str());
-                    ++found;
+            if (r.path.compare(0, 5, "/dev/") == 0 || r.path.find("dmabuf") != std::string::npos ||
+                r.path.find("kgsl") != std::string::npos || r.path.find("ashmem") != std::string::npos ||
+                r.path.find("memfd") != std::string::npos) continue;
+            for (uintptr_t c = r.start; c < r.end; c += sizeof(chunk)) {
+                size_t n = r.end - c < sizeof(chunk) ? static_cast<size_t>(r.end - c) : sizeof(chunk);
+                if (!safeCopy(c, chunk, n)) continue;           // unreadable piece: skip, never crash
+                for (size_t o = 0; o + 8 <= n; o += 8) {
+                    uint64_t v; std::memcpy(&v, chunk + o, 8);
+                    if (v == target && found < 8) {
+                        fact("diag %s: address %llx found at %lx in region %lx-%lx name='%s'", w->name,
+                             (unsigned long long)target, (unsigned long)(c + o), (unsigned long)r.start, (unsigned long)r.end, r.path.c_str());
+                        uint64_t nb[8] = {0};
+                        const uintptr_t from = (c + o >= 24) ? c + o - 24 : c + o;
+                        if (safeCopy(from, reinterpret_cast<unsigned char*>(nb), sizeof nb))
+                            fact("diag   neighbours (8 slots from -3): %llx %llx %llx %llx %llx %llx %llx %llx",
+                                 (unsigned long long)nb[0], (unsigned long long)nb[1], (unsigned long long)nb[2], (unsigned long long)nb[3],
+                                 (unsigned long long)nb[4], (unsigned long long)nb[5], (unsigned long long)nb[6], (unsigned long long)nb[7]);
+                        ++found;
+                    }
                 }
             }
         }
@@ -509,6 +542,7 @@ void* probeMain(void*) {
         }
         usleep(20 * 1000);                              // 50 samples per second
     }
+    if (!diag2) { diag2 = true; diagnoseWatches(ovr, "end of sampling"); }
     fact("summary: menu opened %d times, closed %d times", opens, closes);
     for (int i = 0; i < frameWatchCount(); ++i)
         fact("frame watch %s: %s, %llu calls counted in total", frameWatch(i)->name, gWatchPatched[i] ? "installed" : "NOT installed (the plugin never saved that address)", static_cast<unsigned long long>(*frameWatch(i)->count));
