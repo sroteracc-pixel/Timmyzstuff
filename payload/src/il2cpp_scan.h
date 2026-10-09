@@ -61,6 +61,10 @@ struct Options {
     uintptr_t libBase = 0;        // where libil2cpp.so is mapped (only used when the system cannot tell which library an address is in)
     bool searchMemory = true;     // look for the running copies of the important classes and print their field values
     int maxSeconds = 90;          // the memory search stops after this long
+    int stallSeconds = 10;        // ... and is given up on when it makes no progress at all for this long (a stuck read)
+    // only for the PC tests (0 = off): pretend the memory read gets stuck after this many chunks / make the copy pipe this small
+    int testHangAfterChunks = 0;
+    size_t testPipeBytes = 0;
 };
 
 struct Summary {
@@ -70,8 +74,12 @@ struct Summary {
     int liveClasses = 0;          // important classes that were looked for in memory
     int liveObjects = 0;          // running copies found (and printed)
     unsigned long long memoryBytes = 0;   // how much memory was read during the search
+    bool memoryStuck = false;     // the memory search got stuck and was given up on (the class lists are still good)
     std::string error;
 };
+
+// Which step the scan is in right now (a short text; "finished" at the end). Safe to call from another thread.
+const char* currentStep();
 
 // Runs the scan.
 Summary run(const Api& api, const Options& options, LogFn log);

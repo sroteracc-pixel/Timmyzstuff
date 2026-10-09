@@ -32,17 +32,25 @@ connection exists.
 | High Gravity | 0% - 90% | 5% | 0% |
 
 ## The scan (how we get real game code without guessing)
-1. Menu -> Movement -> **Scan game code** (stage D5 takes up to about a minute).
+1. Menu -> Movement -> **Scan game code**. "Scanning..." shows from the moment you click - that is normal.
+   It should end in about 10-60 seconds with **"Scan done"** (or "Scan failed"). The menu never stays on "Scanning" for more than about 4 minutes.
 2. In the patcher press **Get facts**, send me the file.
 What the file now contains (read-only, nothing in the game is changed):
 - an INDEX line for every class of the game's own code whose name looks like movement / player / character / parameters;
 - the full list of fields and methods of the important classes (MobilePlayerLocomotion, MobileVerticalMotion, ...),
-  with where each method's code starts inside libil2cpp.so (`rva=`);
+  with where each method's code starts inside libil2cpp.so (`rva=`) - confirmed on the real game (876 method locations found);
+- progress lines ("scan: step 4 of 6 ...") so I can see exactly how far it got;
 - the LIVE values: the scan looks through the game's memory for the running copy of those classes and writes down what
   their fields hold right now (speed, jump numbers, gravity ...). That tells me which field is the real speed/jump.
+  If the game has more than one copy (for example other players), only the fields that differ are listed for the extra copies.
 
-What the first real scan (stage D4) showed: the game's own walking/jumping class is `MobilePlayerLocomotion`
-(it has SetJumpHeight, SetMaxJumpSpeed, SetJumpAcceleration ... and a vertical-motion helper). Its method locations came
-out as 0 (a bug in the first version; fixed in D5, unverified on the headset until you send the next file).
+What went wrong with the second real scan (stage D5): the class lists were written, then the scan went silent and never said "done".
+Most likely cause (reproduced on a PC, NOT proven on the headset): the memory search wrote 64 KB at a time into a pipe; if the
+system gave us a smaller pipe, that write waits forever. Stage D5b fixes it three ways:
+- the pipe is never waited on (non-blocking), its real size is asked for and respected, and it is tested before use;
+- the memory search runs on its own thread; if it makes no progress for 10 seconds the scan gives up on it, says WHERE it was stuck
+  ("MEMORY SEARCH STUCK ... region N ...") and still finishes with "Scan done" (the class lists are complete);
+- a second guard around the whole scan: after about 4 minutes it writes "GAVE UP waiting ... still in step ..." and the menu says "Scan failed".
+Tested only on a PC with a pretend game (tiny pipe, frozen read, frozen runtime). Not yet tried on the headset.
 
 If the game closes while scanning, tell me.

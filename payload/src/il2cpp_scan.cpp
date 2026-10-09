@@ -3,16 +3,21 @@
 
 #include <dlfcn.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <time.h>
 #include <unistd.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -23,6 +28,7 @@ namespace {
 
 // ---- limits (the facts file must stay a size you can send)
 const int kMaxLines = 7000;
+const int kReservedLines = 80;       // always kept free for the important summary lines (live values, stuck / done messages)
 const int kMaxPriorityDetail = 40;     // important classes written out in full (no field / method limit)
 const int kMaxOtherDetail = 70;        // other movement-ish classes written out (with limits)
 const int kMaxFieldsPerClass = 60;
@@ -72,15 +78,23 @@ bool oursAssembly(const std::string& n) { return startsWith(n, "Assembly-CSharp"
 class Out {
 public:
     explicit Out(LogFn log) : log_(log) {}
+    // an ordinary line: dropped once the file is nearly full
     void line(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
+        if (lines_ >= kMaxLines - kReservedLines) return;
+        char b[1024];
+        va_list ap; va_start(ap, fmt); std::vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
+        put(b);
+    }
+    // an important line (headers, summaries, "stuck", "DONE"): still written when the ordinary lines have used up their room
+    void key(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
         if (lines_ >= kMaxLines) return;
         char b[1024];
         va_list ap; va_start(ap, fmt); std::vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
-        log_("%s", b);                 // never use game text as a format string
-        ++lines_;
+        put(b);
     }
-    bool full() const { return lines_ >= kMaxLines; }
+    bool full() const { return lines_ >= kMaxLines - kReservedLines; }
 private:
+    void put(const char* b) { log_("%s", b); ++lines_; }       // never use game text as a format string
     LogFn log_; int lines_ = 0;
 };
 
@@ -122,27 +136,80 @@ void listThreads(Out& out) {
 }
 
 // ---- crash-proof memory reads (the kernel says "no" for a bad address instead of the program crashing)
-bool pipeCopy(uintptr_t from, unsigned char* to, size_t n) {
-    static int pfd[2] = {-1, -1};
-    if (pfd[0] < 0) {
-        if (pipe(pfd) != 0) { pfd[0] = pfd[1] = -1; return false; }
+// The memory is written into a pipe (the kernel checks every address) and read back out of it.
+// IMPORTANT (found with the second real scan, which hung): a pipe can be SMALLER than we ask for. A write that is bigger than
+// the pipe waits for a reader that never comes, and the thread is stuck for good. So: both ends never wait (O_NONBLOCK),
+// the real pipe size is asked for and never exceeded, and the pipe is tested once before it is used.
+class CopyPipe {
+public:
+    // `scratch` (optional, kChunk bytes) lets open() also test a full-size copy.
+    bool open(size_t askedBytes, unsigned char* scratch) {
+        int p[2];
+        if (pipe(p) != 0) { err_ = errno; return false; }
+        rd_ = p[0]; wr_ = p[1];
+        fcntl(rd_, F_SETFL, fcntl(rd_, F_GETFL, 0) | O_NONBLOCK);
+        fcntl(wr_, F_SETFL, fcntl(wr_, F_GETFL, 0) | O_NONBLOCK);
 #ifdef F_SETPIPE_SZ
-        fcntl(pfd[1], F_SETPIPE_SZ, 1 << 17);
+        fcntl(wr_, F_SETPIPE_SZ, static_cast<int>(askedBytes ? askedBytes : (1u << 17)));     // may be refused: then we use what we got
+#else
+        (void)askedBytes;
 #endif
+        long sz = 0;
+#ifdef F_GETPIPE_SZ
+        sz = fcntl(wr_, F_GETPIPE_SZ);
+#endif
+        if (sz < 4096) sz = 4096;                                      // unknown: assume one page
+        pipeBytes_ = static_cast<size_t>(sz);
+        cap_ = pipeBytes_ < kChunk ? pipeBytes_ : kChunk;
+        cap_ &= ~static_cast<size_t>(4095);
+        if (cap_ < 4096) cap_ = 4096;
+        // self-test with our own memory: a small copy that must come back unchanged, then (if given) a full-size one
+        unsigned char a[256], b[256];
+        for (int i = 0; i < 256; ++i) { a[i] = static_cast<unsigned char>(i * 7 + 3); b[i] = 0; }
+        bool ok = copy(reinterpret_cast<uintptr_t>(a), b, sizeof a) && std::memcmp(a, b, sizeof a) == 0;
+        if (ok && scratch) ok = copy(reinterpret_cast<uintptr_t>(scratch), scratch, cap_);
+        trouble_ = 0;                                                  // the self-test does not count
+        if (!ok) { close(); return false; }
+        return true;
     }
-    if (n == 0 || n > kChunk) return false;
-    const ssize_t w = write(pfd[1], reinterpret_cast<const void*>(from), n);
-    if (w != static_cast<ssize_t>(n)) {                       // something in the range could not be read: throw away what was copied
-        unsigned char d[4096];
-        ssize_t left = w;
-        while (left > 0) { const ssize_t r = read(pfd[0], d, left > 4096 ? 4096 : static_cast<size_t>(left)); if (r <= 0) break; left -= r; }
-        return false;
+    void close() { if (rd_ >= 0) ::close(rd_); if (wr_ >= 0) ::close(wr_); rd_ = wr_ = -1; }
+    size_t chunk() const { return cap_; }               // the biggest copy that fits the pipe
+    size_t pipeBytes() const { return pipeBytes_; }
+    int trouble() const { return trouble_; }            // copies that failed for a reason other than "bad address"
+    int lastErrno() const { return err_; }
+
+    // Copies n bytes from address `from` to `to`. False if any byte could not be read (nothing is promised about `to` then).
+    bool copy(uintptr_t from, unsigned char* to, size_t n) {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (rd_ < 0 || n == 0 || n > cap_) return false;
+        ssize_t w;
+        do { w = write(wr_, reinterpret_cast<const void*>(from), n); } while (w < 0 && errno == EINTR);
+        if (w != static_cast<ssize_t>(n)) {
+            if (w < 0 && errno != EFAULT) { ++trouble_; err_ = errno; }
+            drain();                                                    // something in the range could not be read: throw away what was copied
+            return false;
+        }
+        size_t got = 0;
+        while (got < n) {
+            const ssize_t r = read(rd_, to + got, n - got);
+            if (r < 0 && errno == EINTR) continue;
+            if (r <= 0) { ++trouble_; err_ = r < 0 ? errno : 0; drain(); return false; }
+            got += static_cast<size_t>(r);
+        }
+        return true;
     }
-    size_t got = 0;
-    while (got < n) { const ssize_t r = read(pfd[0], to + got, n - got); if (r <= 0) return false; got += static_cast<size_t>(r); }
-    return true;
+private:
+    void drain() { unsigned char d[4096]; for (int i = 0; i < 64; ++i) { const ssize_t r = read(rd_, d, sizeof d); if (r <= 0) break; } }
+    int rd_ = -1, wr_ = -1; size_t cap_ = 4096, pipeBytes_ = 4096; int trouble_ = 0, err_ = 0; std::mutex mu_;
+};
+
+CopyPipe& pointerPipe() {                  // the small reads of the code step (8 bytes at a time); the memory search has its own pipe
+    static CopyPipe p; static bool tried = false, ok = false;
+    if (!tried) { tried = true; ok = p.open(0, nullptr); }
+    static CopyPipe none;                  // never opened: every copy on it just says "no"
+    return ok ? p : none;
 }
-bool readPtr(uintptr_t from, uint64_t* out) { return pipeCopy(from, reinterpret_cast<unsigned char*>(out), 8); }
+bool readPtr(uintptr_t from, uint64_t* out) { return pointerPipe().copy(from, reinterpret_cast<unsigned char*>(out), 8); }
 
 // ---- where does a method's code live? (the system knows which library an address is in)
 enum PtrKind { P_NONE = 0, P_IL2CPP = 1, P_OTHERLIB = 2, P_OUTSIDE = 3 };
@@ -256,7 +323,7 @@ bool regionWanted(const MapEntry& r) {
     if (r.path.empty() || r.path == "[heap]") return true;
     if (startsWith(r.path, "[anon:")) {
         if (r.path.find("stack") != std::string::npos || r.path.find("guard") != std::string::npos || r.path.find(".bss") != std::string::npos ||
-            r.path.find("signal") != std::string::npos) return false;
+            r.path.find("signal") != std::string::npos || r.path.find("dalvik") != std::string::npos) return false;     // (the Java heap holds no Unity objects)
         return true;
     }
     return false;
@@ -264,6 +331,8 @@ bool regionWanted(const MapEntry& r) {
 double nowSeconds() { timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) / 1e9; }
 
 alignas(8) unsigned char gChunk[kChunk];      // the copy buffer for the memory search (its own memory is never searched)
+std::atomic<bool> gSearchBusy{false};         // one memory search at a time (a stuck one keeps this set and keeps using gChunk)
+std::atomic<const char*> gStep{"not started"};
 
 // the class pointer is kept inverted, so a leftover copy in freed memory can never look like a running object
 struct ClassRef {
@@ -274,6 +343,28 @@ struct ClassRef {
 struct AsmRef { std::string name; bool skip, ours; };
 struct LivePlan { uint64_t klassInv; std::string full; bool unityObject; int size; std::vector<FieldPlan> fields; };   // klassInv = ~klass, so our own lists never look like a live object
 struct LiveObject { int plan; uintptr_t addr; std::string where; std::vector<unsigned char> bytes; };
+
+// ---- the memory search runs on its OWN thread, so a read that never returns cannot freeze the scan:
+// the scan thread watches a heartbeat and gives up on the search if it stops.
+struct PlanLite { uint64_t klassInv; bool unityObject; int size; };
+struct Cand { int plan; uintptr_t addr; int region; };
+struct SearchJob {
+    // inputs (set before the thread starts, never changed afterwards)
+    std::vector<PlanLite> plans;
+    std::vector<MapEntry> maps;
+    int maxSeconds = 90, testHangAfterChunks = 0; size_t testPipeBytes = 0;
+    // progress (the search thread writes, the scan thread reads)
+    std::atomic<unsigned> heartbeat{0};
+    std::atomic<unsigned long> region{0}, regionsRead{0};
+    std::atomic<unsigned long long> bytes{0};
+    std::atomic<int> stage{0};                 // 0 starting, 1 reading memory, 2 checking the hits, 3 finished
+    std::atomic<bool> done{false};
+    // results (only to be looked at after done == true)
+    bool timedOut = false, pipeFailed = false; size_t chunkBytes = 0, pipeBytes = 0; int pipeTrouble = 0, pipeErrno = 0;
+    int cands = 0, rejMonitor = 0, rejCached = 0, rejUnreadable = 0; double seconds = 0;
+    std::vector<int> candidatesPer, acceptedPer;
+    std::vector<LiveObject> found;
+};
 
 bool isUnityObjectClass(const Api& api, void* klass) {
     int guard = 0;
@@ -303,6 +394,100 @@ void addInstanceFields(const Api& api, void* klass, const std::string& owner, st
         p.kind = kindOf(api, type, p.typeName, &p.size);
         plan->push_back(p);
     }
+}
+
+
+// The memory search itself. It runs on its own thread (see run()). Everything it touches is in `j` or in gChunk.
+void searchMemory(SearchJob& j) {
+    struct Finish { SearchJob& j; double t0; ~Finish() { j.seconds = nowSeconds() - t0; j.stage.store(3); j.done.store(true); gSearchBusy.store(false); } } finish{j, nowSeconds()};
+    const double t0 = finish.t0;
+    j.candidatesPer.assign(j.plans.size(), 0); j.acceptedPer.assign(j.plans.size(), 0);
+    CopyPipe pipe;
+    if (!pipe.open(j.testPipeBytes, gChunk)) { j.pipeFailed = true; j.pipeErrno = pipe.lastErrno(); return; }
+    j.chunkBytes = pipe.chunk(); j.pipeBytes = pipe.pipeBytes();
+
+    uint32_t hi[kMaxLiveTargets]; int nhi = 0;
+    for (const PlanLite& p : j.plans) { if (nhi < kMaxLiveTargets) hi[nhi++] = static_cast<uint32_t>((~p.klassInv) >> 32); }
+    std::vector<Cand> cands;
+    const uintptr_t bufLo = reinterpret_cast<uintptr_t>(gChunk);
+    unsigned chunks = 0;
+    j.stage.store(1);
+
+    auto scanBytes = [&](const unsigned char* buf, size_t n, uintptr_t base, int region) {
+        const uint64_t* words = reinterpret_cast<const uint64_t*>(buf);
+        for (size_t o = 0; o < n / 8; ++o) {
+            const uint64_t v = words[o];
+            const uint32_t top = static_cast<uint32_t>(v >> 32);
+            bool near = false;
+            for (int h = 0; h < nhi; ++h) if (hi[h] == top) { near = true; break; }
+            if (!near) continue;
+            for (size_t t = 0; t < j.plans.size(); ++t)
+                if (~v == j.plans[t].klassInv && static_cast<int>(cands.size()) < kMaxCandidates) cands.push_back({static_cast<int>(t), base + o * 8, region});
+        }
+    };
+
+    for (size_t ri = 0; ri < j.maps.size() && !j.timedOut; ++ri) {
+        const MapEntry& r = j.maps[ri];
+        if (!regionWanted(r) || (bufLo >= r.start && bufLo < r.end)) continue;
+        j.region.store(ri); j.regionsRead.fetch_add(1);
+        for (uintptr_t c = r.start; c < r.end; c += pipe.chunk()) {
+            if (nowSeconds() - t0 >= j.maxSeconds) { j.timedOut = true; break; }
+            j.heartbeat.fetch_add(1);
+            if (j.testHangAfterChunks > 0 && static_cast<int>(chunks) >= j.testHangAfterChunks) { for (;;) sleep(1000); }      // PC test only: a read that never returns
+            const size_t n = r.end - c < pipe.chunk() ? static_cast<size_t>(r.end - c) : pipe.chunk();
+            if (pipe.copy(c, gChunk, n)) { j.bytes.fetch_add(n); scanBytes(gChunk, n, c, static_cast<int>(ri)); }
+            else if (n > 4096) {                                  // part of the chunk can not be read: keep the pages that can
+                for (size_t p = 0; p < n; p += 4096) {
+                    const size_t m = n - p < 4096 ? n - p : 4096;
+                    if (pipe.copy(c + p, gChunk + p, m)) { j.bytes.fetch_add(m); scanBytes(gChunk + p, m, c + p, static_cast<int>(ri)); }
+                }
+            }
+            if ((++chunks & 31) == 0) usleep(1000);              // be gentle: the game keeps running while we read
+        }
+    }
+
+    j.stage.store(2);
+    j.cands = static_cast<int>(cands.size());
+    for (const Cand& cd : cands) {
+        j.heartbeat.fetch_add(1);
+        ++j.candidatesPer[cd.plan];
+        const PlanLite& p = j.plans[cd.plan];
+        unsigned char hdr[24];
+        if (!pipe.copy(cd.addr, hdr, sizeof hdr)) { ++j.rejUnreadable; continue; }
+        uint64_t monitor, cached; std::memcpy(&monitor, hdr + 8, 8); std::memcpy(&cached, hdr + 16, 8);
+        if (monitor != 0) { ++j.rejMonitor; continue; }
+        if (p.unityObject && (cached == 0 || (cached & 7) != 0)) { ++j.rejCached; continue; }     // a destroyed or fake object
+        ++j.acceptedPer[cd.plan];
+        if (j.acceptedPer[cd.plan] > kMaxLivePrinted) continue;
+        LiveObject lo; lo.plan = cd.plan; lo.addr = cd.addr;
+        size_t got = 0;                                       // the whole object if it can be read, else a smaller front part
+        for (size_t want = std::min(static_cast<size_t>(p.size), pipe.chunk()); want >= 16 && got == 0; want /= 2) {
+            lo.bytes.assign(want, 0);
+            if (pipe.copy(cd.addr, lo.bytes.data(), want)) got = want;
+        }
+        if (got == 0) { --j.acceptedPer[cd.plan]; ++j.rejUnreadable; continue; }
+        const MapEntry& reg = j.maps[cd.region];
+        lo.where = reg.path.empty() ? "anonymous memory" : reg.path;
+        j.found.push_back(lo);
+    }
+    j.pipeTrouble = pipe.trouble(); j.pipeErrno = pipe.lastErrno();
+}
+
+void* searchThread(void* arg) {
+    std::shared_ptr<SearchJob>* holder = static_cast<std::shared_ptr<SearchJob>*>(arg);
+    std::shared_ptr<SearchJob> job = *holder;
+    delete holder;
+    searchMemory(*job);
+    return nullptr;
+}
+
+std::string describeRegion(const SearchJob& j, unsigned long ri) {
+    if (ri >= j.maps.size()) return "unknown region";
+    const MapEntry& r = j.maps[ri];
+    char b[300];
+    std::snprintf(b, sizeof b, "region %lu of %lu: %llu KB, %s", ri + 1, static_cast<unsigned long>(j.maps.size()), static_cast<unsigned long long>((r.end - r.start) >> 10),
+                  r.path.empty() ? "anonymous memory" : r.path.c_str());
+    return b;
 }
 
 }  // namespace
@@ -364,6 +549,8 @@ bool loadApi(void* lib, Api* out, std::string* missing) {
     return ok;
 }
 
+const char* currentStep() { return gStep.load(); }
+
 Summary run(const Api& api, uintptr_t libBase, LogFn log) {
     Options o; o.libBase = libBase;
     return run(api, o, log);
@@ -372,6 +559,7 @@ Summary run(const Api& api, uintptr_t libBase, LogFn log) {
 Summary run(const Api& api, const Options& opt, LogFn log) {
     Summary sum;
     Out out(log);
+    gStep.store("starting");
     out.line("--- game code scan (read-only) ---");
     listThreads(out);
     void* domain = api.domain_get();
@@ -382,6 +570,7 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     if (!assemblies || asmCount == 0) { sum.error = "no assemblies reported"; out.line("scan: %s", sum.error.c_str()); if (thread && api.thread_detach) api.thread_detach(thread); return sum; }
 
     // ---- 1. list every assembly, remember every class of the ones we care about
+    gStep.store("1 of 6: listing the assemblies and classes");
     std::vector<AsmRef> asms;
     std::vector<ClassRef> classes;
     for (size_t a = 0; a < asmCount; ++a) {
@@ -411,6 +600,7 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
 
     // ---- 2. index: one line per class that looks like movement / player / character / parameters ...
     int indexLines = 0;
+    gStep.store("2 of 6: class-name index");
     out.line("--- index of class names (the game's own code + Normal.*) ---");
     for (const ClassRef& c : classes) {
         const AsmRef& ar = asms[c.asmIndex];
@@ -427,6 +617,8 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     }
 
     // ---- 3. full detail: important classes first (no limits), then the other movement-ish ones
+    gStep.store("3 of 6: fields and methods of the important classes");
+    out.line("scan: step 3 of 6: fields and methods of the important classes");
     std::vector<char> detailed(classes.size(), 0);
     int priorityCount = 0, otherCount = 0;
     unsigned noneCount = 0, ilCount = 0, otherLibCount = 0, outsideCount = 0;
@@ -485,6 +677,8 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     out.line("scan: method code places: in-libil2cpp=%u other-library=%u outside-libraries=%u none=%u", ilCount, otherLibCount, outsideCount, noneCount);
 
     // ---- 4. single lines for speed / jump / gravity fields and for classes that hold a Rigidbody / CharacterController
+    gStep.store("4 of 6: speed / jump / gravity field lines");
+    out.line("scan: step 4 of 6: single lines for speed / jump / gravity fields");
     int fieldHits = 0, typeHits = 0;
     for (size_t i = 0; i < classes.size(); ++i) {
         const ClassRef& c = classes[i];
@@ -507,7 +701,11 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
         }
     }
 
+    out.line("scan: step 4 done: field-hits=%d type-hits=%d", sum.fieldHits, sum.typeHits);
+
     // ---- 5. plan the live search while the runtime can still be asked (field names, types, positions)
+    gStep.store("5 of 6: planning the live search");
+    out.line("scan: step 5 of 6: planning the live search");
     std::vector<LivePlan> plans;
     if (opt.searchMemory) {
         for (const ClassRef& c : classes) {
@@ -530,89 +728,99 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
             plans.push_back(p);
         }
     }
+    { std::string names; for (const LivePlan& p : plans) { names += p.full; names += "(" + std::to_string(p.fields.size()) + " fields)  "; }
+      out.key("scan: step 5 done: %d class(es) planned for the live search: %s", static_cast<int>(plans.size()), names.c_str()); }
     std::vector<ClassRef>().swap(classes);            // free our own copies of the class pointers before the memory search
     if (thread && api.thread_detach) api.thread_detach(thread);       // the memory search needs no il2cpp calls
 
     // ---- 6. look through the game's memory for the running copies and write down their field values
-    std::vector<LiveObject> found;
-    std::vector<int> candidatesPer(plans.size(), 0), acceptedPer(plans.size(), 0);
+    // The search runs on its own thread; this thread only watches it. If it makes no progress for a while, we give up on it.
+    std::shared_ptr<SearchJob> job;
+    bool stuck = false; std::string stuckWhere;
     if (opt.searchMemory && !plans.empty()) {
         sum.liveClasses = static_cast<int>(plans.size());
-        uint32_t hi[kMaxLiveTargets]; int nhi = 0;
-        for (const LivePlan& p : plans) { hi[nhi++] = static_cast<uint32_t>((~p.klassInv) >> 32); }
-        const std::vector<MapEntry> maps = readMaps();
-        const uintptr_t bufLo = reinterpret_cast<uintptr_t>(gChunk);
-        struct Cand { int plan; uintptr_t addr; int region; };
-        std::vector<Cand> cands;
-        const double t0 = nowSeconds();
-        unsigned long regionsRead = 0; unsigned long long bytes = 0; bool timedOut = false; unsigned chunks = 0;
-        for (size_t ri = 0; ri < maps.size() && !timedOut; ++ri) {
-            const MapEntry& r = maps[ri];
-            if (!regionWanted(r) || (bufLo >= r.start && bufLo < r.end)) continue;
-            ++regionsRead;
-            for (uintptr_t c = r.start; c < r.end; c += kChunk) {
-                if (nowSeconds() - t0 >= opt.maxSeconds) { timedOut = true; break; }
-                const size_t n = r.end - c < kChunk ? static_cast<size_t>(r.end - c) : kChunk;
-                if (!pipeCopy(c, gChunk, n)) continue;
-                bytes += n;
-                const uint64_t* words = reinterpret_cast<const uint64_t*>(gChunk);
-                for (size_t o = 0; o < n / 8; ++o) {
-                    const uint64_t v = words[o];
-                    const uint32_t top = static_cast<uint32_t>(v >> 32);
-                    bool near = false;
-                    for (int h = 0; h < nhi; ++h) if (hi[h] == top) { near = true; break; }
-                    if (!near) continue;
-                    for (size_t t = 0; t < plans.size(); ++t)
-                        if (~v == plans[t].klassInv && static_cast<int>(cands.size()) < kMaxCandidates) cands.push_back({static_cast<int>(t), c + o * 8, static_cast<int>(ri)});
+        gStep.store("6 of 6: reading the game's memory");
+        out.key("scan: step 6 of 6: looking through the game's memory (read-only; the game keeps running)");
+        job = std::make_shared<SearchJob>();
+        for (const LivePlan& p : plans) job->plans.push_back({p.klassInv, p.unityObject, p.size});
+        job->maps = readMaps();
+        job->maxSeconds = opt.maxSeconds; job->testHangAfterChunks = opt.testHangAfterChunks; job->testPipeBytes = opt.testPipeBytes;
+        bool expected = false;
+        if (!gSearchBusy.compare_exchange_strong(expected, true)) {
+            out.key("scan: an earlier memory search is still stuck in this game session, so no new one is started (close and reopen the game to try the live values again)");
+            stuck = true; stuckWhere = "an earlier search is still stuck"; job.reset();
+        } else {
+            pthread_t th; auto* holder = new std::shared_ptr<SearchJob>(job);
+            if (pthread_create(&th, nullptr, searchThread, holder) != 0) {
+                delete holder; gSearchBusy.store(false);
+                out.key("scan: could not start the memory search thread");
+                stuck = true; stuckWhere = "could not start the memory search thread"; job.reset();
+            } else {
+                pthread_detach(th);
+                const double tStart = nowSeconds();
+                double lastBeatAt = tStart, lastTalk = tStart; unsigned lastBeat = job->heartbeat.load();
+                while (!job->done.load()) {
+                    usleep(100000);
+                    const double now = nowSeconds();
+                    const unsigned hb = job->heartbeat.load();
+                    if (hb != lastBeat) { lastBeat = hb; lastBeatAt = now; }
+                    if (now - lastTalk >= 10.0) {
+                        lastTalk = now;
+                        out.key("scan: memory search still working: %llu MB read so far, %s", job->bytes.load() >> 20, describeRegion(*job, job->region.load()).c_str());
+                    }
+                    if (now - lastBeatAt >= opt.stallSeconds || now - tStart >= opt.maxSeconds + 30.0) {
+                        stuck = true;
+                        char b[400]; std::snprintf(b, sizeof b, "%s, step %d, after %llu MB", describeRegion(*job, job->region.load()).c_str(), job->stage.load(), job->bytes.load() >> 20);
+                        stuckWhere = b;
+                        break;
+                    }
                 }
-                if ((++chunks & 31) == 0) usleep(1000);          // be gentle: the game keeps running while we read
             }
-        }
-        sum.memoryBytes = bytes;
-        int rejMonitor = 0, rejCached = 0, rejUnreadable = 0;
-        for (const Cand& cd : cands) {
-            ++candidatesPer[cd.plan];
-            const LivePlan& p = plans[cd.plan];
-            unsigned char hdr[24];
-            if (!pipeCopy(cd.addr, hdr, sizeof hdr)) { ++rejUnreadable; continue; }
-            uint64_t monitor, cached; std::memcpy(&monitor, hdr + 8, 8); std::memcpy(&cached, hdr + 16, 8);
-            if (monitor != 0) { ++rejMonitor; continue; }
-            if (p.unityObject && (cached == 0 || (cached & 7) != 0)) { ++rejCached; continue; }     // a destroyed or fake object
-            ++acceptedPer[cd.plan];
-            if (acceptedPer[cd.plan] > kMaxLivePrinted) continue;
-            LiveObject lo; lo.plan = cd.plan; lo.addr = cd.addr;
-            size_t got = 0;                                   // the whole object if it can be read, else a smaller front part
-            for (size_t want = static_cast<size_t>(p.size); want >= 16 && got == 0; want /= 2) {
-                lo.bytes.assign(want, 0);
-                if (pipeCopy(cd.addr, lo.bytes.data(), want)) got = want;
-            }
-            if (got == 0) { --acceptedPer[cd.plan]; ++rejUnreadable; continue; }
-            const MapEntry& reg = maps[cd.region];
-            lo.where = reg.path.empty() ? "anonymous memory" : reg.path;
-            found.push_back(lo);
-        }
-        out.line("--- live values (the running copies of the important classes) ---");
-        out.line("scan: memory search read %llu KB in %lu regions in %.1f s%s; hits=%d (rejected: owner-lock=%d destroyed=%d unreadable=%d)",
-                 bytes >> 10, regionsRead, nowSeconds() - t0, timedOut ? " (STOPPED: time limit)" : "", static_cast<int>(cands.size()), rejMonitor, rejCached, rejUnreadable);
-        for (size_t t = 0; t < plans.size(); ++t) {
-            out.line("scan: live %s: %d hit(s), %d look like a real running copy%s", plans[t].full.c_str(), candidatesPer[t], acceptedPer[t],
-                     acceptedPer[t] > kMaxLivePrinted ? " (first few written out)" : "");
-        }
-        for (size_t i = 0; i < found.size(); ++i) {
-            const LiveObject& lo = found[i];
-            const LivePlan& p = plans[lo.plan];
-            int ordinal = 1; for (size_t j = 0; j < i; ++j) if (found[j].plan == lo.plan) ++ordinal;
-            char cachedText[40] = "n/a";
-            if (p.unityObject) { uint64_t cp; std::memcpy(&cp, lo.bytes.data() + 16, 8); std::snprintf(cachedText, sizeof cachedText, "%s", cp ? "set" : "empty"); }
-            out.line("scan: live %s #%d size=%d native-link=%s in %s", p.full.c_str(), ordinal, p.size, cachedText, lo.where.c_str());
-            for (const FieldPlan& f : p.fields)
-                out.line("scan:   live %s = %s   (%s : %s @%d)", f.name.c_str(), formatValue(f, lo.bytes.data(), lo.bytes.size()).c_str(), f.owner.c_str(), f.typeName.c_str(), f.offset);
-            ++sum.liveObjects;
         }
     }
+    if (job && !stuck) {
+        sum.memoryBytes = job->bytes.load();
+        if (job->pipeFailed) {
+            out.key("scan: the memory search could not start: its copy pipe does not work here (error %d). The class lists above are still good, but there are no live values.", job->pipeErrno);
+        } else {
+            out.key("--- live values (the running copies of the important classes) ---");
+            out.key("scan: memory search read %llu KB in %lu regions in %.1f s%s; copy pipe=%lu bytes (chunk %lu KB); hits=%d (rejected: owner-lock=%d destroyed=%d unreadable=%d); copy trouble=%d%s",
+                     static_cast<unsigned long long>(job->bytes.load() >> 10), job->regionsRead.load(), job->seconds, job->timedOut ? " (STOPPED: time limit)" : "",
+                     static_cast<unsigned long>(job->pipeBytes), static_cast<unsigned long>(job->chunkBytes >> 10), job->cands, job->rejMonitor, job->rejCached, job->rejUnreadable,
+                     job->pipeTrouble, job->pipeTrouble ? " (the copy pipe itself misbehaved: some memory was not looked at)" : "");
+            for (size_t t = 0; t < plans.size(); ++t) {
+                out.key("scan: live %s: %d hit(s), %d look like a real running copy%s", plans[t].full.c_str(), job->candidatesPer[t], job->acceptedPer[t],
+                         job->acceptedPer[t] > kMaxLivePrinted ? " (first few written out)" : "");
+            }
+            std::vector<std::vector<std::string>> firstValues(plans.size());       // the values of the first copy of each class
+            for (size_t i = 0; i < job->found.size(); ++i) {
+                const LiveObject& lo = job->found[i];
+                const LivePlan& p = plans[lo.plan];
+                int ordinal = 1; for (size_t k = 0; k < i; ++k) if (job->found[k].plan == lo.plan) ++ordinal;
+                char cachedText[40] = "n/a";
+                if (p.unityObject) { uint64_t cp; std::memcpy(&cp, lo.bytes.data() + 16, 8); std::snprintf(cachedText, sizeof cachedText, "%s", cp ? "set" : "empty"); }
+                out.key("scan: live %s #%d size=%d native-link=%s in %s%s", p.full.c_str(), ordinal, p.size, cachedText, lo.where.c_str(),
+                        ordinal > 1 ? "   (only the fields that differ from copy #1 are listed)" : "");
+                std::vector<std::string>& first = firstValues[lo.plan];
+                for (size_t fi = 0; fi < p.fields.size(); ++fi) {
+                    const FieldPlan& f = p.fields[fi];
+                    const std::string v = formatValue(f, lo.bytes.data(), lo.bytes.size());
+                    if (ordinal == 1) first.push_back(v);
+                    else if (fi < first.size() && first[fi] == v) continue;
+                    out.key("scan:   live %s = %s   (%s : %s @%d)", f.name.c_str(), v.c_str(), f.owner.c_str(), f.typeName.c_str(), f.offset);
+                }
+                ++sum.liveObjects;
+            }
+        }
+    }
+    if (stuck) {
+        sum.memoryStuck = true;
+        out.key("scan: MEMORY SEARCH STUCK and given up on (%s). The class, field and method lists above are complete; only the live values are missing. The game is not affected.", stuckWhere.c_str());
+    }
 
-    out.line("scan: DONE. assemblies=%d classes=%d index=%d detailed=%d field-hits=%d type-hits=%d live-copies=%d%s", sum.assemblies, sum.classes, sum.indexed, sum.matchedClasses, sum.fieldHits, sum.typeHits, sum.liveObjects,
-             out.full() ? " (output was cut at the line limit)" : "");
+    gStep.store("finished");
+    out.key("scan: DONE. assemblies=%d classes=%d index=%d detailed=%d field-hits=%d type-hits=%d live-copies=%d%s%s", sum.assemblies, sum.classes, sum.indexed, sum.matchedClasses, sum.fieldHits, sum.typeHits, sum.liveObjects,
+             sum.memoryStuck ? " (live search stuck)" : "", out.full() ? " (output was cut at the line limit)" : "");
     sum.ok = true;
     return sum;
 }

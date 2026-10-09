@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cstdlib>
+#include <unistd.h>
 #include <string>
 #include <vector>
 
@@ -77,13 +79,13 @@ __attribute__((visibility("default"))) void fake_set_domain_null(int v) { gDomai
 __attribute__((visibility("default"))) unsigned long long fake_code_address() { return reinterpret_cast<unsigned long long>(gCode); }
 
 // ---- running copies the test creates in ordinary memory (like the game's objects)
-__attribute__((visibility("default"))) void* fake_make_locomotion(int kind) {      // 0 = real, 1 = destroyed (native link empty), 2 = has an owner lock
+__attribute__((visibility("default"))) void* fake_make_locomotion(int kind) {      // 0 = real, 1 = destroyed (native link empty), 2 = has an owner lock, 3 = real but with another jump height
     unsigned char* o = static_cast<unsigned char*>(calloc(1, 80));
     Klass* k = &kLoco; std::memcpy(o, &k, 8);
     const uint64_t cached = kind == 1 ? 0 : reinterpret_cast<uint64_t>(o) + 0x40;
     std::memcpy(o + 16, &cached, 8);
     if (kind == 2) { uint64_t lock = 0x1234500; std::memcpy(o + 8, &lock, 8); }
-    const float baseAccel = 2.5f, maxSpeed = 4.25f, jump = 1.5f, vel[3] = {0.5f, 0.0f, -1.25f};
+    const float baseAccel = 2.5f, maxSpeed = 4.25f, jump = kind == 3 ? 2.25f : 1.5f, vel[3] = {0.5f, 0.0f, -1.25f};
     const int mode = 2; const unsigned char pair[8] = {1, 2, 3, 4, 5, 6, 7, 8}; const uint64_t target = reinterpret_cast<uint64_t>(o);
     std::memcpy(o + 24, &baseAccel, 4); std::memcpy(o + 32, &maxSpeed, 4); std::memcpy(o + 36, &jump, 4); std::memcpy(o + 40, vel, 12);
     o[52] = 1; std::memcpy(o + 56, &mode, 4); std::memcpy(o + 64, pair, 8); std::memcpy(o + 72, &target, 8);
@@ -128,7 +130,10 @@ __attribute__((visibility("default"))) void il2cpp_free(void* p) { ++fake_free_c
 __attribute__((visibility("default"))) void* il2cpp_thread_attach(void*) { ++fake_attach_count; return &gDomain; }
 __attribute__((visibility("default"))) void il2cpp_thread_detach(void*) { ++fake_detach_count; }
 // optional functions for the live values
-__attribute__((visibility("default"))) int il2cpp_class_instance_size(void* k) { return static_cast<Klass*>(k)->instanceSize; }
+__attribute__((visibility("default"))) int il2cpp_class_instance_size(void* k) {
+    if (std::getenv("FAKE_IL2CPP_HANG_STEP5")) { for (;;) sleep(1000); }       // PC test: a runtime call that never answers
+    return static_cast<Klass*>(k)->instanceSize;
+}
 __attribute__((visibility("default"))) void* il2cpp_class_from_type(void* t) {
     Type* ty = static_cast<Type*>(t);
     return ty->klass ? static_cast<void*>(ty->klass) : static_cast<void*>(&kOther);      // unknown types behave like a reference type

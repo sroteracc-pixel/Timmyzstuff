@@ -481,6 +481,17 @@ void dumpGameLayers() {
 // Runs on its own thread so the menu keeps working. Read-only: it only asks libil2cpp.so for names.
 std::atomic<bool> gScanRunning{false};
 
+// The scan itself runs on a second thread; this thread only waits for it. If the scan is still not finished after a long time
+// (something in the game's runtime never answered), we say so in the facts file and tell the menu - the menu never shows "Scanning..." forever.
+struct ScanJob { tzscan::Api api; tzscan::Options options; tzscan::Summary summary; std::atomic<bool> done{false}; };
+
+void* scanWorker(void* p) {
+    ScanJob* j = static_cast<ScanJob*>(p);
+    j->summary = tzscan::run(j->api, j->options, fact);
+    j->done.store(true);
+    return nullptr;
+}
+
 void* scanMain(void*) {
     fact("--- scan requested from the menu at t=%.1f ---", secondsSinceStart());
     bool ok = false; int matches = 0;
@@ -493,14 +504,37 @@ void* scanMain(void*) {
     if (!lib) {
         fact("scan: libil2cpp.so is not loaded in the game (so there is nothing to read)");
     } else {
-        tzscan::Api api; std::string missing;
-        if (!tzscan::loadApi(lib, &api, &missing)) {
+        ScanJob* job = new ScanJob;
+        std::string missing;
+        if (!tzscan::loadApi(lib, &job->api, &missing)) {
             fact("scan: libil2cpp.so does not export these needed functions: %s", missing.c_str());
+            delete job;
         } else {
-            tzscan::Options options; options.libBase = base;
-            const tzscan::Summary s = tzscan::run(api, options, fact);
-            ok = s.ok; matches = s.matchedClasses + s.fieldHits + s.typeHits + s.liveObjects;
-            if (!s.ok) fact("scan: FAILED: %s", s.error.c_str());
+            job->options.libBase = base;
+            double deadline = job->options.maxSeconds + job->options.stallSeconds + 120.0;      // longer than the scan can honestly take
+#ifdef TZ_FAST_TEST
+            if (const char* e = std::getenv("TZ_SCAN_DEADLINE_S")) deadline = std::atof(e);      // PC test only: pretend the runtime hangs
+            if (const char* e = std::getenv("TZ_SCAN_TEST_HANG_CHUNKS")) job->options.testHangAfterChunks = std::atoi(e);
+            if (const char* e = std::getenv("TZ_SCAN_TEST_PIPE_BYTES")) job->options.testPipeBytes = static_cast<size_t>(std::atol(e));
+            if (const char* e = std::getenv("TZ_SCAN_TEST_STALL_S")) job->options.stallSeconds = std::atoi(e);
+#endif
+            pthread_t t;
+            if (pthread_create(&t, nullptr, scanWorker, job) != 0) {
+                fact("scan: could not start the scan worker thread");
+                delete job;
+            } else {
+                pthread_detach(t);
+                const double started = secondsSinceStart();
+                while (!job->done.load() && secondsSinceStart() - started < deadline) usleep(200000);
+                if (job->done.load()) {
+                    ok = job->summary.ok; matches = job->summary.matchedClasses + job->summary.fieldHits + job->summary.typeHits + job->summary.liveObjects;
+                    if (!job->summary.ok) fact("scan: FAILED: %s", job->summary.error.c_str());
+                    delete job;
+                } else {
+                    // the worker is still busy: leave it (and its memory) alone, report where it is
+                    fact("scan: GAVE UP waiting after %.0f s: the scan is still in step \"%s\". Everything written above this line is valid.", secondsSinceStart() - started, tzscan::currentStep());
+                }
+            }
         }
     }
     tzoverlay::setScanResult(ok, matches);
@@ -530,7 +564,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D5: clickable menu + Movement page + update check + deeper game scan; movement NOT connected to the game yet)");
+    fact("Timmyzstuff facts (stage D5b: clickable menu + Movement page + update check + deeper game scan (memory search can no longer hang); movement NOT connected to the game yet)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -622,7 +656,11 @@ void* probeMain(void*) {
     double inputNextTry = 0;
     uint64_t lastCounts[3] = {0, 0, 0};
     double lastBeatTime = last;
-    const double endAt = kSampleMillis > 0 ? last + kSampleMillis / 1000.0 : 1e18;
+    double sampleMillis = kSampleMillis;
+#ifdef TZ_FAST_TEST
+    if (const char* e = std::getenv("TZ_SAMPLE_MS")) sampleMillis = std::atof(e);          // PC test only: keep the facts file open longer
+#endif
+    const double endAt = sampleMillis > 0 ? last + sampleMillis / 1000.0 : 1e18;
     while (secondsSinceStart() < endAt) {
         std::memset(buf, 0, sizeof buf);
         const int rc = ctrlFn(0x3u, buf);               // 0x3 = left + right Touch controller
@@ -770,7 +808,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D5: pass-through + input probe + frame watcher + clickable menu panel + movement page)");
+    logf_("payload loaded (stage D5b: pass-through + input probe + frame watcher + clickable menu panel + movement page)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

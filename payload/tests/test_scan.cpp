@@ -174,6 +174,38 @@ int main(int, char** argv) {
     check("... and it did not read classes", countOf("scan: CLASS") == 0 && countOf("scan: index") == 0);
     setNull(0);
 
+    // ---- a second real copy (another jump height): only the fields that differ are listed for it
+    {
+        gLines.clear();
+        void* second = makeLoco(3); (void)second;
+        const Summary s5 = run(api, opt, logFn);
+        check("two real copies are found", s5.ok && has("scan: live Game.MobilePlayerLocomotion: ") && has("2 look like a real running copy"));
+        check("copy #2 says it lists only the differences", has("scan: live Game.MobilePlayerLocomotion #2 size=80 native-link=set in ") && has("only the fields that differ from copy #1"));
+        check("the differing field (jump 2.25) is written for copy #2", has("live _jumpHeight = 2.25   ("));
+        check("the equal field _maxSpeed is written only once (copy #1)", countOf("live _maxSpeed = 4.25") == 1);
+    }
+
+    // ---- the copy pipe is only one page: the search must still work (the old code waited forever here)
+    {
+        gLines.clear();
+        Options tiny = opt; tiny.testPipeBytes = 4096;
+        const Summary s6 = run(api, tiny, logFn);
+        check("a one-page pipe: scan ok, running copies still found", s6.ok && !s6.memoryStuck && has("copy pipe=4096 bytes (chunk 4 KB)") && has("live _maxSpeed = 4.25   ("));
+    }
+
+    // ---- LAST: the memory read freezes (this leaves one frozen thread behind, so nothing else may follow except the "still stuck" check)
+    {
+        gLines.clear();
+        Options hang = opt; hang.testHangAfterChunks = 2; hang.stallSeconds = 1;
+        const Summary s7 = run(api, hang, logFn);
+        check("a frozen read: the scan still ends ok and says the search is stuck", s7.ok && s7.memoryStuck && has("scan: MEMORY SEARCH STUCK and given up on (region ") && has("(live search stuck)"));
+        check("... and the class lists were written", has("scan: CLASS Game.MobilePlayerLocomotion") && has("scan: DONE."));
+        check("... and no live values were invented", s7.liveObjects == 0 && !has("scan:   live "));
+        gLines.clear();
+        const Summary s8 = run(api, opt, logFn);
+        check("a second scan while the frozen one is still there says so instead of starting another", s8.ok && s8.memoryStuck && has("an earlier memory search is still stuck"));
+    }
+
     std::printf("\npassed: %d  failed: %d\n", pass, failn);
     return failn == 0 ? 0 : 1;
 }

@@ -27,6 +27,9 @@ cat > "$W/host.cpp" <<'C'
 #include <dlfcn.h>
 #include <unistd.h>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <string>
 int main(int, char** argv) {
   if (!dlopen("libOVRPlugin.so", RTLD_NOW)) { std::printf("NOOVR\n"); return 4; }
   if (argv[2][0] != '-') {                                                   // the pretend game runtime (full path, like the real one)
@@ -38,7 +41,15 @@ int main(int, char** argv) {
   void* h = dlopen(argv[1], RTLD_NOW);
   int (*f)(void*, void*) = (int(*)(void*, void*))dlsym(h, "JNI_OnLoad");
   std::printf("RESULT=%d\n", f(nullptr, nullptr));
-  sleep(6);
+  // wait (up to 30 s) until the scan has written its last line, then a little more
+  std::string path = std::string(getenv("TZ_FACTS_DIR")) + "/timmyzstuff_facts.txt";
+  for (int i = 0; i < 300; ++i) {
+    usleep(100000);
+    std::ifstream in(path); std::string line; bool done = false;
+    while (std::getline(in, line)) if (line.rfind("--- scan finished", 0) == 0) { done = true; break; }
+    if (done) break;
+  }
+  sleep(1);
   return 0;
 }
 C
@@ -56,8 +67,42 @@ check "scan wrote a field hit and a type hit" 'grep -q "^scan: field-hit Game.Ga
 check "scan finished OK" 'grep -q "^--- scan finished: ok ---" "$F" && grep -q "^scan: DONE" "$F"'
 check "the index and the full detail of the important class are written" 'grep -q "^scan: index Game.MobilePlayerLocomotion" "$F" && grep -q "^scan: CLASS Game.MobilePlayerLocomotion" "$F" && grep -q "method SetJumpHeight(1) : System.Void rva=" "$F"'
 check "the running copy was found in memory and its values written" 'grep -q "^scan: live Game.MobilePlayerLocomotion #1 size=80" "$F" && grep -q "^scan:   live _maxSpeed = 4.25 " "$F" && grep -q "^scan:   live _jumpHeight = 1.5 " "$F"'
-check "the facts header says stage D5" 'head -1 "$F" | grep -q "stage D5"'
+check "the facts header says stage D5b" 'head -1 "$F" | grep -q "stage D5b"'
 check "no memory addresses written (no 0x)" '! grep -q "0x" "$F"'
+check "progress lines for every step are written" 'grep -q "^scan: step 3 of 6" "$F" && grep -q "^scan: step 4 done" "$F" && grep -q "^scan: step 5 done: 4 class" "$F" && grep -q "^scan: step 6 of 6" "$F"'
+check "the memory search line tells the pipe size and trouble count" 'grep -q "^scan: memory search read .* copy pipe=[0-9]* bytes (chunk [0-9]* KB); .*copy trouble=0" "$F"'
+check "normal run does not say stuck" '! grep -q "STUCK\|GAVE UP" "$F"'
+
+runscan() {            # runscan <name> VAR=value ...   -> facts copied to $W/<name>.txt
+  local name="$1"; shift
+  rm -f "$W/facts/timmyzstuff_facts.txt"
+  out_last=$(cd "$W" && env LD_LIBRARY_PATH="$W" TZ_FACTS_DIR="$W/facts" "$@" "$W/host" "$W/libmain.so" "$W/libil2cpp.so" 2>&1)
+  cp -f "$W/facts/timmyzstuff_facts.txt" "$W/$name.txt"; cp -f "$W/$name.txt" "/tmp/facts_scan_$name.txt"
+}
+
+echo "== the copy pipe is only ONE page (4 KB): the real headset hung like this with the old code"
+runscan tinypipe TZ_SAMPLE_MS=20000 TZ_SCAN_TEST_PIPE_BYTES=4096
+F2="$W/tinypipe.txt"
+check "game still starts (65542)" '[[ "$out_last" == *"RESULT=65542"* ]]'
+check "pipe is reported as 4096 bytes / 4 KB chunks" 'grep -q "copy pipe=4096 bytes (chunk 4 KB)" "$F2"'
+check "scan still finishes and finds the running copy" 'grep -q "^--- scan finished: ok ---" "$F2" && grep -q "^scan:   live _maxSpeed = 4.25 " "$F2"'
+check "no stuck message" '! grep -q "STUCK" "$F2"'
+
+echo "== the memory read freezes after 3 chunks (a read that never returns)"
+runscan hang TZ_SAMPLE_MS=20000 TZ_SCAN_TEST_HANG_CHUNKS=3 TZ_SCAN_TEST_STALL_S=2
+F3="$W/hang.txt"
+check "game still starts (65542)" '[[ "$out_last" == *"RESULT=65542"* ]]'
+check "the class lists were written before" 'grep -q "^scan: CLASS Game.MobilePlayerLocomotion" "$F3"'
+check "the stuck search is reported with the region" 'grep -q "^scan: MEMORY SEARCH STUCK and given up on (region [0-9]* of [0-9]*: [0-9]* KB, " "$F3"'
+check "the scan still ends: DONE line + finished ok" 'grep -q "^scan: DONE\..*(live search stuck)" "$F3" && grep -q "^--- scan finished: ok ---" "$F3"'
+check "progress / stuck lines contain no 0x" '! grep -q "0x" "$F3"'
+
+echo "== the game's runtime never answers in step 5 (top-level watchdog)"
+runscan runtime TZ_SAMPLE_MS=20000 FAKE_IL2CPP_HANG_STEP5=1 TZ_SCAN_DEADLINE_S=4
+F4="$W/runtime.txt"
+check "game still starts (65542)" '[[ "$out_last" == *"RESULT=65542"* ]]'
+check "the watchdog names the step it is stuck in" 'grep -q "^scan: GAVE UP waiting after [0-9]* s: the scan is still in step \"5 of 6: planning the live search\"" "$F4"'
+check "the menu is told it FAILED (not left on Scanning)" 'grep -q "^--- scan finished: FAILED ---" "$F4"'
 
 echo "== libil2cpp.so is NOT in the game"
 rm -f "$F"
