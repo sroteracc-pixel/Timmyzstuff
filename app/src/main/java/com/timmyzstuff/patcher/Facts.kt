@@ -23,7 +23,7 @@ object Facts {
         val sb = StringBuilder()
         for (d in folders) {
             val f = "$d/$FILE_NAME"
-            sb.append("if [ -f '$f' ]; then cp '$f' '$dst' && chmod 666 '$dst'; echo 'FOUND $f'; head -n 300 '$f'; exit 0; fi; ")
+            sb.append("if [ -f '$f' ]; then cp '$f' '$dst' && chmod 666 '$dst'; echo 'FOUND $f'; head -n 150 '$f'; exit 0; fi; ")
         }
         sb.append("echo NOTFOUND")
 

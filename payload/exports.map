@@ -1,0 +1,7 @@
+/* Export ONLY JNI_OnLoad (like the game's own libmain.so). Everything else stays private. */
+{
+  global:
+    JNI_OnLoad;
+  local:
+    *;
+};

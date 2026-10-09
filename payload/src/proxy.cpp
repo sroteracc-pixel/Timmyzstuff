@@ -1,4 +1,4 @@
-// proxy.cpp - STAGE B payload: the Stage A pass-through PLUS a read-only "facts probe".
+// proxy.cpp - STAGE C payload: the Stage A pass-through PLUS a read-only "input probe".
 //
 // PART 1 - PASS-THROUGH (unchanged from Stage A, proven on your Quest)
 //   The patcher renames the game's real library to libmain_orig.so and puts THIS file in its
@@ -37,6 +37,8 @@
 #include <string>
 #include <vector>
 
+#include "menu_input.h"   // the open/close rules (pure C++, tested on a PC)
+
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
@@ -67,7 +69,7 @@ namespace {
 #ifdef TZ_FAST_TEST          // PC test only: shorter waits
 const int kWaitForLibSeconds = 5;
 const int kWaitForInitSeconds = 3;
-const int kSampleMillis = 1500;
+const int kSampleMillis = 3000;
 const int kSettleSeconds = 1;
 #else
 const int kWaitForLibSeconds = 600;   // wait up to 10 min for the game to load its VR library
@@ -75,7 +77,8 @@ const int kWaitForInitSeconds = 120;  // then up to 2 min for it to finish start
 const int kSampleMillis = 600 * 1000; // then watch the controllers for 10 minutes
 const int kSettleSeconds = 10;        // pause so the graphics drivers finish loading
 #endif
-const int kMaxChangeLines = 600;      // never write more than this many "something changed" lines
+const int kMaxChangeLines = 60;       // raw controller lines: only enough to confirm the layout
+const int kMaxPoseSnapshots = 10;     // hand/head position snapshots (taken when A or B is pressed)
 const size_t kBufSize = 512;          // zeroed buffer handed to the controller function
 const size_t kDumpBytes = 192;        // how many bytes of it we write down
 
@@ -200,7 +203,7 @@ typedef int (*GetControllerState4Fn)(unsigned int mask, void* out);
 
 void hex(const unsigned char* p, size_t n, char* out, size_t outSize) {
     size_t w = 0;
-    for (size_t i = 0; i < n && w + 3 < outSize; ++i) w += std::snprintf(out + w, outSize - w, "%02x", p[i]);
+    for (size_t i = 0; i < n && w + 3 <= outSize; ++i) w += std::snprintf(out + w, outSize - w, "%02x", p[i]);
     out[w < outSize ? w : outSize - 1] = 0;
 }
 
@@ -224,7 +227,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage B probe) - read-only");
+    fact("Timmyzstuff facts (stage C probe) - read-only");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     writeLoadedLibraries("at start");
@@ -262,34 +265,84 @@ void* probeMain(void*) {
     sleep(kSettleSeconds);
     writeLoadedLibraries("after the VR system started");
 
-    fact("--- controller samples: press both triggers, A, B, X, Y and move the sticks ---");
-    fact("format: t=<seconds> rc=<result code> bytes=<first %d bytes in hex>", static_cast<int>(kDumpBytes));
+    // ---- hand/head position function (read-only) ------------------------------------------
+    // Shape CONFIRMED by reading the function's machine code in your libOVRPlugin.so:
+    //   int ovrp_GetNodePoseState3(int step, int frameIndex, int node, void* out)
+    // It refuses a null `out` and otherwise writes exactly 88 bytes. We pass 256 zeroed bytes.
+    // What is NOT confirmed: which node numbers mean "left hand" / "right hand", and which
+    // step / frame values give a live pose. So we try a few and write what comes back.
+    typedef int (*GetNodePoseState3Fn)(int step, int frameIndex, int node, void* out);
+    GetNodePoseState3Fn poseFn = reinterpret_cast<GetNodePoseState3Fn>(dlsym(ovr, "ovrp_GetNodePoseState3"));
+    int poseSnapshots = 0;
+    auto poseSnapshot = [&](const char* why) {
+        if (!poseFn || poseSnapshots >= kMaxPoseSnapshots) return;
+        ++poseSnapshots;
+        fact("--- pose snapshot %d (%s) at t=%.1f: point the left and right controllers at DIFFERENT places ---",
+             poseSnapshots, why, secondsSinceStart());
+        static const int steps[] = {-1, 0};
+        static const int frames[] = {0, -1};
+        for (int step : steps) for (int frame : frames) for (int node = 0; node < 8; ++node) {
+            alignas(16) unsigned char pb[256];
+            std::memset(pb, 0, sizeof pb);
+            const int rc = poseFn(step, frame, node, pb);
+            char hx[2 * 88 + 1];
+            hex(pb, 88, hx, sizeof hx);
+            fact("pose step=%d frame=%d node=%d rc=%d bytes=%s", step, frame, node, rc, hx);
+        }
+    };
+    poseSnapshot("at start");
+
+    // ---- controllers -> the real open/close rules ------------------------------------------
+    fact("--- controller test: hold BOTH triggers and click A to open; B closes ---");
+    fact("layout (matches your stage B file): bytes 4-7 buttons (A=1 B=2 X=256 Y=512), floats at 16 (left trigger) and 20 (right trigger)");
+    MenuInput menu;                                      // the same rules the real menu will use
     alignas(16) unsigned char buf[kBufSize];
     alignas(16) unsigned char prev[kBufSize];
     std::memset(prev, 0, sizeof prev);
-    int lines = 0, lastRc = -12345;
+    int lines = 0, lastRc = -12345, opens = 0, closes = 0;
     long samples = 0;
-    double nextBeat = secondsSinceStart() + 10.0;
-    const double endAt = secondsSinceStart() + kSampleMillis / 1000.0;
+    bool wasVisible = false;
+    double last = secondsSinceStart();
+    double nextBeat = last + 10.0;
+    const double endAt = last + kSampleMillis / 1000.0;
     while (secondsSinceStart() < endAt) {
         std::memset(buf, 0, sizeof buf);
         const int rc = ctrlFn(0x3u, buf);               // 0x3 = left + right Touch controller
         ++samples;
+        const double now = secondsSinceStart();
+
+        ControllerState pad;
+        const unsigned int buttons = *reinterpret_cast<const unsigned int*>(buf + 4);
+        pad.leftTrigger = asFloat(buf + 16);
+        pad.rightTrigger = asFloat(buf + 20);
+        pad.buttonA = (buttons & 0x1u) != 0;
+        pad.buttonB = (buttons & 0x2u) != 0;
+        const bool aPressed = pad.buttonA && !(*reinterpret_cast<const unsigned int*>(prev + 4) & 0x1u);
+        const bool bPressed = pad.buttonB && !(*reinterpret_cast<const unsigned int*>(prev + 4) & 0x2u);
+        const bool visible = menu.update(pad, static_cast<float>(now - last));
+        last = now;
+        if (visible && !wasVisible) { ++opens; fact("t=%.2f MENU OPEN  (#%d) - both triggers + A", now, opens); }
+        if (!visible && wasVisible) { ++closes; fact("t=%.2f MENU CLOSE (#%d) - B pressed", now, closes); }
+        wasVisible = visible;
+        if (aPressed) poseSnapshot("A pressed");
+        else if (bPressed) poseSnapshot("B pressed");
+
         if (lines < kMaxChangeLines && (samples == 1 || rc != lastRc || worthWriting(prev, buf))) {
             char hx[2 * kDumpBytes + 1];
             hex(buf, kDumpBytes, hx, sizeof hx);
-            fact("t=%.1f rc=%d bytes=%s", secondsSinceStart(), rc, hx);
+            fact("t=%.1f rc=%d bytes=%s", now, rc, hx);
             ++lines;
-            std::memcpy(prev, buf, sizeof prev);
             lastRc = rc;
-            if (lines == kMaxChangeLines) fact("(line limit reached - no more change lines will be written)");
+            if (lines == kMaxChangeLines) fact("(raw line limit reached - events below are still recorded)");
         }
-        if (secondsSinceStart() >= nextBeat) {
-            fact("t=%.0f still sampling (%ld samples, %d change lines)", secondsSinceStart(), samples, lines);
+        std::memcpy(prev, buf, sizeof prev);
+        if (now >= nextBeat) {
+            fact("t=%.0f still sampling (%ld samples, menu opened %d times, closed %d times)", now, samples, opens, closes);
             nextBeat += 30.0;
         }
-        usleep(50 * 1000);                              // 20 samples per second
+        usleep(20 * 1000);                              // 50 samples per second
     }
+    fact("summary: menu opened %d times, closed %d times", opens, closes);
     fact("done: %ld samples, %d change lines", samples, lines);
     std::fclose(gOut);
     gOut = nullptr;
@@ -308,7 +361,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage B: pass-through + read-only facts probe)");
+    logf_("payload loaded (stage C: pass-through + read-only input probe)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {
