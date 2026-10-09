@@ -523,7 +523,7 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
             c.text(kFontLabel, rx + 46, ry + 32, s.linkState ? "Game link: connected" : "Game link: not connected", white);
             const char* note =
                 s.linkState ? "The switches above change the game." :
-                s.scanState == 1 ? "Scanning the game's code..." :
+                s.scanState == 1 ? "Scanning the game's code... this can take about a minute." :
                 s.scanState == 2 ? "Scan done. Press Get facts in the patcher and send me the file." :
                 s.scanState == 3 ? "Scan failed. Press Get facts in the patcher and send me the file." :
                 "The switches are saved but do nothing in the game yet. Press Scan.";

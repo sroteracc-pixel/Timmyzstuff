@@ -29,7 +29,12 @@ cat > "$W/host.cpp" <<'C'
 #include <cstdio>
 int main(int, char** argv) {
   if (!dlopen("libOVRPlugin.so", RTLD_NOW)) { std::printf("NOOVR\n"); return 4; }
-  if (argv[2][0] != '-') { if (!dlopen(argv[2], RTLD_NOW)) { std::printf("NOLIB\n"); return 4; } }      // the pretend game runtime (full path, like the real one)
+  if (argv[2][0] != '-') {                                                   // the pretend game runtime (full path, like the real one)
+    void* il = dlopen(argv[2], RTLD_NOW);
+    if (!il) { std::printf("NOLIB\n"); return 4; }
+    void* (*mk)(int) = (void* (*)(int))dlsym(il, "fake_make_locomotion");   // one running copy of the important class, in ordinary memory
+    if (mk) mk(0);
+  }
   void* h = dlopen(argv[1], RTLD_NOW);
   int (*f)(void*, void*) = (int(*)(void*, void*))dlsym(h, "JNI_OnLoad");
   std::printf("RESULT=%d\n", f(nullptr, nullptr));
@@ -49,7 +54,9 @@ check "scan wrote the game classes into the facts file" 'grep -q "^scan: CLASS G
 check "scan wrote fields and methods" 'grep -q "^scan:   field walkSpeed : System.Single @32" "$F" && grep -q "^scan:   method Jump(1)" "$F"'
 check "scan wrote a field hit and a type hit" 'grep -q "^scan: field-hit Game.GameSettings.speedMultiplier" "$F" && grep -q "^scan: type-hit Game.PhysicsBody.rb" "$F"'
 check "scan finished OK" 'grep -q "^--- scan finished: ok ---" "$F" && grep -q "^scan: DONE" "$F"'
-check "the facts header says stage D4" 'head -1 "$F" | grep -q "stage D4"'
+check "the index and the full detail of the important class are written" 'grep -q "^scan: index Game.MobilePlayerLocomotion" "$F" && grep -q "^scan: CLASS Game.MobilePlayerLocomotion" "$F" && grep -q "method SetJumpHeight(1) : System.Void rva=" "$F"'
+check "the running copy was found in memory and its values written" 'grep -q "^scan: live Game.MobilePlayerLocomotion #1 size=80" "$F" && grep -q "^scan:   live _maxSpeed = 4.25 " "$F" && grep -q "^scan:   live _jumpHeight = 1.5 " "$F"'
+check "the facts header says stage D5" 'head -1 "$F" | grep -q "stage D5"'
 check "no memory addresses written (no 0x)" '! grep -q "0x" "$F"'
 
 echo "== libil2cpp.so is NOT in the game"

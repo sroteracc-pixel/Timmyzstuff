@@ -497,8 +497,9 @@ void* scanMain(void*) {
         if (!tzscan::loadApi(lib, &api, &missing)) {
             fact("scan: libil2cpp.so does not export these needed functions: %s", missing.c_str());
         } else {
-            const tzscan::Summary s = tzscan::run(api, base, fact);
-            ok = s.ok; matches = s.matchedClasses + s.fieldHits + s.typeHits;
+            tzscan::Options options; options.libBase = base;
+            const tzscan::Summary s = tzscan::run(api, options, fact);
+            ok = s.ok; matches = s.matchedClasses + s.fieldHits + s.typeHits + s.liveObjects;
             if (!s.ok) fact("scan: FAILED: %s", s.error.c_str());
         }
     }
@@ -529,7 +530,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D4: clickable menu + Movement page + update check; movement NOT connected to the game yet)");
+    fact("Timmyzstuff facts (stage D5: clickable menu + Movement page + update check + deeper game scan; movement NOT connected to the game yet)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -769,7 +770,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D4: pass-through + input probe + frame watcher + clickable menu panel + movement page)");
+    logf_("payload loaded (stage D5: pass-through + input probe + frame watcher + clickable menu panel + movement page)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {
