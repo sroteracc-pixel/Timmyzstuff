@@ -259,7 +259,8 @@ int patchPluginSlot(uint64_t target, uint64_t stub, uint64_t pluginBase, std::ve
     uintptr_t prevEnd = 0;
     for (const MapRegion& r : maps) {
         const bool named = r.path.find("libOculusXRPlugin.so") != std::string::npos;
-        const bool followsPlugin = inPlugin && r.path.empty() && r.start == prevEnd;   // its .bss, mapped right after
+        const bool anonName = r.path.empty() || r.path.compare(0, 6, "[anon:") == 0;   // Android labels .bss "[anon:.bss]"
+        const bool followsPlugin = inPlugin && anonName && r.start == prevEnd;   // its .bss, mapped right after
         inPlugin = named || followsPlugin;
         prevEnd = r.end;
         if (!inPlugin || !r.rw) continue;
@@ -304,6 +305,40 @@ bool tryInstallWatches(void* ovr) {
         }
     }
     return all;
+}
+
+
+// Read-only report: where are the plugin's regions, and where does each Meta address appear in memory?
+void diagnoseWatches(void* ovr, const char* when) {
+    const std::vector<MapRegion> maps = readMaps();
+    fact("diag (%s): plugin and neighbouring regions:", when);
+    int shown = 0;
+    for (size_t i = 0; i < maps.size() && shown < 24; ++i) {
+        if (maps[i].path.find("libOculusXRPlugin.so") == std::string::npos) continue;
+        for (size_t j = i; j < maps.size() && j < i + 6; ++j, ++shown)
+            fact("diag   region %lx-%lx %s size=%lu name='%s'", (unsigned long)maps[j].start, (unsigned long)maps[j].end,
+                 maps[j].rw ? "rw" : "other", (unsigned long)(maps[j].end - maps[j].start), maps[j].path.c_str());
+        break;
+    }
+    for (int i = 0; i < frameWatchCount(); ++i) {
+        FrameWatch* w = frameWatch(i);
+        void* real = dlsym(ovr, w->name);
+        if (!real) { fact("diag %s: dlsym found nothing", w->name); continue; }
+        const uint64_t target = reinterpret_cast<uint64_t>(real);
+        int found = 0;
+        for (const MapRegion& r : maps) {
+            if (!r.rw || r.end - r.start > (256UL << 20)) continue;
+            if (r.path.compare(0, 5, "/dev/") == 0) continue;
+            for (uintptr_t p = (r.start + 7) & ~static_cast<uintptr_t>(7); p + 8 <= r.end; p += 8) {
+                if (*reinterpret_cast<volatile uint64_t*>(p) == target && found < 8) {
+                    fact("diag %s: address %llx found at %lx in region %lx-%lx name='%s'", w->name,
+                         (unsigned long long)target, (unsigned long)p, (unsigned long)r.start, (unsigned long)r.end, r.path.c_str());
+                    ++found;
+                }
+            }
+        }
+        if (!found) fact("diag %s: address %llx found NOWHERE in writable memory", w->name, (unsigned long long)target);
+    }
 }
 
 // Writes small argument values as numbers, and anything big (a pointer) as "ptr".
@@ -416,6 +451,7 @@ void* probeMain(void*) {
     double nextWatchTry = last;
     const double watchGiveUp = last + kWatchTrySeconds;
     bool watchesDone = false;
+    bool diag1 = false, diag2 = false;
     uint64_t lastCounts[3] = {0, 0, 0};
     double lastBeatTime = last;
     const double endAt = last + kSampleMillis / 1000.0;
@@ -454,6 +490,13 @@ void* probeMain(void*) {
             watchesDone = tryInstallWatches(ovr);
             nextWatchTry = now + 1.0;
             if (watchesDone) fact("t=%.1f all frame watches are installed", now);
+        }
+        if (!diag1 && now >= 20.0) { diag1 = true; diagnoseWatches(ovr, "t=20"); }
+        if (!diag2 && now >= watchGiveUp) {
+            diag2 = true;
+            for (int i = 0; i < frameWatchCount(); ++i)
+                if (!gWatchPatched[i]) fact("frame watch %s: NOT installed after %d seconds of searching", frameWatch(i)->name, kWatchTrySeconds);
+            diagnoseWatches(ovr, "search ended");
         }
         if (now >= nextBeat) {
             fact("t=%.0f still sampling (%ld samples, menu opened %d times, closed %d times)", now, samples, opens, closes);
