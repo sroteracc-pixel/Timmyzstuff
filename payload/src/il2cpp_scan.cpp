@@ -39,8 +39,9 @@ const int kMaxIndexLines = 1500;       // one line per class, names only
 const int kMaxFieldHits = 400;         // single "this field looks interesting" lines
 const int kMaxTypeHits = 150;          // "this class holds a Rigidbody / CharacterController" lines
 const int kMaxLiveTargets = 12;        // classes looked for in memory
-const int kMaxLivePrinted = 3;         // running copies written out per class
-const int kMaxLiveFields = 160;
+const int kMaxLivePrinted = 2;         // running copies written out per class (the ones that look most like a real, healthy object)
+const int kMaxLiveRead = 64;           // running copies read (then ranked) per class
+const int kMaxLiveFields = 300;
 const int kMaxCandidates = 20000;
 const size_t kChunk = 65536;
 
@@ -49,6 +50,12 @@ const char* const kPriorityClasses[] = {"MobilePlayerLocomotion", "MobileVertica
                                         "PlayerStatusSync", "CollisionVolume", "BodyCollider", nullptr};
 const char* const kLiveClasses[] = {"MobilePlayerLocomotion", "MobileVerticalMotion", "CharacterWorldConstraints", "SimpleCapsuleWithStickMovement",
                                     "PlayerMovement", "Movement", "LocomotionController", "PlayerStatusSync", "BodyCollider", nullptr};
+// Stage D5c ("brief" scan): the second real scan showed that the HEADSET version uses ShovelTools.PlayerLocomotion (211 fields), while
+// MobilePlayerLocomotion is the phone / PC version. These are written out in full and looked for in memory.
+const char* const kPriorityBrief[] = {"PlayerLocomotion", "ClientBotLocomotionParameters", "ClientBotLocomotion", "MotionHandoff", "MotionMechanics",
+                                      "LocomotionAnimation", "SetJumpHeight", "WorldSpaceGravity", "CustomCenterOfGravity", nullptr};
+const char* const kLiveBrief[] = {"PlayerLocomotion", "ClientBotLocomotionParameters", "LocomotionManager", "SetJumpHeight", "WorldSpaceGravity",
+                                  "CustomCenterOfGravity", "MotionHandoff", "MotionMechanics", "PlanarLocomotion", "LocomotionAnimation", nullptr};
 
 std::string lowerOf(const char* s) {
     std::string r = s ? s : "";
@@ -397,6 +404,40 @@ void addInstanceFields(const Api& api, void* klass, const std::string& owner, st
 }
 
 
+// How healthy does a copy look? A real running object has sensible numbers; a freed or half-overwritten block has garbage
+// (tiny denormal floats, booleans that are neither 0 nor 1, pointers that are not 8-aligned ...). Used to pick the copies worth writing out.
+struct Sanity { int ok = 0, total = 0, nonzero = 0; int percent() const { return total ? (100 * ok) / total : 0; } };
+Sanity sanityOf(const LivePlan& p, const std::vector<unsigned char>& bytes) {
+    Sanity r;
+    auto saneF = [](float v) { if (!std::isfinite(v)) return false; const float a = std::fabs(v); return a == 0.0f || (a >= 1e-6f && a <= 1e7f); };
+    for (const FieldPlan& f : p.fields) {
+        if (f.kind == K_UNKNOWN || f.size <= 0 || f.offset < 0 || static_cast<size_t>(f.offset) + static_cast<size_t>(f.size) > bytes.size()) continue;
+        const unsigned char* q = bytes.data() + f.offset;
+        bool ok = true, nz = false;
+        switch (f.kind) {
+            case K_FLOAT: { float v; std::memcpy(&v, q, 4); ok = saneF(v); nz = v != 0.0f; break; }
+            case K_VEC2: case K_VEC3: case K_VEC4: {
+                const int n = f.kind == K_VEC2 ? 2 : (f.kind == K_VEC3 ? 3 : 4);
+                for (int i = 0; i < n; ++i) { float v; std::memcpy(&v, q + 4 * i, 4); if (!saneF(v)) ok = false; if (v != 0.0f) nz = true; }
+                break;
+            }
+            case K_DOUBLE: { double v; std::memcpy(&v, q, 8); ok = std::isfinite(v) && std::fabs(v) < 1e12; nz = v != 0.0; break; }
+            case K_BOOL: ok = q[0] <= 1; nz = q[0] != 0; break;
+            case K_ENUM: {
+                long long v = 0;
+                if (f.size == 1) v = static_cast<int8_t>(q[0]); else if (f.size == 2) { int16_t x; std::memcpy(&x, q, 2); v = x; }
+                else if (f.size == 4) { int32_t x; std::memcpy(&x, q, 4); v = x; } else { int64_t x; std::memcpy(&x, q, 8); v = x; }
+                ok = v > -100000 && v < 100000; nz = v != 0; break;
+            }
+            case K_REF: { uint64_t v; std::memcpy(&v, q, 8); ok = v == 0 || ((v & 7) == 0 && v >= 0x10000 && v < (1ULL << 47)); nz = v != 0; break; }
+            default: continue;                                  // whole numbers and structs: any value can be right, so they do not vote
+        }
+        ++r.total; if (ok) ++r.ok; if (nz) ++r.nonzero;
+    }
+    return r;
+}
+
+
 // The memory search itself. It runs on its own thread (see run()). Everything it touches is in `j` or in gChunk.
 void searchMemory(SearchJob& j) {
     struct Finish { SearchJob& j; double t0; ~Finish() { j.seconds = nowSeconds() - t0; j.stage.store(3); j.done.store(true); gSearchBusy.store(false); } } finish{j, nowSeconds()};
@@ -458,7 +499,7 @@ void searchMemory(SearchJob& j) {
         if (monitor != 0) { ++j.rejMonitor; continue; }
         if (p.unityObject && (cached == 0 || (cached & 7) != 0)) { ++j.rejCached; continue; }     // a destroyed or fake object
         ++j.acceptedPer[cd.plan];
-        if (j.acceptedPer[cd.plan] > kMaxLivePrinted) continue;
+        if (j.acceptedPer[cd.plan] > kMaxLiveRead) continue;
         LiveObject lo; lo.plan = cd.plan; lo.addr = cd.addr;
         size_t got = 0;                                       // the whole object if it can be read, else a smaller front part
         for (size_t want = std::min(static_cast<size_t>(p.size), pipe.chunk()); want >= 16 && got == 0; want /= 2) {
@@ -601,8 +642,10 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     // ---- 2. index: one line per class that looks like movement / player / character / parameters ...
     int indexLines = 0;
     gStep.store("2 of 6: class-name index");
+    if (opt.brief) out.line("scan: BRIEF scan: the class index and the single-line speed / jump / gravity hits are left out (the earlier scans already wrote them)");
     out.line("--- index of class names (the game's own code + Normal.*) ---");
     for (const ClassRef& c : classes) {
+        if (opt.brief) break;                              // brief scan: the index was already written by the earlier scans
         const AsmRef& ar = asms[c.asmIndex];
         if (!(ar.ours || startsWith(ar.name, "Normal."))) continue;
         if (!indexNameMatches(c.name)) continue;
@@ -651,17 +694,29 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
             else if (kind == P_OTHERLIB) { std::snprintf(where, sizeof where, "rva=%lx lib=%s", rva, lib.c_str()); ++otherLibCount; }
             else if (kind == P_OUTSIDE) { std::snprintf(where, sizeof where, "rva=outside-libraries"); ++outsideCount; }
             else { std::snprintf(where, sizeof where, "rva=none"); ++noneCount; }
-            out.line("scan:   method %s(%u) : %s %s%s", mn ? mn : "?", api.method_get_param_count(m), typeName(api, api.method_get_return_type(m)).c_str(), where, (mflags & 0x10) ? " static" : "");
+            // The first bytes of the code of the small Set* / set_* / get_* / On* methods of the important classes: a "Set" method that just stores
+            // its argument is two machine instructions, and they say which field it writes (decoded offline, never run).
+            char codeText[48] = "";
+            if (priority && kind == P_IL2CPP && api.method_get_param_count(m) <= 1 && mn &&
+                (startsWith(mn, "Set") || startsWith(mn, "set_") || startsWith(mn, "get_") || startsWith(mn, "On"))) {
+                unsigned char cb[16];
+                if (pointerPipe().copy(static_cast<uintptr_t>(ptr), cb, sizeof cb)) {
+                    std::snprintf(codeText, sizeof codeText, " code=");
+                    for (int bi = 0; bi < 16; ++bi) { char two[4]; std::snprintf(two, sizeof two, "%02x", static_cast<unsigned>(cb[bi])); std::strcat(codeText, two); }
+                }
+            }
+            out.line("scan:   method %s(%u) : %s %s%s%s", mn ? mn : "?", api.method_get_param_count(m), typeName(api, api.method_get_return_type(m)).c_str(), where, codeText, (mflags & 0x10) ? " static" : "");
         }
         detailed[idx] = 1; ++sum.matchedClasses;
         if (priority) ++priorityCount; else ++otherCount;
     };
-    for (int pass = 0; pass < 2; ++pass) {               // important classes: the named ones first, then anything vertical / jump / gravity / parameters
+    const char* const* priorityNames = opt.brief ? kPriorityBrief : kPriorityClasses;
+    for (int pass = 0; pass < (opt.brief ? 1 : 2); ++pass) {               // important classes: the named ones first, then anything vertical / jump / gravity / parameters
         for (size_t i = 0; i < classes.size(); ++i) {
             const ClassRef& c = classes[i];
             if (detailed[i] || !asms[c.asmIndex].ours || priorityCount >= kMaxPriorityDetail) continue;
             const std::string low = lowerOf(c.name.c_str());
-            const bool named = inList(c.name, kPriorityClasses);
+            const bool named = inList(c.name, priorityNames);
             const bool strong = low.find("vertical") != std::string::npos || low.find("parameters") != std::string::npos ||
                                 low.find("jump") != std::string::npos || low.find("gravit") != std::string::npos;
             if (pass == 0 ? !named : !strong) continue;
@@ -669,6 +724,7 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
         }
     }
     for (size_t i = 0; i < classes.size(); ++i) {        // other movement-ish classes (the Oculus teleport samples were already listed by stage D4)
+        if (opt.brief) break;
         const ClassRef& c = classes[i];
         if (detailed[i] || !asms[c.asmIndex].ours || otherCount >= kMaxOtherDetail) continue;
         if (!classNameMatches(c.name) || startsWith(c.name, "Teleport") || startsWith(c.full, "OculusSampleFramework")) continue;
@@ -681,6 +737,7 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     out.line("scan: step 4 of 6: single lines for speed / jump / gravity fields");
     int fieldHits = 0, typeHits = 0;
     for (size_t i = 0; i < classes.size(); ++i) {
+        if (opt.brief) break;                              // brief scan: these single lines were already written by the earlier scans
         const ClassRef& c = classes[i];
         if (!asms[c.asmIndex].ours || detailed[i]) continue;
         void* it = nullptr; int nf = 0;
@@ -710,7 +767,7 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     if (opt.searchMemory) {
         for (const ClassRef& c : classes) {
             if (static_cast<int>(plans.size()) >= kMaxLiveTargets) break;
-            if (!asms[c.asmIndex].ours || !inList(c.name, kLiveClasses)) continue;
+            if (!asms[c.asmIndex].ours || !inList(c.name, opt.brief ? kLiveBrief : kLiveClasses)) continue;
             LivePlan p; p.klassInv = ~static_cast<uint64_t>(reinterpret_cast<uintptr_t>(c.klass())); p.full = c.full;
             p.unityObject = isUnityObjectClass(api, c.klass());
             const int32_t isz = api.class_instance_size ? api.class_instance_size(c.klass()) : 0;
@@ -788,28 +845,39 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
                      static_cast<unsigned long long>(job->bytes.load() >> 10), job->regionsRead.load(), job->seconds, job->timedOut ? " (STOPPED: time limit)" : "",
                      static_cast<unsigned long>(job->pipeBytes), static_cast<unsigned long>(job->chunkBytes >> 10), job->cands, job->rejMonitor, job->rejCached, job->rejUnreadable,
                      job->pipeTrouble, job->pipeTrouble ? " (the copy pipe itself misbehaved: some memory was not looked at)" : "");
+            // rank the copies of each class by how healthy they look, write out only the best few
+            struct Ranked { size_t idx; Sanity sanity; };
+            std::vector<std::vector<Ranked>> perPlan(plans.size());
+            for (size_t i = 0; i < job->found.size(); ++i) perPlan[job->found[i].plan].push_back({i, sanityOf(plans[job->found[i].plan], job->found[i].bytes)});
+            for (auto& v : perPlan)
+                std::stable_sort(v.begin(), v.end(), [](const Ranked& x, const Ranked& y) {
+                    if (x.sanity.percent() != y.sanity.percent()) return x.sanity.percent() > y.sanity.percent();
+                    return x.sanity.nonzero > y.sanity.nonzero; });
             for (size_t t = 0; t < plans.size(); ++t) {
-                out.key("scan: live %s: %d hit(s), %d look like a real running copy%s", plans[t].full.c_str(), job->candidatesPer[t], job->acceptedPer[t],
-                         job->acceptedPer[t] > kMaxLivePrinted ? " (first few written out)" : "");
+                char best[40] = "";
+                if (!perPlan[t].empty()) std::snprintf(best, sizeof best, ", best sanity=%d%%", perPlan[t][0].sanity.percent());
+                out.key("scan: live %s: %d hit(s), %d look like a real running copy%s%s", plans[t].full.c_str(), job->candidatesPer[t], job->acceptedPer[t],
+                        job->acceptedPer[t] > kMaxLivePrinted ? " (best few written out)" : "", best);
             }
-            std::vector<std::vector<std::string>> firstValues(plans.size());       // the values of the first copy of each class
-            for (size_t i = 0; i < job->found.size(); ++i) {
-                const LiveObject& lo = job->found[i];
-                const LivePlan& p = plans[lo.plan];
-                int ordinal = 1; for (size_t k = 0; k < i; ++k) if (job->found[k].plan == lo.plan) ++ordinal;
-                char cachedText[40] = "n/a";
-                if (p.unityObject) { uint64_t cp; std::memcpy(&cp, lo.bytes.data() + 16, 8); std::snprintf(cachedText, sizeof cachedText, "%s", cp ? "set" : "empty"); }
-                out.key("scan: live %s #%d size=%d native-link=%s in %s%s", p.full.c_str(), ordinal, p.size, cachedText, lo.where.c_str(),
-                        ordinal > 1 ? "   (only the fields that differ from copy #1 are listed)" : "");
-                std::vector<std::string>& first = firstValues[lo.plan];
-                for (size_t fi = 0; fi < p.fields.size(); ++fi) {
-                    const FieldPlan& f = p.fields[fi];
-                    const std::string v = formatValue(f, lo.bytes.data(), lo.bytes.size());
-                    if (ordinal == 1) first.push_back(v);
-                    else if (fi < first.size() && first[fi] == v) continue;
-                    out.key("scan:   live %s = %s   (%s : %s @%d)", f.name.c_str(), v.c_str(), f.owner.c_str(), f.typeName.c_str(), f.offset);
+            for (size_t t = 0; t < plans.size(); ++t) {
+                const LivePlan& p = plans[t];
+                std::vector<std::string> firstValues;                                  // the values of the first written copy of this class
+                for (size_t rank = 0; rank < perPlan[t].size() && static_cast<int>(rank) < kMaxLivePrinted; ++rank) {
+                    const LiveObject& lo = job->found[perPlan[t][rank].idx];
+                    const int ordinal = static_cast<int>(rank) + 1;
+                    char cachedText[40] = "n/a";
+                    if (p.unityObject) { uint64_t cp; std::memcpy(&cp, lo.bytes.data() + 16, 8); std::snprintf(cachedText, sizeof cachedText, "%s", cp ? "set" : "empty"); }
+                    out.key("scan: live %s #%d size=%d native-link=%s in %s  sanity=%d%%%s", p.full.c_str(), ordinal, p.size, cachedText, lo.where.c_str(), perPlan[t][rank].sanity.percent(),
+                            ordinal > 1 ? "   (only the fields that differ from copy #1 are listed)" : "");
+                    for (size_t fi = 0; fi < p.fields.size(); ++fi) {
+                        const FieldPlan& f = p.fields[fi];
+                        const std::string v = formatValue(f, lo.bytes.data(), lo.bytes.size());
+                        if (ordinal == 1) firstValues.push_back(v);
+                        else if (fi < firstValues.size() && firstValues[fi] == v) continue;
+                        out.key("scan:   live %s = %s   (%s : %s @%d)", f.name.c_str(), v.c_str(), f.owner.c_str(), f.typeName.c_str(), f.offset);
+                    }
+                    ++sum.liveObjects;
                 }
-                ++sum.liveObjects;
             }
         }
     }

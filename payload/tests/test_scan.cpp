@@ -44,6 +44,7 @@ int main(int, char** argv) {
     auto setNull = reinterpret_cast<void (*)(int)>(dlsym(lib, "fake_set_domain_null"));
     auto makeLoco = reinterpret_cast<void* (*)(int)>(dlsym(lib, "fake_make_locomotion"));
     auto makeVertical = reinterpret_cast<void* (*)()>(dlsym(lib, "fake_make_vertical"));
+    auto makePL = reinterpret_cast<void* (*)(int)>(dlsym(lib, "fake_make_player_locomotion"));
     int* attaches = static_cast<int*>(dlsym(lib, "fake_attach_count"));
     int* detaches = static_cast<int*>(dlsym(lib, "fake_detach_count"));
     int* frees = static_cast<int*>(dlsym(lib, "fake_free_count"));
@@ -84,7 +85,7 @@ int main(int, char** argv) {
     check("run says ok", s.ok && s.error.empty());
     check("3 assemblies were looked at", s.assemblies == 3);
     check("engine/system assembly is skipped", has("scan: assembly mscorlib classes=1 (engine / system: skipped)"));
-    check("the game's own assembly is marked", has("scan: assembly Assembly-CSharp classes=11 (the game's own code)"));
+    check("the game's own assembly is marked", has("scan: assembly Assembly-CSharp classes=12 (the game's own code)"));
     check("a third-party assembly is only named", has("scan: assembly Photon.Realtime classes=1 (other: names only)") && !has("CLASS Photon.NetworkMoveSync") && !has("index Photon"));
 
     std::printf("== index\n");
@@ -93,7 +94,7 @@ int main(int, char** argv) {
     check("index lines for the other important classes", has("scan: index Game.MobileVerticalMotion") && has("scan: index Game.CharacterWorldConstraints") && has("scan: index Game.PhysicsBody"));
     check("RemoveItem / Menu / GameSettings are not in the index", !has("index Game.RemoveItem") && !has("index Game.Menu") && !has("index Game.GameSettings"));
     check("the compiler helper <>c__DisplayClass is skipped", !has("DisplayClass"));
-    check("7 index lines", s.indexed == 7 && countOf("scan: index ") == 7);
+    check("8 index lines", s.indexed == 8 && countOf("scan: index ") == 8);
 
     std::printf("== detail\n");
     check("PlayerMovement is written out with its parent", has("scan: CLASS Game.PlayerMovement : MonoBehaviour   [assembly Assembly-CSharp]"));
@@ -108,7 +109,7 @@ int main(int, char** argv) {
     check("RemoveItem is NOT written out", !has("CLASS Game.RemoveItem"));
     check("MobilePlayerLocomotion is written out first-class", has("scan: CLASS Game.MobilePlayerLocomotion : LocomotionBase   [assembly Assembly-CSharp]") && has("method SetJumpHeight(1) : System.Void rva="));
     check("an important class is written out in FULL, no 60-field limit (70 fields)", has("field _pad69 : System.Int32 @292") && !has("(more fields not shown)"));
-    check("6 classes written out in detail", s.matchedClasses == 6);
+    check("7 classes written out in detail", s.matchedClasses == 7);
     check("a speed field in a non-matching class is a field-hit", has("scan: field-hit Game.GameSettings.speedMultiplier : System.Single @16"));
     check("a 'fly' field in the Menu class is a field-hit", has("scan: field-hit Game.Menu.flyingText"));
     check("a Rigidbody-holding class is a type-hit", has("scan: type-hit Game.PhysicsBody.rb : UnityEngine.Rigidbody @24"));
@@ -173,6 +174,27 @@ int main(int, char** argv) {
     check("... and it printed that reason", has("scan: the game's runtime is not ready yet"));
     check("... and it did not read classes", countOf("scan: CLASS") == 0 && countOf("scan: index") == 0);
     setNull(0);
+
+    // ---- stage D5c: the BRIEF scan (headset class PlayerLocomotion, no index / single lines, healthy copies first)
+    {
+        void* healthy = makePL(0); void* garbage = makePL(1); (void)healthy; (void)garbage;
+        gLines.clear();
+        Options brief = opt; brief.brief = true;
+        const Summary sb = run(api, brief, logFn);
+        check("brief scan: ok", sb.ok && !sb.memoryStuck);
+        check("brief scan: no index lines and no single-line hits", countOf("scan: index ") == 0 && !has("scan: field-hit") && !has("scan: type-hit") && sb.indexed == 0);
+        check("brief scan: non-important classes are not written out", !has("scan: CLASS Game.PlayerMovement") && !has("scan: CLASS Game.MobilePlayerLocomotion"));
+        check("brief scan: PlayerLocomotion is written out in full", has("scan: CLASS ShovelTools.PlayerLocomotion : MonoBehaviour") && has("field _forwardMaxSpeed : System.Single @24") && has("method Update(0) : System.Void rva="));
+        check("brief scan: setter code bytes are written (str s0,[x0,#24] ; ret)", has("method SetForwardMaxSpeed(1) : System.Void rva=") && has(" code=001800bdc0035fd6"));
+        check("brief scan: the second setter writes another field (+28)", has(" code=001c00bdc0035fd6"));
+        bool updateHasCode = false; for (const auto& l : gLines) if (l.find("method Update(0)") != std::string::npos && l.find(" code=") != std::string::npos) updateHasCode = true;
+        check("brief scan: methods that are not Set/get_/On get no code bytes", countOf("method Update(0)") >= 1 && !updateHasCode);
+        check("brief scan: both copies are real objects, the best-looking is written first", has("scan: live ShovelTools.PlayerLocomotion: ") && has("2 look like a real running copy") && has("best sanity=100%"));
+        int at = -1; for (size_t i = 0; i < gLines.size(); ++i) if (gLines[i].find("scan: live ShovelTools.PlayerLocomotion #1") != std::string::npos) { at = static_cast<int>(i); break; }
+        check("brief scan: copy #1 is the healthy one (4.5), with its sanity", at >= 0 && gLines[at].find("sanity=100%") != std::string::npos && at + 1 < static_cast<int>(gLines.size()) && gLines[at + 1].find("live _forwardMaxSpeed = 4.5 ") != std::string::npos);
+        check("brief scan: copy #2 is the garbage one with a low sanity and only differing fields", has("scan: live ShovelTools.PlayerLocomotion #2") && has("sanity=0%") && has("only the fields that differ from copy #1"));
+        check("brief scan: the old (phone) class is not looked for any more", !has("scan: live Game.MobilePlayerLocomotion"));
+    }
 
     // ---- a second real copy (another jump height): only the fields that differ are listed for it
     {

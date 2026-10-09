@@ -511,8 +511,10 @@ void* scanMain(void*) {
             delete job;
         } else {
             job->options.libBase = base;
+            job->options.brief = true;          // stage D5c: short report about the headset movement classes (keeps the facts file small enough to send)
             double deadline = job->options.maxSeconds + job->options.stallSeconds + 120.0;      // longer than the scan can honestly take
 #ifdef TZ_FAST_TEST
+            if (!std::getenv("TZ_SCAN_BRIEF")) job->options.brief = false;                         // PC test only: the full report unless asked otherwise
             if (const char* e = std::getenv("TZ_SCAN_DEADLINE_S")) deadline = std::atof(e);      // PC test only: pretend the runtime hangs
             if (const char* e = std::getenv("TZ_SCAN_TEST_HANG_CHUNKS")) job->options.testHangAfterChunks = std::atoi(e);
             if (const char* e = std::getenv("TZ_SCAN_TEST_PIPE_BYTES")) job->options.testPipeBytes = static_cast<size_t>(std::atol(e));
@@ -564,7 +566,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D5b: clickable menu + Movement page + update check + deeper game scan (memory search can no longer hang); movement NOT connected to the game yet)");
+    fact("Timmyzstuff facts (stage D5c: clickable menu + Movement page + update check + short scan of the headset movement classes; movement NOT connected to the game yet)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -808,7 +810,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D5b: pass-through + input probe + frame watcher + clickable menu panel + movement page)");
+    logf_("payload loaded (stage D5c: pass-through + input probe + frame watcher + clickable menu panel + movement page)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

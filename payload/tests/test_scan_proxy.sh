@@ -67,7 +67,7 @@ check "scan wrote a field hit and a type hit" 'grep -q "^scan: field-hit Game.Ga
 check "scan finished OK" 'grep -q "^--- scan finished: ok ---" "$F" && grep -q "^scan: DONE" "$F"'
 check "the index and the full detail of the important class are written" 'grep -q "^scan: index Game.MobilePlayerLocomotion" "$F" && grep -q "^scan: CLASS Game.MobilePlayerLocomotion" "$F" && grep -q "method SetJumpHeight(1) : System.Void rva=" "$F"'
 check "the running copy was found in memory and its values written" 'grep -q "^scan: live Game.MobilePlayerLocomotion #1 size=80" "$F" && grep -q "^scan:   live _maxSpeed = 4.25 " "$F" && grep -q "^scan:   live _jumpHeight = 1.5 " "$F"'
-check "the facts header says stage D5b" 'head -1 "$F" | grep -q "stage D5b"'
+check "the facts header says stage D5c" 'head -1 "$F" | grep -q "stage D5c"'
 check "no memory addresses written (no 0x)" '! grep -q "0x" "$F"'
 check "progress lines for every step are written" 'grep -q "^scan: step 3 of 6" "$F" && grep -q "^scan: step 4 done" "$F" && grep -q "^scan: step 5 done: 4 class" "$F" && grep -q "^scan: step 6 of 6" "$F"'
 check "the memory search line tells the pipe size and trouble count" 'grep -q "^scan: memory search read .* copy pipe=[0-9]* bytes (chunk [0-9]* KB); .*copy trouble=0" "$F"'
@@ -79,6 +79,15 @@ runscan() {            # runscan <name> VAR=value ...   -> facts copied to $W/<n
   out_last=$(cd "$W" && env LD_LIBRARY_PATH="$W" TZ_FACTS_DIR="$W/facts" "$@" "$W/host" "$W/libmain.so" "$W/libil2cpp.so" 2>&1)
   cp -f "$W/facts/timmyzstuff_facts.txt" "$W/$name.txt"; cp -f "$W/$name.txt" "/tmp/facts_scan_$name.txt"
 }
+
+echo "== BRIEF scan through the real button path (what the headset runs)"
+runscan brief TZ_SAMPLE_MS=20000 TZ_SCAN_BRIEF=1
+F5="$W/brief.txt"
+check "game still starts (65542)" '[[ "$out_last" == *"RESULT=65542"* ]]'
+check "brief scan finishes ok" 'grep -q "^--- scan finished: ok ---" "$F5" && grep -q "^scan: DONE" "$F5"'
+check "brief scan leaves out the index and the single hits" '! grep -q "^scan: index " "$F5" && ! grep -q "^scan: field-hit" "$F5" && grep -q "^scan: BRIEF scan" "$F5"'
+check "brief scan writes the headset class in full and looks for it in memory" 'grep -q "^scan: CLASS ShovelTools.PlayerLocomotion" "$F5" && grep -q "^scan: step 5 done: .*ShovelTools.PlayerLocomotion" "$F5"'
+check "brief scan output is small" '[ "$(wc -c < "$F5")" -lt 60000 ]'
 
 echo "== the copy pipe is only ONE page (4 KB): the real headset hung like this with the old code"
 runscan tinypipe TZ_SAMPLE_MS=20000 TZ_SCAN_TEST_PIPE_BYTES=4096

@@ -61,6 +61,7 @@ struct Options {
     uintptr_t libBase = 0;        // where libil2cpp.so is mapped (only used when the system cannot tell which library an address is in)
     bool searchMemory = true;     // look for the running copies of the important classes and print their field values
     int maxSeconds = 90;          // the memory search stops after this long
+    bool brief = false;           // short report: only the important classes (full detail) + the live values; no index, no single-line hits
     int stallSeconds = 10;        // ... and is given up on when it makes no progress at all for this long (a stuck read)
     // only for the PC tests (0 = off): pretend the memory read gets stuck after this many chunks / make the copy pipe this small
     int testHangAfterChunks = 0;

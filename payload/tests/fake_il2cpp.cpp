@@ -51,7 +51,11 @@ Klass kLoco{"MobilePlayerLocomotion", "Game", &kLocoBase,
 Klass kVertical{"MobileVerticalMotion", "Game", nullptr, {{"_gravity", &tFloat, 16, 0}, {"_jumpSpeed", &tFloat, 20, 0}}, {}, 0, false, false, 24};
 Klass kConstraints{"CharacterWorldConstraints", "Game", nullptr, {}, {}, 0, false, false, 16 + 4 * 70};
 
-Image iGame{"Assembly-CSharp", {&kMove, &kSettings, &kBody, &kRemoveItem, &kRemoveMove, &kHelper, &kMenu, &kLocoBase, &kLoco, &kVertical, &kConstraints}};
+// the HEADSET version of the player locomotion (stage D5c): setters are two machine instructions (str s0,[x0,#off] ; ret)
+Klass kPlayerLoco{"PlayerLocomotion", "ShovelTools", &kBehaviour,
+    {{"_forwardMaxSpeed", &tFloat, 24, 0}, {"_jumpHeightMultiplier", &tFloat, 28, 0}, {"_walkSpeedMultiplier", &tFloat, 32, 0}, {"_flag", &tBool, 36, 0}}, {}, 0, false, false, 48};
+
+Image iGame{"Assembly-CSharp", {&kMove, &kSettings, &kBody, &kRemoveItem, &kRemoveMove, &kHelper, &kMenu, &kLocoBase, &kLoco, &kVertical, &kConstraints, &kPlayerLoco}};
 Image iPhoton{"Photon.Realtime", {&kNetMove}};
 Image iCore{"mscorlib", {&kObject}};
 void* gAssemblies[3] = {&iCore, &iGame, &iPhoton};
@@ -67,6 +71,10 @@ void init() {
     kLoco.methods = {mk("SetJumpHeight", 1, &tVoid, 0x3100), mk("SetMaxJumpSpeed", 1, &tVoid, 0x3200)};
     for (int i = 0; i < 70; ++i) kConstraints.fields.push_back({"_pad" + std::to_string(i), &tInt, static_cast<size_t>(16 + 4 * i), 0});
     kConstraints.methods = {mk("Clamp", 1, &tVoid, 0x3300)};
+    kPlayerLoco.methods = {mk("SetForwardMaxSpeed", 1, &tVoid, 0x3400), mk("SetJumpHeightMultiplier", 1, &tVoid, 0x3410), mk("get_CurrentSpeed", 0, &tFloat, 0x3420), mk("Update", 0, &tVoid, 0x3430)};
+    const unsigned char setterA[8] = {0x00, 0x18, 0x00, 0xbd, 0xc0, 0x03, 0x5f, 0xd6};     // str s0,[x0,#24] ; ret
+    const unsigned char setterB[8] = {0x00, 0x1c, 0x00, 0xbd, 0xc0, 0x03, 0x5f, 0xd6};     // str s0,[x0,#28] ; ret
+    std::memcpy(gCode + 0x3400, setterA, 8); std::memcpy(gCode + 0x3410, setterB, 8);
 }
 }  // namespace
 
@@ -89,6 +97,14 @@ __attribute__((visibility("default"))) void* fake_make_locomotion(int kind) {   
     const int mode = 2; const unsigned char pair[8] = {1, 2, 3, 4, 5, 6, 7, 8}; const uint64_t target = reinterpret_cast<uint64_t>(o);
     std::memcpy(o + 24, &baseAccel, 4); std::memcpy(o + 32, &maxSpeed, 4); std::memcpy(o + 36, &jump, 4); std::memcpy(o + 40, vel, 12);
     o[52] = 1; std::memcpy(o + 56, &mode, 4); std::memcpy(o + 64, pair, 8); std::memcpy(o + 72, &target, 8);
+    return o;
+}
+__attribute__((visibility("default"))) void* fake_make_player_locomotion(int kind) {     // 0 = healthy numbers, 1 = garbage numbers (a stale block)
+    unsigned char* o = static_cast<unsigned char*>(calloc(1, 48));
+    Klass* k = &kPlayerLoco; std::memcpy(o, &k, 8);
+    const uint64_t cached = reinterpret_cast<uint64_t>(o) + 0x40; std::memcpy(o + 16, &cached, 8);
+    if (kind == 0) { const float a = 4.5f, b = 1.25f, c = 1.0f; std::memcpy(o + 24, &a, 4); std::memcpy(o + 28, &b, 4); std::memcpy(o + 32, &c, 4); o[36] = 1; }
+    else { const uint32_t a = 0x00000079u, b = 0x7fc00000u, c = 0x4e8c8c8cu; std::memcpy(o + 24, &a, 4); std::memcpy(o + 28, &b, 4); std::memcpy(o + 32, &c, 4); o[36] = 7; }
     return o;
 }
 __attribute__((visibility("default"))) void* fake_make_vertical() {

@@ -53,4 +53,20 @@ system gave us a smaller pipe, that write waits forever. Stage D5b fixes it thre
 - a second guard around the whole scan: after about 4 minutes it writes "GAVE UP waiting ... still in step ..." and the menu says "Scan failed".
 Tested only on a PC with a pretend game (tiny pipe, frozen read, frozen runtime). Not yet tried on the headset.
 
+## What the third scan (stage D5b) taught us - and what stage D5c does about it
+Verified in the facts file from the headset:
+- The memory search now works (about 3 seconds for 1.6 GB, 560 regions, no trouble). The copy pipe was a normal 128 KB one, so my
+  "small pipe" guess for the old hang was probably NOT the cause. The old hang is still unexplained; the new design (own thread, non-blocking,
+  watchdog, Java-heap memory skipped) simply does not hang.
+- **The headset version of the game does NOT use `MobilePlayerLocomotion`** (that is the phone / PC version; its running copies were
+  garbage-looking, probably stale). The headset class is **`ShovelTools.PlayerLocomotion`** (211 fields, 201 methods).
+  It has one tiny setter per movement number: `SetForwardMaxSpeed`, `SetLateralMaxSpeed`, `SetBackwardMaxSpeed`, `SetJumpMaxSpeed`,
+  `SetJumpAcceleration`, `SetJumpDeceleration`, `SetJumpHeightMultiplier` ... and the game's parameter system calls them
+  (`OnLocomotionParameterForwardMaxSpeed`, `...WalkSpeedMultiplier`, `...JumpHeightMultiplier`, `...JumpHangTime` ...).
+  The values come from the game's config (`LocomotionManager`, `LocomotionParams` keys), so the game can re-apply them at any time.
+- The file that reached me was cut off at 265,741 bytes (the same size twice) - the live values of the end were lost. Stage D5c writes a
+  much shorter file (BRIEF scan).
+NOT verified yet: which field each setter writes (stage D5c prints the first bytes of each setter's code so I can read it), what the real
+running `PlayerLocomotion` holds, whether writing those fields changes the movement, and whether the game re-applies its config over our change.
+
 If the game closes while scanning, tell me.
