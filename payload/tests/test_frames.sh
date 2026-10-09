@@ -40,11 +40,12 @@ cat > "$W/host.cpp" <<'C'
 #include <dlfcn.h>
 #include <unistd.h>
 #include <cstdio>
+#include <cstdlib>
 int main(int, char** argv) {
   void* ovr = dlopen("libOVRPlugin.so", RTLD_NOW);
   void* plug = dlopen(argv[2], RTLD_NOW);                 // full path, so the maps line names it
   if (!ovr || !plug) { std::printf("NOLIB\n"); return 4; }
-  void** t = (void**)dlsym(plug, "tz_table");
+  void** t = (void**)malloc(64 * sizeof(void*));          // the plugin keeps its table on the HEAP
   t[0] = dlsym(ovr, "ovrp_EndFrame4"); t[1] = dlsym(ovr, "ovrp_BeginFrame4"); t[2] = dlsym(ovr, "ovrp_WaitToBeginFrame");
   void* h = dlopen(argv[1], RTLD_NOW);
   int (*f)(void*, void*) = (int(*)(void*, void*))dlsym(h, "JNI_OnLoad");
@@ -71,7 +72,7 @@ echo "$out" | grep -E "RESULT|HOST_END"
 
 echo "== frame watcher on"
 check "game's JNI_OnLoad result is unchanged (65542)" '[[ "$out" == *"RESULT=65542"* ]]'
-check "all 3 watches reported installed in 1 slot each" '[ "$(grep -c "installed in 1 slot" "$F")" = 3 ]'
+check "all 3 watches reported installed in 1 heap slot each" '[ "$(grep -c "installed in 1 heap slot" "$F")" = 3 ]'
 check "no memory addresses written (no 0x)" '! grep -q "0x" "$F"'
 check "every call still reached the REAL function with the right answer (BAD=0)" '[[ "$out" == *"BAD=0"* ]]'
 check "real function saw every call the host made" '( h=$(echo "$out" | sed -n "s/.*HOST_END=\([0-9]*\) REAL_END=\([0-9]*\).*/\1 \2/p"); set -- $h; [ "$1" = "$2" ] && [ "$1" -gt 100 ] )'

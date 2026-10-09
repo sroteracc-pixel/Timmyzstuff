@@ -76,12 +76,16 @@ const int kSampleMillis = 3000;
 const int kSettleSeconds = 1;
 const int kBeatSeconds = 1;
 const int kWatchTrySeconds = 3;
+const int kWatchFirstSeconds = 1;
+const double kWatchEvery = 1.0;
 #else
 const int kWaitForLibSeconds = 600;   // wait up to 10 min for the game to load its VR library
 const int kWaitForInitSeconds = 120;  // then up to 2 min for it to finish starting
 const int kSampleMillis = 600 * 1000; // then watch the controllers for 10 minutes
 const int kSettleSeconds = 10;        // pause so the graphics drivers finish loading
 const int kBeatSeconds = 10;          // how often a "frames per second" line is written
+const int kWatchFirstSeconds = 8;      // wait for the game to finish setting up before the first search
+const double kWatchEvery = 10.0;       // each search reads the whole heap, so do it rarely
 const int kWatchTrySeconds = 90;      // keep looking for the plugin's function list this long
 #endif
 const int kMaxChangeLines = 20;       // raw controller lines: only enough to confirm the layout
@@ -232,6 +236,23 @@ bool worthWriting(const unsigned char* a, const unsigned char* b) {
 // Finds the game's VR plugin (libOculusXRPlugin.so) in memory, looks through its WRITABLE data for
 // the saved address of a Meta function, and swaps that one saved address for our counting stub.
 // Only memory that /proc/self/maps lists as read+write is ever touched.
+// Copies memory without ever crashing: the kernel does the read through a pipe and just says "no" for a bad address.
+bool safeCopy(uintptr_t from, unsigned char* to, size_t n) {
+    static int pfd[2] = {-1, -1};
+    if (pfd[0] < 0) {
+        if (pipe(pfd) != 0) { pfd[0] = pfd[1] = -1; return false; }
+#ifdef F_SETPIPE_SZ
+        fcntl(pfd[1], F_SETPIPE_SZ, 1 << 17);
+#endif
+    }
+    if (n > 65536) n = 65536;
+    const ssize_t w = write(pfd[1], reinterpret_cast<const void*>(from), n);
+    if (w != static_cast<ssize_t>(n)) { unsigned char d[4096]; if (w > 0) { ssize_t left = w; while (left > 0) { ssize_t r = read(pfd[0], d, left > 4096 ? 4096 : left); if (r <= 0) break; left -= r; } } return false; }
+    size_t got = 0;
+    while (got < n) { const ssize_t r = read(pfd[0], to + got, n - got); if (r <= 0) return false; got += r; }
+    return true;
+}
+
 struct MapRegion { uintptr_t start, end; bool rw; std::string path; };
 
 std::vector<MapRegion> readMaps() {
@@ -252,24 +273,33 @@ std::vector<MapRegion> readMaps() {
     return out;
 }
 
-// Replaces every saved copy of `target` inside the plugin's writable memory. Returns how many.
-int patchPluginSlot(uint64_t target, uint64_t stub, uint64_t pluginBase, std::vector<unsigned long>* offsets) {
-    const std::vector<MapRegion> maps = readMaps();
+bool gWatchPatched[3] = {false, false, false};
+
+// Only the program's own heap is touched: that is where the game's VR plugin keeps its table of
+// saved Meta function addresses (found by the stage D1c report). The plugin's own data, other
+// libraries, stacks and OUR OWN variables are never touched.
+bool isHeapRegion(const MapRegion& r) {
+    if (!r.rw || r.end - r.start > (256UL << 20)) return false;
+    if (r.path.find("libc_malloc") != std::string::npos || r.path.find("scudo") != std::string::npos || r.path == "[heap]") return true;
+    return false;
+}
+
+// Replaces every saved copy of `target` in the heap, reading safely. Returns how many.
+int patchHeapSlot(uint64_t target, uint64_t stub, std::vector<unsigned long>* where) {
+    static unsigned char chunk[65536];
     int patched = 0;
-    bool inPlugin = false;
-    uintptr_t prevEnd = 0;
-    for (const MapRegion& r : maps) {
-        const bool named = r.path.find("libOculusXRPlugin.so") != std::string::npos;
-        const bool anonName = r.path.empty() || r.path.compare(0, 6, "[anon:") == 0;   // Android labels .bss "[anon:.bss]"
-        const bool followsPlugin = inPlugin && anonName && r.start == prevEnd;   // its .bss, mapped right after
-        inPlugin = named || followsPlugin;
-        prevEnd = r.end;
-        if (!inPlugin || !r.rw) continue;
-        for (uintptr_t p = (r.start + 7) & ~static_cast<uintptr_t>(7); p + 8 <= r.end; p += 8) {
-            volatile uint64_t* slot = reinterpret_cast<volatile uint64_t*>(p);
-            if (*slot == target) {
-                *slot = stub;                                  // one aligned 8-byte store
-                if (offsets) offsets->push_back(static_cast<unsigned long>(p - pluginBase));
+    for (const MapRegion& r : readMaps()) {
+        if (!isHeapRegion(r)) continue;
+        for (uintptr_t c = r.start; c < r.end; c += sizeof(chunk)) {
+            const size_t n = r.end - c < sizeof(chunk) ? static_cast<size_t>(r.end - c) : sizeof(chunk);
+            if (!safeCopy(c, chunk, n)) continue;
+            for (size_t o = 0; o + 8 <= n; o += 8) {
+                uint64_t v; std::memcpy(&v, chunk + o, 8);
+                if (v != target) continue;
+                volatile uint64_t* slot = reinterpret_cast<volatile uint64_t*>(c + o);
+                if (*slot != target) continue;                  // changed since we read it
+                *slot = stub;                                   // one aligned 8-byte store
+                if (where) where->push_back(static_cast<unsigned long>(c + o));
                 ++patched;
             }
         }
@@ -277,55 +307,28 @@ int patchPluginSlot(uint64_t target, uint64_t stub, uint64_t pluginBase, std::ve
     return patched;
 }
 
-uintptr_t pluginBaseAddress() {
-    for (const MapRegion& r : readMaps())
-        if (r.path.find("libOculusXRPlugin.so") != std::string::npos) return r.start;
-    return 0;
-}
-
-bool gWatchPatched[3] = {false, false, false};
-
 // Tries to install any watch that is not installed yet. Returns true when all three are done.
 bool tryInstallWatches(void* ovr) {
     bool all = true;
-    const uintptr_t base = pluginBaseAddress();
-    if (!base) return false;                                   // plugin not loaded yet
     for (int i = 0; i < frameWatchCount(); ++i) {
         FrameWatch* w = frameWatch(i);
         if (gWatchPatched[i]) continue;
         void* real = dlsym(ovr, w->name);
         if (!real) { all = false; continue; }
         *w->orig = reinterpret_cast<uint64_t>(real);           // set BEFORE patching, so the stub can always jump on
-        std::vector<unsigned long> offs;
-        const int n = patchPluginSlot(reinterpret_cast<uint64_t>(real), reinterpret_cast<uint64_t>(w->stub), base, &offs);
+        std::vector<unsigned long> where;
+        const int n = patchHeapSlot(reinterpret_cast<uint64_t>(real), reinterpret_cast<uint64_t>(w->stub), &where);
         if (n > 0) {
             gWatchPatched[i] = true;
-            fact("frame watch %s: installed in %d slot(s), at byte offset %lu inside the plugin", w->name, n, offs.empty() ? 0UL : offs[0]);
+            fact("frame watch %s: installed in %d heap slot(s), first at %lx", w->name, n, where.empty() ? 0UL : where[0]);
         } else {
-            all = false;                                       // the plugin has not saved the address yet; try again later
+            all = false;
         }
     }
     return all;
 }
 
 
-
-// Copies memory without ever crashing: the kernel does the read through a pipe and just says "no" for a bad address.
-bool safeCopy(uintptr_t from, unsigned char* to, size_t n) {
-    static int pfd[2] = {-1, -1};
-    if (pfd[0] < 0) {
-        if (pipe(pfd) != 0) { pfd[0] = pfd[1] = -1; return false; }
-#ifdef F_SETPIPE_SZ
-        fcntl(pfd[1], F_SETPIPE_SZ, 1 << 17);
-#endif
-    }
-    if (n > 65536) n = 65536;
-    const ssize_t w = write(pfd[1], reinterpret_cast<const void*>(from), n);
-    if (w != static_cast<ssize_t>(n)) { unsigned char d[4096]; if (w > 0) { ssize_t left = w; while (left > 0) { ssize_t r = read(pfd[0], d, left > 4096 ? 4096 : left); if (r <= 0) break; left -= r; } } return false; }
-    size_t got = 0;
-    while (got < n) { const ssize_t r = read(pfd[0], to + got, n - got); if (r <= 0) return false; got += r; }
-    return true;
-}
 
 // Read-only report: where are the plugin's regions, and where does each Meta address appear in memory?
 void diagnoseWatches(void* ovr, const char* when) {
@@ -481,10 +484,10 @@ void* probeMain(void*) {
     bool wasVisible = false;
     double last = secondsSinceStart();
     double nextBeat = last + kBeatSeconds;
-    double nextWatchTry = last;
+    double nextWatchTry = last + kWatchFirstSeconds;
     const double watchGiveUp = last + kWatchTrySeconds;
     bool watchesDone = false;
-    bool diag1 = false, diag2 = false;
+    bool diag2 = false;
     uint64_t lastCounts[3] = {0, 0, 0};
     double lastBeatTime = last;
     const double endAt = last + kSampleMillis / 1000.0;
@@ -521,10 +524,9 @@ void* probeMain(void*) {
         std::memcpy(prev, buf, sizeof prev);
         if (!watchesDone && now >= nextWatchTry && now < watchGiveUp) {
             watchesDone = tryInstallWatches(ovr);
-            nextWatchTry = now + 1.0;
+            nextWatchTry = now + kWatchEvery;
             if (watchesDone) fact("t=%.1f all frame watches are installed", now);
         }
-        if (!diag1 && now >= 20.0) { diag1 = true; diagnoseWatches(ovr, "t=20"); }
         if (!diag2 && now >= watchGiveUp) {
             diag2 = true;
             for (int i = 0; i < frameWatchCount(); ++i)
