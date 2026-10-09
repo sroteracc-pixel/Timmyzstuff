@@ -58,9 +58,13 @@ const ColorChoice& colorChoice(int i);
 
 // Slider ranges
 const float kScaleMin = 0.75f, kScaleMax = 1.5f, kScaleStep = 0.05f;               // menu size
-const float kAlphaMin = 0.0f,  kAlphaMax = 0.75f, kAlphaStep = 0.05f;              // menu transparency (0.75 = 75% see-through)
+const float kAlphaMin = 0.0f,  kAlphaMax = 0.25f, kAlphaStep = 0.05f;              // menu transparency (0.25 = 25% see-through)
 const float kDistMin = 0.6f,   kDistMax = 2.0f,  kDistStep = 0.05f;                // menu distance in metres
 const float kDistDefault = 1.15f;
+// Movement sliders (page "Movement")
+const float kSpeedMin = 1.1f, kSpeedMax = 5.0f, kSpeedStep = 0.1f;                 // Speed Boost, shown as 1.1x .. 5.0x
+const float kJumpMin = 1.1f,  kJumpMax = 5.0f,  kJumpStep = 0.1f;                  // Jump Boost (jump HEIGHT), 1.1x .. 5.0x
+const float kGravMin = 0.0f,  kGravMax = 90.0f, kGravStep = 5.0f;                  // Low / High Gravity in percent
 
 // Everything the picture depends on.
 struct PanelState {
@@ -68,11 +72,23 @@ struct PanelState {
     bool sound = true;              // "Sound effects" switch
     int colorIndex = 0;             // which colour in the list (0 = Default purple)
     float scale = 1.0f;             // menu size, 0.75 .. 1.5
-    float transparency = 0.0f;      // 0 = solid ... 0.75 = 75% see-through
+    float transparency = 0.0f;      // 0 = solid ... 0.25 = 25% see-through
     float distance = kDistDefault;  // how far in front of you the menu floats (metres)
     int testClicks = 0;             // how many times Test button was pressed
     int hover = -1;                 // which control the pointer is over (a HitId, or -1)
     int dragSlider = 0;             // HitId of the slider being dragged (0 = none)
+
+    // ---- Movement page. The switches are NEVER saved: every launch starts with all of them off. ----
+    bool speedOn = false;           // Speed Boost
+    bool jumpOn = false;            // Jump Boost
+    int gravityMode = 0;            // 0 = off, 1 = Low Gravity, 2 = High Gravity (one value, so two can never be on together)
+    float speedMul = kSpeedMin;     // 1.1 .. 5.0
+    float jumpMul = kJumpMin;       // 1.1 .. 5.0 (times the normal jump HEIGHT)
+    float lowGravPct = 0.0f;        // 0 .. 90: 90 means only 10% of normal gravity is left
+    float highGravPct = 0.0f;       // 0 .. 90: 90 means 190% of normal gravity
+    int linkState = 0;              // 0 = the menu is not connected to the game's movement code, 1 = connected
+    int scanState = 0;              // game-code scan: 0 not run, 1 running, 2 done, 3 failed
+    int scanMatches = 0;            // how many interesting classes the scan wrote down
 };
 
 // Clickable areas (in picture pixels), so a pointer can find what it points at.
@@ -84,11 +100,21 @@ enum HitId {
     HIT_TEST = 34,
     HIT_SLIDER_ALPHA = 35,
     HIT_SLIDER_DIST = 36,
+    HIT_SLIDER_SPEED = 37,
+    HIT_SLIDER_JUMP = 38,
+    HIT_SLIDER_LOWGRAV = 39,
+    HIT_SLIDER_HIGHGRAV = 40,
+    HIT_TOGGLE_SPEED = 41,
+    HIT_TOGGLE_JUMP = 42,
+    HIT_TOGGLE_LOWGRAV = 43,
+    HIT_TOGGLE_HIGHGRAV = 44,
+    HIT_SCAN = 45,                  // "Scan game code" button on the Movement page
     HIT_COLOR0 = 60,                // 60 .. 69 = the 10 colours
 };
 struct HitRect { int id; float x, y, w, h; };
 
 const int kTabCount = 11;
+const int kTabMovement = 3;      // index of the "Movement" page
 const char* tabName(int i);
 
 // Paints the whole menu. `hits` (optional) receives the clickable areas.
@@ -102,7 +128,8 @@ bool sliderRange(int hitId, float* lo, float* hi, float* step);   // false if hi
 float& sliderValue(PanelState& s, int hitId);
 float snapSlider(int hitId, float v);                              // rounds to the slider's steps and keeps it in range
 
-// Saved settings: a few short lines of text (sound, colour, size, transparency, distance).
+// Saved settings: a few short lines of text (sound, colour, size, transparency, distance, movement slider values).
+// The movement SWITCHES are deliberately not saved.
 std::string settingsToText(const PanelState& s);
 bool settingsFromText(const std::string& text, PanelState& s);   // false if nothing usable was found
 

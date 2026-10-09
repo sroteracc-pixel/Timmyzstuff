@@ -19,3 +19,9 @@ Never upload `TZ_KEYSTORE_B64.txt` to GitHub. Keep it safe: if you lose it, you 
 - "no build has been published (404)": the secret is missing, or no build has finished yet.
 - "signed with a different key": do step 5 again.
 - "Already up to date": the build on GitHub is the one you have.
+
+## The update line (top of the app)
+When the app opens it looks (only looks) at GitHub and shows one of:
+- **Update available - build N**: a newer build exists. Press **Update** to install it. Nothing installs by itself.
+- **Up to date**: you have the newest build.
+- **Couldn't check for updates**: no internet, GitHub is busy (it limits how often one network may ask), or no build is published yet.

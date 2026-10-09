@@ -69,6 +69,7 @@ float gCurX = 0, gCurY = 0;
 std::string gSettingsPath;
 int gPointerLogLines = 0;
 std::atomic<int64_t> gMaskUntilMs{0};
+std::atomic<bool> gScanRequested{false};
 std::atomic<uint64_t> gInputCalls{0}, gInputMasked{0};
 
 alignas(16) unsigned char gSubmitA[0x200];
@@ -325,6 +326,7 @@ PointerResult pointer(double now, const PointerSample& smp, LogFn log) {
     }
     const bool wasCursor = gCursorOn;
     const tzpanel::Outcome o = gInteraction.update(gState, gHits, aims);
+    if (o.scanRequested) { gScanRequested.store(true); if (log) log("pointer: Scan game code pressed"); }
     if (o.layoutCommitted) { gAppliedScale = gState.scale; gAppliedDistance = gState.distance; buildSubmit(); }
     if (o.saveNeeded) saveSettings(log);
     if (o.redraw) gDirty = true;
@@ -353,6 +355,20 @@ void setSettingsPath(const char* path, LogFn log) {
     const bool ok = tzpanel::settingsFromText(text, gState);
     gAppliedScale = gState.scale; gAppliedDistance = gState.distance; gDirty = true;
     if (log) log("settings: loaded %s -> sound=%d colour=%s size=%.2f transparency=%.2f distance=%.2f", ok ? "ok" : "(nothing usable)", gState.sound ? 1 : 0, tzpanel::colorChoice(gState.colorIndex).name, gState.scale, gState.transparency, gState.distance);
+}
+
+bool takeScanRequest() { return gScanRequested.exchange(false); }
+void setScanResult(bool ok, int matches) {
+    std::lock_guard<std::mutex> g(gMutex);
+    gState.scanState = ok ? 2 : 3; gState.scanMatches = matches; gDirty = true;
+}
+void setLinkState(int linked) {
+    std::lock_guard<std::mutex> g(gMutex);
+    if (gState.linkState != linked) { gState.linkState = linked; gDirty = true; }
+}
+MovementAsk movementAsk() {
+    std::lock_guard<std::mutex> g(gMutex);
+    return MovementAsk{gState.speedOn, gState.jumpOn, gState.gravityMode, gState.speedMul, gState.jumpMul, gState.lowGravPct, gState.highGravPct};
 }
 
 bool inputBlocked() { return gShow.load(std::memory_order_acquire) || nowMs() < gMaskUntilMs.load(std::memory_order_relaxed); }

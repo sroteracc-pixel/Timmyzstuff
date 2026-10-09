@@ -50,6 +50,9 @@ bool sliderRange(int id, float* lo, float* hi, float* step) {
     case HIT_SLIDER_SIZE:  *lo = kScaleMin; *hi = kScaleMax; *step = kScaleStep; return true;
     case HIT_SLIDER_ALPHA: *lo = kAlphaMin; *hi = kAlphaMax; *step = kAlphaStep; return true;
     case HIT_SLIDER_DIST:  *lo = kDistMin;  *hi = kDistMax;  *step = kDistStep;  return true;
+    case HIT_SLIDER_SPEED: *lo = kSpeedMin; *hi = kSpeedMax; *step = kSpeedStep; return true;
+    case HIT_SLIDER_JUMP:  *lo = kJumpMin;  *hi = kJumpMax;  *step = kJumpStep;  return true;
+    case HIT_SLIDER_LOWGRAV: case HIT_SLIDER_HIGHGRAV: *lo = kGravMin; *hi = kGravMax; *step = kGravStep; return true;
     default: return false;
     }
 }
@@ -59,6 +62,10 @@ float& sliderValue(PanelState& s, int id) {
     case HIT_SLIDER_SIZE: return s.scale;
     case HIT_SLIDER_ALPHA: return s.transparency;
     case HIT_SLIDER_DIST: return s.distance;
+    case HIT_SLIDER_SPEED: return s.speedMul;
+    case HIT_SLIDER_JUMP: return s.jumpMul;
+    case HIT_SLIDER_LOWGRAV: return s.lowGravPct;
+    case HIT_SLIDER_HIGHGRAV: return s.highGravPct;
     default: return dummy;
     }
 }
@@ -66,6 +73,7 @@ float snapSlider(int id, float v) {
     float lo, hi, step;
     if (!sliderRange(id, &lo, &hi, &step)) return v;
     v = lo + std::round((v - lo) / step) * step;
+    v = std::round(v * 1000.0f) / 1000.0f;            // no 1.4000001 style leftovers: the shown value is the exact value
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
@@ -462,6 +470,71 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
             }
             if (hits) hits->push_back({HIT_TEST, rx, ry, rw, rh});
         }
+    } else if (s.tab == kTabMovement) {
+        float y = cy0 + 66;
+        struct Feature { int toggleId, sliderId; const char* label; bool on; };
+        const Feature feats[4] = {
+            {HIT_TOGGLE_SPEED, HIT_SLIDER_SPEED, "Speed Boost", s.speedOn},
+            {HIT_TOGGLE_JUMP, HIT_SLIDER_JUMP, "Jump Boost", s.jumpOn},
+            {HIT_TOGGLE_LOWGRAV, HIT_SLIDER_LOWGRAV, "Low Gravity", s.gravityMode == 1},
+            {HIT_TOGGLE_HIGHGRAV, HIT_SLIDER_HIGHGRAV, "High Gravity", s.gravityMode == 2},
+        };
+        for (const Feature& f : feats) {
+            const float ry = y, rh = 78;
+            const bool hvT = s.hover == f.toggleId;
+            c.fillRoundRect(rx, ry, rw, rh, 16, card);
+            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, f.on ? withA(accentHi, 0.7f) : cardEdge);
+            c.text(kFontLabel, rx + 22, ry + 32, f.label, f.on ? white : rgba(222, 222, 234));
+            PanelState tmp = s;
+            const float v = sliderValue(tmp, f.sliderId);
+            char buf[40], hint[64];
+            if (f.sliderId == HIT_SLIDER_SPEED) { std::snprintf(buf, sizeof buf, "%.1fx", v); std::snprintf(hint, sizeof hint, "faster walking and running"); }
+            else if (f.sliderId == HIT_SLIDER_JUMP) { std::snprintf(buf, sizeof buf, "%.1fx", v); std::snprintf(hint, sizeof hint, "jump height, not just upward speed"); }
+            else if (f.sliderId == HIT_SLIDER_LOWGRAV) { std::snprintf(buf, sizeof buf, "%d%%", static_cast<int>(std::lround(v))); std::snprintf(hint, sizeof hint, "gravity at %d%% of normal", 100 - static_cast<int>(std::lround(v))); }
+            else { std::snprintf(buf, sizeof buf, "%d%%", static_cast<int>(std::lround(v))); std::snprintf(hint, sizeof hint, "gravity at %d%% of normal", 100 + static_cast<int>(std::lround(v))); }
+            c.text(kFontTiny, rx + 22 + c.textWidth(kFontLabel, f.label) + 16, ry + 31, hint, dimGrey);
+            // on/off switch
+            const float tw = 66, th = 32, tx = rx + rw - tw - 22, ty0 = ry + 14;
+            c.fillRoundRect(tx, ty0, tw, th, th / 2, f.on ? accent : rgba(58, 58, 74));
+            c.strokeRoundRect(tx, ty0, tw, th, th / 2, hvT ? 2.2f : 1.4f, f.on ? accentHi : (hvT ? withA(accentHi, 0.9f) : rgba(84, 84, 104)));
+            c.fillCircle(f.on ? tx + tw - th / 2 : tx + th / 2, ty0 + th / 2, th / 2 - 4, rgba(250, 250, 255));
+            if (hits) hits->push_back({f.toggleId, tx - 14, ry + 4, tw + 28, 52});
+            // slider + exact value
+            float lo, hi, step; sliderRange(f.sliderId, &lo, &hi, &step);
+            const float sx0 = rx + 26, sx1 = rx + rw - 128, sy = ry + 58;
+            const float t = clamp01((v - lo) / (hi - lo)), kx = sx0 + (sx1 - sx0) * t;
+            const bool hot = s.dragSlider == f.sliderId || s.hover == f.sliderId;
+            c.fillRoundRect(sx0, sy - 5, sx1 - sx0, 10, 5, rgba(14, 14, 20));
+            c.strokeRoundRect(sx0, sy - 5, sx1 - sx0, 10, 5, 1.2f, rgba(52, 52, 68));
+            if (kx - sx0 > 1) c.fillRoundRectGradient(sx0, sy - 5, std::max(10.0f, kx - sx0), 10, 5, f.on ? accentHi : rgba(110, 110, 130), f.on ? accent : rgba(84, 84, 104));
+            if (hot) c.glowRoundRect(kx - 10, sy - 10, 20, 20, 10, 10, withA(accentHi, 0.7f));
+            c.fillCircle(kx, sy, hot ? 13.5f : 11.5f, rgba(250, 250, 255));
+            c.strokeCircle(kx, sy, hot ? 13.5f : 11.5f, 3, f.on ? (hot ? accentHi : accent) : rgba(120, 120, 140));
+            c.text(kFontLabel, rx + rw - 22 - c.textWidth(kFontLabel, buf), sy + 8, buf, f.on ? accentHi : grey);
+            if (hits) hits->push_back({f.sliderId, sx0 - 16, ry + 40, sx1 - sx0 + 32, 34});
+            y += rh + 8;
+        }
+        // game link + scan button
+        {
+            const float ry = y, rh = 72;
+            c.fillRoundRect(rx, ry, rw, rh, 16, card);
+            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, cardEdge);
+            c.fillCircle(rx + 28, ry + 26, 7, s.linkState ? rgba(80, 220, 130) : rgba(240, 170, 60));
+            c.text(kFontLabel, rx + 46, ry + 32, s.linkState ? "Game link: connected" : "Game link: not connected", white);
+            const char* note =
+                s.linkState ? "The switches above change the game." :
+                s.scanState == 1 ? "Scanning the game's code..." :
+                s.scanState == 2 ? "Scan done. Press Get facts in the patcher and send me the file." :
+                s.scanState == 3 ? "Scan failed. Press Get facts in the patcher and send me the file." :
+                "The switches are saved but do nothing in the game yet. Press Scan.";
+            c.text(kFontTiny, rx + 22, ry + 63, note, grey);
+            const float bw = 188, bh = 36, bx = rx + rw - bw - 18, by = ry + 8;
+            const bool hv = s.hover == HIT_SCAN, busy = s.scanState == 1;
+            c.fillRoundRectGradient(bx, by, bw, bh, 13, busy ? rgba(48, 48, 60) : (hv ? accentHi : accent), busy ? rgba(38, 38, 50) : accentLo);
+            c.strokeRoundRect(bx, by, bw, bh, 13, 1.4f, busy ? rgba(70, 70, 88) : accentHi);
+            c.textCentered(kFontSmall, bx + bw / 2, by + bh / 2 + 7, busy ? "Scanning..." : "Scan game code", busy ? grey : white);
+            if (hits) hits->push_back({HIT_SCAN, bx, by, bw, bh});
+        }
     } else {
         const float ry = cy0 + 78, rh = 120;
         c.fillRoundRect(rx, ry, rw, rh, 18, card);
@@ -502,8 +575,9 @@ void drawCursor(Canvas& c, float x, float y, const PanelState& s, bool pressed) 
 
 // ---------------------------------------------------------------------------------- saved settings
 std::string settingsToText(const PanelState& s) {
-    char b[200];
-    std::snprintf(b, sizeof b, "sound=%d\ncolor=%d\nscale=%.2f\ntransparency=%.2f\ndistance=%.2f\n", s.sound ? 1 : 0, s.colorIndex, s.scale, s.transparency, s.distance);
+    char b[320];
+    std::snprintf(b, sizeof b, "sound=%d\ncolor=%d\nscale=%.2f\ntransparency=%.2f\ndistance=%.2f\nspeed=%.1f\njump=%.1f\nlowgravity=%.0f\nhighgravity=%.0f\n",
+                  s.sound ? 1 : 0, s.colorIndex, s.scale, s.transparency, s.distance, s.speedMul, s.jumpMul, s.lowGravPct, s.highGravPct);
     return b;
 }
 bool settingsFromText(const std::string& text, PanelState& s) {
@@ -517,7 +591,13 @@ bool settingsFromText(const std::string& text, PanelState& s) {
         if (key == "sound" && (val == "0" || val == "1")) { s.sound = (val == "1"); any = true; }
         else if (key == "color") { const long v = std::strtol(val.c_str(), &e, 10); if (e != val.c_str() && v >= 0 && v < kColorCount) { s.colorIndex = static_cast<int>(v); any = true; } }
         else if (key == "scale") { const float f = std::strtof(val.c_str(), &e); if (e != val.c_str() && f >= kScaleMin - 1e-4f && f <= kScaleMax + 1e-4f) { s.scale = snapSlider(HIT_SLIDER_SIZE, f); any = true; } }
-        else if (key == "transparency") { const float f = std::strtof(val.c_str(), &e); if (e != val.c_str() && f >= kAlphaMin - 1e-4f && f <= kAlphaMax + 1e-4f) { s.transparency = snapSlider(HIT_SLIDER_ALPHA, f); any = true; } }
+        else if (key == "transparency") { const float f = std::strtof(val.c_str(), &e); if (e != val.c_str() && f >= 0.0f && f <= 1.0f) { s.transparency = snapSlider(HIT_SLIDER_ALPHA, f); any = true; } }   // an older, higher saved value is pulled down to the new maximum
+        else if (key == "speed" || key == "jump" || key == "lowgravity" || key == "highgravity") {
+            const int id = key == "speed" ? HIT_SLIDER_SPEED : key == "jump" ? HIT_SLIDER_JUMP : key == "lowgravity" ? HIT_SLIDER_LOWGRAV : HIT_SLIDER_HIGHGRAV;
+            float lo, hi, step; sliderRange(id, &lo, &hi, &step);
+            const float f = std::strtof(val.c_str(), &e);
+            if (e != val.c_str() && f >= lo - 1e-3f && f <= hi + 1e-3f) { sliderValue(s, id) = snapSlider(id, f); any = true; }
+        }
         else if (key == "distance") { const float f = std::strtof(val.c_str(), &e); if (e != val.c_str() && f >= kDistMin - 1e-4f && f <= kDistMax + 1e-4f) { s.distance = snapSlider(HIT_SLIDER_DIST, f); any = true; } }
     }
     return any;

@@ -86,6 +86,9 @@ class Updater(private val context: Context, private val log: (String) -> Unit) {
         return UpdateInfo(code, apkName, apkUrl, shaUrl)
     }
 
+    /** Just the newest build number on GitHub (for the automatic check when the app opens). Changes nothing. */
+    fun latestBuildCode(): Long = fetchLatest().code
+
     private fun download(info: UpdateInfo, target: File): String {
         val temp = File(target.path + ".part")
         temp.delete()

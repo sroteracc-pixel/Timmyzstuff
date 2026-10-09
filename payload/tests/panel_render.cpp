@@ -14,7 +14,7 @@ static void save(const char* path, const Canvas& c, int bgGrey = 60) {
     }
     std::fclose(f);
 }
-int main(int, char** argv) {
+int main(int argc, char** argv) {
     Canvas c(kWidth, kHeight);
     PanelState s; std::vector<HitRect> hits;
     drawPanel(c, s, &hits); save(argv[1], c);
@@ -23,5 +23,12 @@ int main(int, char** argv) {
     drawPanel(c, s, nullptr); drawCursor(c, 700, 480, s, false); save(argv[2], c);
     PanelState t; t.colorIndex = 7; t.tab = 4; t.hover = HIT_TAB0 + 6;
     drawPanel(c, t, nullptr); c.fadeAll(0.25f); save(argv[3], c);
+    if (argc > 5) {   // Movement page: everything off, then a mix of settings with the scan result showing
+        PanelState m; m.tab = kTabMovement;
+        drawPanel(c, m, nullptr); save(argv[4], c);
+        PanelState n; n.tab = kTabMovement; n.colorIndex = 4;
+        n.speedOn = true; n.speedMul = 3.7f; n.jumpMul = 2.3f; n.gravityMode = 1; n.lowGravPct = 90; n.highGravPct = 35; n.hover = HIT_TOGGLE_JUMP; n.scanState = 2; n.linkState = 0;
+        drawPanel(c, n, nullptr); save(argv[5], c);
+    }
     return 0;
 }

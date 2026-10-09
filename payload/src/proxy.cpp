@@ -35,12 +35,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "menu_input.h"   // the open/close rules (pure C++, tested on a PC)
 #include "frame_stubs.h"
+#include "movement.h"     // the movement rules (stage D4)
+#include "il2cpp_scan.h"   // read-only scan of the game's code (stage D4)
 #include "overlay.h"      // shows the menu picture in the headset (stage D2)  // counting doorways for ovrp_EndFrame4 / BeginFrame4 / WaitToBeginFrame
 
 #ifdef __ANDROID__
@@ -83,7 +86,7 @@ const double kWatchEvery = 1.0;
 #else
 const int kWaitForLibSeconds = 600;   // wait up to 10 min for the game to load its VR library
 const int kWaitForInitSeconds = 120;  // then up to 2 min for it to finish starting
-const int kSampleMillis = 600 * 1000; // then watch the controllers for 10 minutes
+const int kSampleMillis = 0;          // 0 = keep watching the controllers for the WHOLE game session (the menu needs this)
 const int kSettleSeconds = 10;        // pause so the graphics drivers finish loading
 const int kBeatSeconds = 10;          // how often a "frames per second" line is written
 const double kOverlayDelay = 3.0;      // after the frame watcher is running, wait this long before creating the panel
@@ -474,6 +477,51 @@ void dumpGameLayers() {
     }
 }
 
+// ---- stage D4: the "Scan game code" button -------------------------------------------------
+// Runs on its own thread so the menu keeps working. Read-only: it only asks libil2cpp.so for names.
+std::atomic<bool> gScanRunning{false};
+
+void* scanMain(void*) {
+    fact("--- scan requested from the menu at t=%.1f ---", secondsSinceStart());
+    bool ok = false; int matches = 0;
+    void* lib = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
+    uintptr_t base = 0; std::string path;
+    for (const MapRegion& r : readMaps()) {
+        if (r.path.size() >= 12 && r.path.compare(r.path.size() - 12, 12, "libil2cpp.so") == 0) { if (!base || r.start < base) base = r.start; path = r.path; }
+    }
+    if (!lib && !path.empty()) lib = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+    if (!lib) {
+        fact("scan: libil2cpp.so is not loaded in the game (so there is nothing to read)");
+    } else {
+        tzscan::Api api; std::string missing;
+        if (!tzscan::loadApi(lib, &api, &missing)) {
+            fact("scan: libil2cpp.so does not export these needed functions: %s", missing.c_str());
+        } else {
+            const tzscan::Summary s = tzscan::run(api, base, fact);
+            ok = s.ok; matches = s.matchedClasses + s.fieldHits + s.typeHits;
+            if (!s.ok) fact("scan: FAILED: %s", s.error.c_str());
+        }
+    }
+    tzoverlay::setScanResult(ok, matches);
+    fact("--- scan finished: %s ---", ok ? "ok" : "FAILED");
+    gScanRunning.store(false);
+    return nullptr;
+}
+
+void startScan() {
+    bool expected = false;
+    if (!gScanRunning.compare_exchange_strong(expected, true)) return;     // one scan at a time
+    pthread_t t;
+    if (pthread_create(&t, nullptr, scanMain, nullptr) == 0) pthread_detach(t);
+    else { gScanRunning.store(false); tzoverlay::setScanResult(false, 0); fact("scan: could not start the scan thread"); }
+}
+
+// ---- stage D4: movement ----------------------------------------------------------------------
+// The rules (tested on a PC) live in movement.cpp. There is NO adapter to the game yet, so the controller
+// reports "no game link" and nothing is changed in the game. The requests are still logged, so the facts
+// file shows what the menu asked for.
+tzmove::Controller gMove;
+
 void* probeMain(void*) {
     secondsSinceStart();                               // start the clock
     std::string where;
@@ -481,7 +529,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D3: clickable menu - pointer, number pad, size slider, input block)");
+    fact("Timmyzstuff facts (stage D4: clickable menu + Movement page + update check; movement NOT connected to the game yet)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -573,7 +621,7 @@ void* probeMain(void*) {
     double inputNextTry = 0;
     uint64_t lastCounts[3] = {0, 0, 0};
     double lastBeatTime = last;
-    const double endAt = last + kSampleMillis / 1000.0;
+    const double endAt = kSampleMillis > 0 ? last + kSampleMillis / 1000.0 : 1e18;
     while (secondsSinceStart() < endAt) {
         std::memset(buf, 0, sizeof buf);
         const int rc = ctrlFn(0x3u, buf);               // 0x3 = left + right Touch controller
@@ -659,6 +707,30 @@ void* probeMain(void*) {
             fact("overlay: init %s", okOverlay ? "OK" : "FAILED");
             overlayNextTry = now + 15.0;
         }
+        // ---- stage D4: scan button + movement rules
+        if (tzoverlay::takeScanRequest()) startScan();
+#ifdef TZ_FAST_TEST
+        { static bool testScanDone = false; if (!testScanDone && now >= 2.0) { testScanDone = true; startScan(); } }     // PC test only: press "Scan" by itself
+#endif
+        {
+            const tzoverlay::MovementAsk ask = tzoverlay::movementAsk();
+            tzmove::Request req;
+            req.speedOn = ask.speedOn; req.speed = ask.speed; req.jumpOn = ask.jumpOn; req.jump = ask.jump;
+            req.gravityMode = ask.gravityMode; req.lowPct = ask.lowPct; req.highPct = ask.highPct; req.flyActive = false;   // there is no Fly yet
+            gMove.update(req);
+            tzoverlay::setLinkState(gMove.status() == tzmove::Controller::NO_LINK ? 0 : 1);
+            static int moveLogs = 0; static double lastMoveLog = -10; static tzoverlay::MovementAsk lastAsk = {false, false, 0, 0, 0, 0, 0};
+            const bool changed = ask.speedOn != lastAsk.speedOn || ask.jumpOn != lastAsk.jumpOn || ask.gravityMode != lastAsk.gravityMode ||
+                                 (now - lastMoveLog > 1.0 && (ask.speed != lastAsk.speed || ask.jump != lastAsk.jump || ask.lowPct != lastAsk.lowPct || ask.highPct != lastAsk.highPct) && (ask.speedOn || ask.jumpOn || ask.gravityMode));
+            if (changed && moveLogs < 40) {
+                ++moveLogs; lastMoveLog = now; lastAsk = ask;
+                const tzmove::Effective e = tzmove::resolve(req);
+                fact("movement: menu asks speed=%s %.1fx | jump=%s %.1fx | gravity=%s %.0f%%  ->  would send speed x%.2f, jump height x%.2f, gravity x%.2f  [%s]",
+                     ask.speedOn ? "ON" : "off", ask.speed, ask.jumpOn ? "ON" : "off", ask.jump,
+                     ask.gravityMode == 1 ? "LOW" : (ask.gravityMode == 2 ? "HIGH" : "off"), ask.gravityMode == 1 ? ask.lowPct : (ask.gravityMode == 2 ? ask.highPct : 0.0f),
+                     e.speedMul, e.jumpHeightMul, e.gravityMul, gMove.status() == tzmove::Controller::NO_LINK ? "no game link: nothing is changed in the game" : "applied");
+            }
+        }
         tzoverlay::tick(now, fact);
         if (now >= nextBeat) {
             fact("t=%.0f still sampling (%ld samples, menu opened %d times, closed %d times)", now, samples, opens, closes);
@@ -672,7 +744,7 @@ void* probeMain(void*) {
                 for (int i = 0; i < frameWatchCount(); ++i) lastCounts[i] = *frameWatch(i)->count;
                 lastBeatTime = now;
             }
-            nextBeat += kBeatSeconds;
+            nextBeat += (now > 600.0 ? 60.0 : kBeatSeconds);       // after the first 10 minutes write progress lines only once a minute
         }
         usleep(20 * 1000);                              // 50 samples per second
     }
@@ -697,7 +769,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D3: pass-through + input probe + frame watcher + clickable menu panel)");
+    logf_("payload loaded (stage D4: pass-through + input probe + frame watcher + clickable menu panel + movement page)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

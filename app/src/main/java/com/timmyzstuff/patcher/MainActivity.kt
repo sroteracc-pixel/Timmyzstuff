@@ -18,7 +18,10 @@ import java.util.concurrent.Executors
 class MainActivity : Activity() {
 
     private val worker = Executors.newSingleThreadExecutor()
+    private val checker = Executors.newSingleThreadExecutor()     // the update check has its own thread so it never waits for the root prompt
+    @Volatile private var checkNumber = 0
 
+    private lateinit var updateStatus: TextView
     private lateinit var statusText: TextView
     private lateinit var logText: TextView
     private lateinit var logScroll: ScrollView
@@ -37,6 +40,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        updateStatus = findViewById(R.id.updateStatus)
         statusText = findViewById(R.id.statusText)
         logText = findViewById(R.id.logText)
         logScroll = findViewById(R.id.logScroll)
@@ -59,6 +63,7 @@ class MainActivity : Activity() {
             runJob("Updating") { _ ->
                 val r = Updater(this) { message -> appendLog(message) }.run()
                 appendLog(if (r.success) "DONE: ${r.message}" else "FAILED: ${r.message}")
+                checkForUpdate()          // refresh the update line (if an install started, the app restarts and checks again anyway)
             }
         }
         btnFacts.setOnClickListener {
@@ -71,10 +76,40 @@ class MainActivity : Activity() {
         applyButtons(busy = false)
         // Check things as soon as the app opens. (This is when the root prompt appears.)
         btnStatus.performClick()
+        // Also look (only look!) for a newer build. Installing still needs the Update button.
+        checkForUpdate()
+    }
+
+    /** Asks GitHub for the newest build number and shows the result on the update line. Never installs anything. */
+    private fun checkForUpdate() {
+        val mine = ++checkNumber
+        runOnUiThread { showUpdateLine(UpdateCheckResult(UpdateState.CHECKING, null)) }
+        try {
+            checker.execute {
+                val installed = try { packageManager.getPackageInfo(packageName, 0).longVersionCode } catch (e: Exception) { 0L }
+                val updater = Updater(this) { }
+                val result = UpdateCheck.run(installed) { updater.latestBuildCode() }
+                if (mine == checkNumber) runOnUiThread { if (!isFinishing) showUpdateLine(result) }
+            }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // the screen is closing; nothing to show
+        }
+    }
+
+    private fun showUpdateLine(result: UpdateCheckResult) {
+        updateStatus.text = result.label
+        updateStatus.setTextColor(
+            when (result.state) {
+                UpdateState.AVAILABLE -> getColor(R.color.tz_accent)
+                UpdateState.UP_TO_DATE -> getColor(R.color.tz_ok)
+                else -> getColor(R.color.tz_muted)
+            }
+        )
     }
 
     override fun onDestroy() {
         worker.shutdownNow()
+        checker.shutdownNow()
         super.onDestroy()
     }
 

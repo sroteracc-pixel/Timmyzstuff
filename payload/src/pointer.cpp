@@ -91,6 +91,15 @@ void Interaction::press(int id, float x, PanelState& s, const std::vector<HitRec
     }
     switch (id) {
     case HIT_SOUND: s.sound = !s.sound; o.redraw = o.saveNeeded = true; break;
+    // Movement switches. Gravity is ONE setting (off / low / high), so the two modes can never both be on.
+    // None of these are saved: the game always starts with every movement effect off.
+    case HIT_TOGGLE_SPEED: s.speedOn = !s.speedOn; o.redraw = true; break;
+    case HIT_TOGGLE_JUMP: s.jumpOn = !s.jumpOn; o.redraw = true; break;
+    case HIT_TOGGLE_LOWGRAV: s.gravityMode = (s.gravityMode == 1) ? 0 : 1; o.redraw = true; break;
+    case HIT_TOGGLE_HIGHGRAV: s.gravityMode = (s.gravityMode == 2) ? 0 : 2; o.redraw = true; break;
+    case HIT_SCAN:
+        if (s.scanState != 1) { s.scanState = 1; o.scanRequested = true; }
+        o.redraw = true; break;
     case HIT_TEST: ++s.testClicks; o.redraw = true; break;
     default: break;
     }

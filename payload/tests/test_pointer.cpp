@@ -2,6 +2,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <set>
+#include <string>
+#include <vector>
 #include "pointer.h"
 using namespace tzpanel;
 
@@ -168,9 +171,9 @@ int main() {
         step(zi, z, tx0 + 4, ty, 0.0f); step(zi, z, tx0 + 4, ty, 0.9f);
         CHECK("transparency starts at 0 at the left end", z.transparency == 0.0f && z.dragSlider == HIT_SLIDER_ALPHA);
         o = step(zi, z, tx1 + 100, ty, 0.9f);
-        CHECK("transparency tops out at exactly 0.75 (75% see-through)", near(z.transparency, 0.75f, 1e-4f) && !o.layoutCommitted);
+        CHECK("transparency tops out at exactly 0.25 (25% see-through)", near(z.transparency, 0.25f, 1e-4f) && !o.layoutCommitted);
         step(zi, z, tx0 + (tx1 - tx0) * 0.5f, ty, 0.9f);
-        CHECK("transparency middle is 0.35 / 0.40 (0.05 steps)", near(z.transparency, 0.375f, 0.03f) && near(std::fmod(z.transparency / 0.05f + 0.5f, 1.0f), 0.5f, 0.02f));
+        CHECK("transparency middle is 0.10 or 0.15 (0.05 steps)", near(z.transparency, 0.125f, 0.03f) && near(std::fmod(z.transparency / 0.05f + 0.5f, 1.0f), 0.5f, 0.02f));
         o = step(zi, z, tx0 + (tx1 - tx0) * 0.5f, ty, 0.0f);
         CHECK("letting go of transparency saves but does not move the panel", o.saveNeeded && !o.layoutCommitted);
         // distance
@@ -195,13 +198,159 @@ int main() {
         CHECK("fading by 1.0 (transparency 0) changes nothing", std::memcmp(none.data(), full.data(), kWidth * kHeight * 4) == 0);
     }
 
+    std::printf("== Movement page\n");
+    {   PanelState m; Interaction mi; openMenu(mi, m);
+        click(mi, m, HIT_TAB0 + 3);
+        CHECK("the Movement entry opens the Movement page", m.tab == kTabMovement);
+        const auto h = hitsFor(m);
+        CHECK("it has 4 switches, 4 sliders and the Scan button", find(h, HIT_TOGGLE_SPEED).id && find(h, HIT_TOGGLE_JUMP).id && find(h, HIT_TOGGLE_LOWGRAV).id && find(h, HIT_TOGGLE_HIGHGRAV).id &&
+              find(h, HIT_SLIDER_SPEED).id && find(h, HIT_SLIDER_JUMP).id && find(h, HIT_SLIDER_LOWGRAV).id && find(h, HIT_SLIDER_HIGHGRAV).id && find(h, HIT_SCAN).id);
+        CHECK("the Settings controls are not on this page", find(h, HIT_SOUND).id == 0 && find(h, HIT_SLIDER_SIZE).id == 0 && find(h, HIT_COLOR0).id == 0);
+        bool inside = true, overlap = false;
+        for (size_t i = 0; i < h.size(); ++i) {
+            if (h[i].x < 0 || h[i].y < 0 || h[i].x + h[i].w > kWidth || h[i].y + h[i].h > kHeight) inside = false;
+            if (h[i].x >= 296 && h[i].id != HIT_CLOSE && h[i].y + h[i].h > 624) inside = false;      // page controls (right of the sidebar) must end above the footer (starts at y=638)
+            for (size_t j = i + 1; j < h.size(); ++j)
+                if (h[i].x < h[j].x + h[j].w && h[j].x < h[i].x + h[i].w && h[i].y < h[j].y + h[j].h && h[j].y < h[i].y + h[i].h) overlap = true;
+        }
+        CHECK("every control fits on the picture; page controls end above the footer", inside);
+        CHECK("no two controls overlap (a click can only mean one thing)", !overlap);
+        PanelState fresh;
+        CHECK("everything starts OFF", !fresh.speedOn && !fresh.jumpOn && fresh.gravityMode == 0 && !m.speedOn && !m.jumpOn && m.gravityMode == 0);
+        CHECK("slider starts are the smallest values: 1.1x, 1.1x, 0%, 0%", near(fresh.speedMul, 1.1f, 1e-4f) && near(fresh.jumpMul, 1.1f, 1e-4f) && fresh.lowGravPct == 0 && fresh.highGravPct == 0);
+
+        const std::vector<HitRect> mh = hitsFor(m);                 // the places of the controls do not depend on their values: draw once
+        auto stepH = [&](float xx, float yy, float trig) { HandAim a[2]; a[1].valid = true; a[1].onPlane = true; a[1].x = xx; a[1].y = yy; a[1].trigger = trig; a[0].valid = false; a[0].trigger = 0; return mi.update(m, mh, a); };
+        auto clickH = [&](int id) { const HitRect r = find(mh, id); const float xx = r.x + r.w / 2, yy = r.y + r.h / 2; stepH(xx, yy, 0.0f); stepH(xx, yy, 0.9f); stepH(xx, yy, 0.0f); };
+
+        // --- switches
+        click(mi, m, HIT_TOGGLE_SPEED);
+        CHECK("Speed switch turns on", m.speedOn && !m.jumpOn && m.gravityMode == 0);
+        click(mi, m, HIT_TOGGLE_JUMP);
+        CHECK("Jump switch turns on too (speed and jump may both be on)", m.speedOn && m.jumpOn);
+        click(mi, m, HIT_TOGGLE_SPEED);
+        CHECK("Speed switch turns off again, jump unchanged", !m.speedOn && m.jumpOn);
+        click(mi, m, HIT_TOGGLE_JUMP);
+        CHECK("Jump switch turns off", !m.jumpOn);
+        click(mi, m, HIT_TOGGLE_LOWGRAV);
+        CHECK("Low Gravity on", m.gravityMode == 1);
+        click(mi, m, HIT_TOGGLE_HIGHGRAV);
+        CHECK("High Gravity on turns Low Gravity OFF (only one gravity mode)", m.gravityMode == 2);
+        click(mi, m, HIT_TOGGLE_LOWGRAV);
+        CHECK("Low Gravity again swaps back, High goes off", m.gravityMode == 1);
+        click(mi, m, HIT_TOGGLE_LOWGRAV);
+        CHECK("pressing the active gravity switch turns gravity off", m.gravityMode == 0);
+        click(mi, m, HIT_TOGGLE_HIGHGRAV); click(mi, m, HIT_TOGGLE_HIGHGRAV);
+        CHECK("High Gravity on then off", m.gravityMode == 0);
+        {   // however you press them, the two gravity switches can never both show ON
+            bool never = true; unsigned seed = 12345;
+            for (int i = 0; i < 300; ++i) {
+                seed = seed * 1103515245u + 12345u; const int pick = (seed >> 16) % 4;
+                clickH(pick == 0 ? HIT_TOGGLE_SPEED : pick == 1 ? HIT_TOGGLE_JUMP : pick == 2 ? HIT_TOGGLE_LOWGRAV : HIT_TOGGLE_HIGHGRAV);
+                if (m.gravityMode < 0 || m.gravityMode > 2) never = false;
+            }
+            CHECK("300 random presses: gravity mode is always 0, 1 or 2 (never both)", never);
+            if (m.speedOn) click(mi, m, HIT_TOGGLE_SPEED);
+            if (m.jumpOn) click(mi, m, HIT_TOGGLE_JUMP);
+            if (m.gravityMode == 1) click(mi, m, HIT_TOGGLE_LOWGRAV);
+            if (m.gravityMode == 2) click(mi, m, HIT_TOGGLE_HIGHGRAV);
+            CHECK("and everything can be switched back off", !m.speedOn && !m.jumpOn && m.gravityMode == 0);
+        }
+
+        // --- sliders: exact ends, exact steps, nothing else changes
+        auto slide = [&](int id, float frac, bool release) -> Outcome {
+            const HitRect r = find(mh, id);
+            const float a = r.x + 16, b = r.x + r.w - 16, yy = r.y + r.h / 2, xx = a + (b - a) * frac;
+            if (m.dragSlider == 0) { stepH(xx, yy, 0.0f); stepH(xx, yy, 0.9f); }
+            Outcome o = stepH(xx, yy, 0.9f);
+            if (release) o = stepH(xx, yy, 0.0f);
+            return o;
+        };
+        auto valueOf = [&](int id) { PanelState t = m; return sliderValue(t, id); };
+        struct Spec { int id; const char* name; float lo, hi, st; };
+        const Spec specs[4] = {{HIT_SLIDER_SPEED, "Speed", 1.1f, 5.0f, 0.1f}, {HIT_SLIDER_JUMP, "Jump", 1.1f, 5.0f, 0.1f}, {HIT_SLIDER_LOWGRAV, "Low Gravity", 0.0f, 90.0f, 5.0f}, {HIT_SLIDER_HIGHGRAV, "High Gravity", 0.0f, 90.0f, 5.0f}};
+        for (const Spec& sp : specs) {
+            char nm[96];
+            slide(sp.id, 1.0f, false);
+            std::snprintf(nm, sizeof nm, "%s slider: far right is exactly the maximum", sp.name);
+            CHECK(nm, near(valueOf(sp.id), sp.hi, 1e-3f));
+            slide(sp.id, 0.0f, false);
+            std::snprintf(nm, sizeof nm, "%s slider: far left is exactly the minimum", sp.name);
+            CHECK(nm, near(valueOf(sp.id), sp.lo, 1e-3f));
+            // sweep the whole track: every value is a whole number of steps, and every step is reachable
+            std::set<int> seen; bool onStep = true, inRange = true;
+            for (int i = 0; i <= 400; ++i) {
+                slide(sp.id, i / 400.0f, false);
+                const float v = valueOf(sp.id);
+                const float k = (v - sp.lo) / sp.st;
+                if (std::fabs(k - std::round(k)) > 0.002f) onStep = false;
+                if (v < sp.lo - 1e-3f || v > sp.hi + 1e-3f) inRange = false;
+                seen.insert(static_cast<int>(std::lround(k)));
+            }
+            const int steps = static_cast<int>(std::lround((sp.hi - sp.lo) / sp.st)) + 1;
+            std::snprintf(nm, sizeof nm, "%s slider: only whole steps of %g between %g and %g", sp.name, sp.st, sp.lo, sp.hi);
+            CHECK(nm, onStep && inRange);
+            std::snprintf(nm, sizeof nm, "%s slider: all %d positions can be reached", sp.name, steps);
+            CHECK(nm, static_cast<int>(seen.size()) == steps);
+            const Outcome o = slide(sp.id, 0.5f, true);
+            std::snprintf(nm, sizeof nm, "%s slider: letting go saves, does not move the panel, does not flip a switch", sp.name);
+            CHECK(nm, o.saveNeeded && !o.layoutCommitted && !m.speedOn && !m.jumpOn && m.gravityMode == 0);
+        }
+        CHECK("the sliders move even while their switch is off (switches stay off)", !m.speedOn && !m.jumpOn && m.gravityMode == 0);
+        slide(HIT_SLIDER_SPEED, 1.0f, true); slide(HIT_SLIDER_JUMP, 0.0f, true); slide(HIT_SLIDER_LOWGRAV, 1.0f, true); slide(HIT_SLIDER_HIGHGRAV, 0.5f, true);
+        CHECK("each slider keeps its own value: speed 5.0, jump 1.1, low 90%, high 45%", near(m.speedMul, 5.0f, 1e-3f) && near(m.jumpMul, 1.1f, 1e-3f) && near(m.lowGravPct, 90.0f, 1e-3f) && near(m.highGravPct, 45.0f, 1.01f) && m.highGravPct == 45.0f);
+        CHECK("the Settings sliders were not touched", near(m.scale, 1.0f, 1e-4f) && m.transparency == 0.0f && near(m.distance, 1.15f, 1e-4f));
+
+        // --- the exact value is drawn on the page (changing the value changes the picture where the number is)
+        {   PanelState a2, b2; a2.tab = b2.tab = kTabMovement; a2.speedMul = 1.1f; b2.speedMul = 1.2f;
+            Canvas ca(kWidth, kHeight), cb(kWidth, kHeight); drawPanel(ca, a2, nullptr); drawPanel(cb, b2, nullptr);
+            const HitRect r = find(hitsFor(a2), HIT_SLIDER_SPEED);
+            bool differs = false;
+            for (int yy = (int)r.y; yy < (int)(r.y + r.h) && !differs; ++yy)
+                for (int xx = (int)(r.x + r.w + 20); xx < (int)(r.x + r.w + 120) && !differs; ++xx)
+                    if (std::memcmp(ca.data() + (yy * kWidth + xx) * 4, cb.data() + (yy * kWidth + xx) * 4, 4) != 0) differs = true;
+            CHECK("the number next to the Speed slider changes with the value", differs);
+        }
+
+        // --- Scan button
+        PanelState sc; Interaction si; openMenu(si, sc); sc.tab = kTabMovement;
+        const HitRect sb = find(hitsFor(sc), HIT_SCAN);
+        const float bx = sb.x + sb.w / 2, by = sb.y + sb.h / 2;
+        step(si, sc, bx, by, 0.0f);
+        Outcome so = step(si, sc, bx, by, 0.9f);
+        CHECK("pressing Scan asks for a scan and shows 'scanning'", so.scanRequested && sc.scanState == 1);
+        step(si, sc, bx, by, 0.0f); so = step(si, sc, bx, by, 0.9f);
+        CHECK("pressing it again while it is scanning does NOT start a second scan", !so.scanRequested && sc.scanState == 1);
+        step(si, sc, bx, by, 0.0f);
+        sc.scanState = 2;
+        so = step(si, sc, bx, by, 0.9f);
+        CHECK("after a finished scan it can be run again", so.scanRequested && sc.scanState == 1);
+        CHECK("the Scan button changes no movement setting", !sc.speedOn && !sc.jumpOn && sc.gravityMode == 0);
+    }
+
     std::printf("== saved settings\n");
-    {   PanelState a; a.sound = false; a.colorIndex = 5; a.scale = 1.25f; a.transparency = 0.45f; a.distance = 0.85f;
+    {   PanelState a; a.sound = false; a.colorIndex = 5; a.scale = 1.25f; a.transparency = 0.20f; a.distance = 0.85f;
         const std::string txt = settingsToText(a);
         PanelState b; const bool ok = settingsFromText(txt, b);
-        CHECK("settings round-trip (sound, colour, size, transparency, distance)", ok && !b.sound && b.colorIndex == 5 && near(b.scale, 1.25f, 1e-3f) && near(b.transparency, 0.45f, 1e-3f) && near(b.distance, 0.85f, 1e-3f));
-        PanelState d; CHECK("garbage is ignored", !settingsFromText("hello\nsound=7\nscale=9.9\ncolor=44\ntransparency=0.9\ndistance=0.1\n", d) && d.sound && d.colorIndex == 0 && near(d.scale, 1.0f, 1e-4f) && d.transparency == 0.0f && near(d.distance, 1.15f, 1e-4f));
+        CHECK("settings round-trip (sound, colour, size, transparency, distance)", ok && !b.sound && b.colorIndex == 5 && near(b.scale, 1.25f, 1e-3f) && near(b.transparency, 0.20f, 1e-3f) && near(b.distance, 0.85f, 1e-3f));
+        PanelState d; CHECK("garbage is ignored", !settingsFromText("hello\nsound=7\nscale=9.9\ncolor=44\ntransparency=abc\ndistance=0.1\n", d) && d.sound && d.colorIndex == 0 && near(d.scale, 1.0f, 1e-4f) && d.transparency == 0.0f && near(d.distance, 1.15f, 1e-4f));
     }
+    {   PanelState a; a.speedMul = 3.7f; a.jumpMul = 2.3f; a.lowGravPct = 45; a.highGravPct = 75;
+        a.speedOn = true; a.jumpOn = true; a.gravityMode = 2;
+        const std::string txt = settingsToText(a);
+        PanelState b; const bool ok = settingsFromText(txt, b);
+        CHECK("movement slider values are saved and come back exactly", ok && near(b.speedMul, 3.7f, 1e-3f) && near(b.jumpMul, 2.3f, 1e-3f) && b.lowGravPct == 45 && b.highGravPct == 75);
+        CHECK("the switches are NEVER saved: everything starts OFF next time", !b.speedOn && !b.jumpOn && b.gravityMode == 0);
+        CHECK("nothing about on/off is in the saved text", txt.find("speedon") == std::string::npos && txt.find("jumpon") == std::string::npos && txt.find("mode") == std::string::npos && txt.find("enabled") == std::string::npos);
+        PanelState g; settingsFromText("speed=9\njump=0.5\nlowgravity=95\nhighgravity=-5\nspeed=abc\n", g);
+        CHECK("out-of-range or garbage movement values are ignored (defaults stay)", near(g.speedMul, 1.1f, 1e-4f) && near(g.jumpMul, 1.1f, 1e-4f) && g.lowGravPct == 0 && g.highGravPct == 0);
+        PanelState e; settingsFromText("speed=5.0\njump=1.1\nlowgravity=90\nhighgravity=0\n", e);
+        CHECK("the exact end values are accepted", near(e.speedMul, 5.0f, 1e-4f) && near(e.jumpMul, 1.1f, 1e-4f) && e.lowGravPct == 90 && e.highGravPct == 0);
+        PanelState o2; settingsFromText("speed=3.14\nlowgravity=47\n", o2);
+        CHECK("a hand-edited value is snapped to a real step (3.1x, 45%)", near(o2.speedMul, 3.1f, 1e-3f) && o2.lowGravPct == 45);
+    }
+    {   PanelState o; settingsFromText("transparency=0.60\n", o);
+        CHECK("an old saved transparency of 0.60 is pulled down to the new maximum 0.25", near(o.transparency, 0.25f, 1e-4f)); }
     std::printf("\npassed: %d  failed: %d\n", passed, failed);
     return failed == 0 ? 0 : 1;
 }

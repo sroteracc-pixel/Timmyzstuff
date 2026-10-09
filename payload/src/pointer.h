@@ -44,6 +44,7 @@ struct Outcome {
     bool pressed = false;           // the chosen trigger is down right now
     int hand = -1;                  // which controller is the pointer (0 = left, 1 = right), -1 = none
     int clickedId = 0;              // HitId pressed in this update (0 = none)
+    bool scanRequested = false;     // the "Scan game code" button was pressed (and no scan is running)
 };
 
 class Interaction {

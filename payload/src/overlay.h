@@ -50,8 +50,17 @@ struct PointerResult { bool close = false; bool clicked = false; int clickedId =
 // `close` = the X button was pressed (the caller should close the menu).
 PointerResult pointer(double nowSeconds, const PointerSample& sample, LogFn log);
 
-// Saved settings (sound, colour, size). Loads the file now (if it exists) and saves whenever a setting changes.
+// Saved settings (sound, colour, size, transparency, distance, movement slider values). Loads the file now (if it exists) and saves whenever a setting changes.
 void setSettingsPath(const char* path, LogFn log);
+
+// ---- Movement page <-> the rest of the payload ----
+// The "Scan game code" button sets a request; the payload's main loop picks it up (once) and starts the scan.
+bool takeScanRequest();
+void setScanResult(bool ok, int matches);     // called when the scan ends (any thread)
+void setLinkState(int linked);                // 0 = movement switches are not connected to the game, 1 = connected
+// A copy of what the Movement switches/sliders ask for right now (taken under the menu's lock).
+struct MovementAsk { bool speedOn, jumpOn; int gravityMode; float speed, jump, lowPct, highPct; };
+MovementAsk movementAsk();
 
 // True while the menu is open, and for a moment after it closes. The input doorway uses this to hide
 // button presses from the game so that clicking the menu does not also play the game.

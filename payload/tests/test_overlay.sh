@@ -106,7 +106,7 @@ int main() {
     pointer(1.36, sample(900, 408, 0.0f), nullptr);
     hookEndFrame4(14, game, 2, nullptr); sub = testSubmitBytes();
     std::printf("T7g after let go scale=%.2f panel width=%.4f\n", state().scale, F(sub, 188));
-    // transparency slider: far right = 0.75, the panel does not move
+    // transparency slider: far right = 0.25, the panel does not move
     pointer(1.40, sample(700, 468, 0.0f), nullptr);
     pointer(1.42, sample(700, 468, 0.9f), nullptr);
     pointer(1.44, sample(900, 468, 0.9f), nullptr);
@@ -145,7 +145,7 @@ int main() {
 }
 C
 sed -i 's/\\\\n/\\n/g' "$W/t.cpp"
-g++ -std=c++17 -DTZ_PC_TEST -I"$HERE/fake_jni" -I"$HERE/../src" "$W/t.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" -ldl -pthread -o "$W/t" || exit 2
+g++ -std=c++17 -DTZ_PC_TEST -I"$HERE/fake_jni" -I"$HERE/../src" "$W/t.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/movement.cpp" "$HERE/../src/il2cpp_scan.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" -ldl -pthread -o "$W/t" || exit 2
 out=$("$W/t"); echo "$out"
 check "closed menu: call passes through untouched" 'grep -q "^T1 rc=0 count=2 same=1" <<<"$out"'
 check "open menu: one extra layer added at the END, game layers kept" 'grep -q "^T2 rc=0 count=3 last=1 id=7 stage=0 vp=0,0,1024,768" <<<"$out" && grep -q "T2 game layers kept=1" <<<"$out"'
@@ -161,7 +161,7 @@ check "X button asks for the menu to close" 'grep -q "^T7e close=1" <<<"$out"'
 check "clicking Red in the colour list selects it" 'grep -q "^T7c2 colour=1 (Red)" <<<"$out"'
 check "while dragging the size slider the panel keeps its size" 'grep -q "^T7f during drag scale=1.50 panel width=0.9500" <<<"$out"'
 check "letting go of the slider resizes the panel (1.5x)" 'grep -q "^T7g after let go scale=1.50 panel width=1.4250" <<<"$out"'
-check "transparency slider reaches exactly 0.75" 'grep -q "^T7i transparency=0.75" <<<"$out"'
+check "transparency slider reaches exactly 0.25" 'grep -q "^T7i transparency=0.25" <<<"$out"'
 check "distance slider: panel stays put while dragging" 'grep -q "^T7j during drag distance=2.00 panel z=-1.150" <<<"$out"'
 check "distance slider: panel moves to 2 m when let go" 'grep -q "^T7k after let go distance=2.00 panel z=-2.000" <<<"$out"'
 check "no hand data: no dot" 'grep -q "^T7h onMenu=0" <<<"$out"'
@@ -169,6 +169,6 @@ check "menu open: the game sees blanked buttons/triggers/sticks, connection byte
 check "just after closing: still blanked for a moment" 'grep -q "^T8b just closed (grace): buttons=00" <<<"$out"'
 check "later: the game sees real buttons again" 'grep -q "^T8c later: buttons=ab" <<<"$out"'
 check "a failed call is not touched" 'grep -q "^T8d failed call is left alone: buttons=ab" <<<"$out"'
-check "saved settings are read back after a restart" 'grep -q "^T9 reloaded sound=0 size=1.50 colour=1 transparency=0.75 distance=2.00" <<<"$out"'
+check "saved settings are read back after a restart" 'grep -q "^T9 reloaded sound=0 size=1.50 colour=1 transparency=0.25 distance=2.00" <<<"$out"'
 check "after a refusal the panel stays off" 'grep -q "^T6b rc=0 calls=1 lastCount=2" <<<"$out"'
 echo; echo "passed: $pass  failed: $failn"; [ "$failn" -eq 0 ]
