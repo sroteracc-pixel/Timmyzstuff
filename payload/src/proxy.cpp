@@ -1,4 +1,5 @@
-// proxy.cpp - STAGE C payload: the Stage A pass-through PLUS a read-only "input probe".
+// proxy.cpp - STAGE D1 payload: the Stage A pass-through PLUS a read-only "input probe" PLUS a
+// "frame watcher" that only COUNTS the game's VR frame calls (see frame_stubs.h). Draws nothing.
 //
 // PART 1 - PASS-THROUGH (unchanged from Stage A, proven on your Quest)
 //   The patcher renames the game's real library to libmain_orig.so and puts THIS file in its
@@ -38,6 +39,7 @@
 #include <vector>
 
 #include "menu_input.h"   // the open/close rules (pure C++, tested on a PC)
+#include "frame_stubs.h"  // counting doorways for ovrp_EndFrame4 / BeginFrame4 / WaitToBeginFrame
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -71,14 +73,18 @@ const int kWaitForLibSeconds = 5;
 const int kWaitForInitSeconds = 3;
 const int kSampleMillis = 3000;
 const int kSettleSeconds = 1;
+const int kBeatSeconds = 1;
+const int kWatchTrySeconds = 3;
 #else
 const int kWaitForLibSeconds = 600;   // wait up to 10 min for the game to load its VR library
 const int kWaitForInitSeconds = 120;  // then up to 2 min for it to finish starting
 const int kSampleMillis = 600 * 1000; // then watch the controllers for 10 minutes
 const int kSettleSeconds = 10;        // pause so the graphics drivers finish loading
+const int kBeatSeconds = 10;          // how often a "frames per second" line is written
+const int kWatchTrySeconds = 90;      // keep looking for the plugin's function list this long
 #endif
-const int kMaxChangeLines = 60;       // raw controller lines: only enough to confirm the layout
-const int kMaxPoseSnapshots = 10;     // hand/head position snapshots (taken when A or B is pressed)
+const int kMaxChangeLines = 20;       // raw controller lines: only enough to confirm the layout
+const int kMaxPoseSnapshots = 3;      // hand/head position snapshots (taken when A or B is pressed)
 const size_t kBufSize = 512;          // zeroed buffer handed to the controller function
 const size_t kDumpBytes = 192;        // how many bytes of it we write down
 
@@ -220,6 +226,109 @@ bool worthWriting(const unsigned char* a, const unsigned char* b) {
     return false;
 }
 
+
+// ---- the frame watcher ------------------------------------------------------------------
+// Finds the game's VR plugin (libOculusXRPlugin.so) in memory, looks through its WRITABLE data for
+// the saved address of a Meta function, and swaps that one saved address for our counting stub.
+// Only memory that /proc/self/maps lists as read+write is ever touched.
+struct MapRegion { uintptr_t start, end; bool rw; std::string path; };
+
+std::vector<MapRegion> readMaps() {
+    std::vector<MapRegion> out;
+    FILE* m = std::fopen("/proc/self/maps", "r");
+    if (!m) return out;
+    char line[1024];
+    while (std::fgets(line, sizeof line, m)) {
+        unsigned long a = 0, b = 0; char perms[8] = {0}; int pos = 0;
+        if (std::sscanf(line, "%lx-%lx %7s %*s %*s %*s %n", &a, &b, perms, &pos) < 3) continue;
+        MapRegion r;
+        r.start = a; r.end = b; r.rw = (perms[0] == 'r' && perms[1] == 'w');
+        r.path = pos > 0 ? std::string(line + pos) : std::string();
+        while (!r.path.empty() && (r.path.back() == '\n' || r.path.back() == '\r' || r.path.back() == ' ')) r.path.pop_back();
+        out.push_back(r);
+    }
+    std::fclose(m);
+    return out;
+}
+
+// Replaces every saved copy of `target` inside the plugin's writable memory. Returns how many.
+int patchPluginSlot(uint64_t target, uint64_t stub, uint64_t pluginBase, std::vector<unsigned long>* offsets) {
+    const std::vector<MapRegion> maps = readMaps();
+    int patched = 0;
+    bool inPlugin = false;
+    uintptr_t prevEnd = 0;
+    for (const MapRegion& r : maps) {
+        const bool named = r.path.find("libOculusXRPlugin.so") != std::string::npos;
+        const bool followsPlugin = inPlugin && r.path.empty() && r.start == prevEnd;   // its .bss, mapped right after
+        inPlugin = named || followsPlugin;
+        prevEnd = r.end;
+        if (!inPlugin || !r.rw) continue;
+        for (uintptr_t p = (r.start + 7) & ~static_cast<uintptr_t>(7); p + 8 <= r.end; p += 8) {
+            volatile uint64_t* slot = reinterpret_cast<volatile uint64_t*>(p);
+            if (*slot == target) {
+                *slot = stub;                                  // one aligned 8-byte store
+                if (offsets) offsets->push_back(static_cast<unsigned long>(p - pluginBase));
+                ++patched;
+            }
+        }
+    }
+    return patched;
+}
+
+uintptr_t pluginBaseAddress() {
+    for (const MapRegion& r : readMaps())
+        if (r.path.find("libOculusXRPlugin.so") != std::string::npos) return r.start;
+    return 0;
+}
+
+bool gWatchPatched[3] = {false, false, false};
+
+// Tries to install any watch that is not installed yet. Returns true when all three are done.
+bool tryInstallWatches(void* ovr) {
+    bool all = true;
+    const uintptr_t base = pluginBaseAddress();
+    if (!base) return false;                                   // plugin not loaded yet
+    for (int i = 0; i < frameWatchCount(); ++i) {
+        FrameWatch* w = frameWatch(i);
+        if (gWatchPatched[i]) continue;
+        void* real = dlsym(ovr, w->name);
+        if (!real) { all = false; continue; }
+        *w->orig = reinterpret_cast<uint64_t>(real);           // set BEFORE patching, so the stub can always jump on
+        std::vector<unsigned long> offs;
+        const int n = patchPluginSlot(reinterpret_cast<uint64_t>(real), reinterpret_cast<uint64_t>(w->stub), base, &offs);
+        if (n > 0) {
+            gWatchPatched[i] = true;
+            fact("frame watch %s: installed in %d slot(s), at byte offset %lu inside the plugin", w->name, n, offs.empty() ? 0UL : offs[0]);
+        } else {
+            all = false;                                       // the plugin has not saved the address yet; try again later
+        }
+    }
+    return all;
+}
+
+// Writes small argument values as numbers, and anything big (a pointer) as "ptr".
+void fmtArg(uint64_t v, char* out, size_t n) {
+    if (v < 1000000ULL) std::snprintf(out, n, "%llu", static_cast<unsigned long long>(v));
+    else std::snprintf(out, n, "ptr");
+}
+
+void writeFrameLine(const char* tag, double now, double sinceLast, const uint64_t* lastCounts) {
+    char line[512]; size_t w = 0;
+    w += std::snprintf(line + w, sizeof line - w, "%s t=%.0f:", tag, now);
+    for (int i = 0; i < frameWatchCount(); ++i) {
+        FrameWatch* w2 = frameWatch(i);
+        const uint64_t c = *w2->count;
+        const double perSec = sinceLast > 0 ? (c - lastCounts[i]) / sinceLast : 0.0;
+        w += std::snprintf(line + w, sizeof line - w, " %s calls=%llu (%.1f/s)", w2->name, static_cast<unsigned long long>(c), perSec);
+    }
+    FrameWatch* e = frameWatch(0);
+    char a[8][16];
+    for (int i = 0; i < 8; ++i) fmtArg(e->args[i], a[i], sizeof a[i]);
+    std::snprintf(line + w, sizeof line - w, " | EndFrame4 latest args: %s %s %s %s %s %s %s %s",
+                  a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+    fact("%s", line);
+}
+
 void* probeMain(void*) {
     secondsSinceStart();                               // start the clock
     std::string where;
@@ -227,7 +336,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage C probe) - read-only");
+    fact("Timmyzstuff facts (stage D1: input probe + frame watcher) - draws nothing");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     writeLoadedLibraries("at start");
@@ -303,7 +412,12 @@ void* probeMain(void*) {
     long samples = 0;
     bool wasVisible = false;
     double last = secondsSinceStart();
-    double nextBeat = last + 10.0;
+    double nextBeat = last + kBeatSeconds;
+    double nextWatchTry = last;
+    const double watchGiveUp = last + kWatchTrySeconds;
+    bool watchesDone = false;
+    uint64_t lastCounts[3] = {0, 0, 0};
+    double lastBeatTime = last;
     const double endAt = last + kSampleMillis / 1000.0;
     while (secondsSinceStart() < endAt) {
         std::memset(buf, 0, sizeof buf);
@@ -336,13 +450,25 @@ void* probeMain(void*) {
             if (lines == kMaxChangeLines) fact("(raw line limit reached - events below are still recorded)");
         }
         std::memcpy(prev, buf, sizeof prev);
+        if (!watchesDone && now >= nextWatchTry && now < watchGiveUp) {
+            watchesDone = tryInstallWatches(ovr);
+            nextWatchTry = now + 1.0;
+            if (watchesDone) fact("t=%.1f all frame watches are installed", now);
+        }
         if (now >= nextBeat) {
             fact("t=%.0f still sampling (%ld samples, menu opened %d times, closed %d times)", now, samples, opens, closes);
-            nextBeat += 30.0;
+            if (gWatchPatched[0] || gWatchPatched[1] || gWatchPatched[2]) {
+                writeFrameLine("frames", now, now - lastBeatTime, lastCounts);
+                for (int i = 0; i < frameWatchCount(); ++i) lastCounts[i] = *frameWatch(i)->count;
+                lastBeatTime = now;
+            }
+            nextBeat += kBeatSeconds;
         }
         usleep(20 * 1000);                              // 50 samples per second
     }
     fact("summary: menu opened %d times, closed %d times", opens, closes);
+    for (int i = 0; i < frameWatchCount(); ++i)
+        fact("frame watch %s: %s, %llu calls counted in total", frameWatch(i)->name, gWatchPatched[i] ? "installed" : "NOT installed (the plugin never saved that address)", static_cast<unsigned long long>(*frameWatch(i)->count));
     fact("done: %ld samples, %d change lines", samples, lines);
     std::fclose(gOut);
     gOut = nullptr;
@@ -361,7 +487,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage C: pass-through + read-only input probe)");
+    logf_("payload loaded (stage D1: pass-through + input probe + frame watcher)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {
