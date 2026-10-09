@@ -10,6 +10,7 @@
 #pragma once
 #include <stdint.h>
 #include "panel.h"
+#include "pointer.h"
 
 namespace tzoverlay {
 
@@ -38,6 +39,27 @@ void tick(double nowSeconds, LogFn log);
 // The doorway for ovrp_EndFrame4. Called by the game thread every frame; `real` = the real function.
 int hookEndFrame4(int frameIndex, const void* const* layers, int layerCount, void* extra);
 void setRealEndFrame4(uint64_t realFunction);
+
+// ---- stage D3: pointing and clicking -------------------------------------------------------
+// What the two controllers are doing right now (the caller reads it from Meta's functions).
+// pose = qx,qy,qz,qw,px,py,pz in the same space as the head pose given to show(). Index 0 = left, 1 = right.
+struct PointerSample { bool valid[2]; float pose[2][7]; float trigger[2]; };
+struct PointerResult { bool close = false; bool clicked = false; int clickedId = 0; int hand = -1; bool onMenu = false; float x = 0, y = 0; };
+
+// Call every ~20 ms while the menu is open. Moves the dot, highlights, presses buttons, drags the slider.
+// `close` = the X button was pressed (the caller should close the menu).
+PointerResult pointer(double nowSeconds, const PointerSample& sample, LogFn log);
+
+// Saved settings (sound, colour, size). Loads the file now (if it exists) and saves whenever a setting changes.
+void setSettingsPath(const char* path, LogFn log);
+
+// True while the menu is open, and for a moment after it closes. The input doorway uses this to hide
+// button presses from the game so that clicking the menu does not also play the game.
+bool inputBlocked();
+int filterControllerState(int realResult, void* stateOut);   // call AFTER the real ovrp_GetControllerState4; blanks the game's view while the menu is open
+void countInput(bool masked);          // statistics for the facts file
+struct InputStats { uint64_t calls, masked; };
+InputStats inputStats();
 
 // Counters for the facts file.
 struct Stats { uint64_t calls, withOverlay, retries; int lastRc; int firstBadRc; bool broken; };

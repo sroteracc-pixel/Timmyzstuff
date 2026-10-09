@@ -11,6 +11,8 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <ctime>
+#include <vector>
 
 namespace tzoverlay {
 
@@ -54,7 +56,20 @@ bool gDirty = true;
 double gLastPost = -100.0;
 int gPostCount = 0;
 tzpanel::PanelState gState;
-tzpanel::Canvas* gCanvas = nullptr;
+tzpanel::Canvas* gBase = nullptr;          // the menu picture without the pointer dot
+tzpanel::Canvas* gComposite = nullptr;     // the picture with the dot on top
+std::vector<tzpanel::HitRect> gHits;       // clickable areas of gBase
+bool gBaseValid = false;
+tzpanel::Interaction gInteraction;
+tzpanel::Placement gPlace = {{0, 0, -1}, 0, 0.95f, 0.7125f};
+float gAppliedScale = 1.0f;                // the size / distance the real panel has (the sliders apply when you let go)
+float gAppliedDistance = tzpanel::kDistDefault;
+bool gCursorOn = false, gCursorPressed = false;
+float gCurX = 0, gCurY = 0;
+std::string gSettingsPath;
+int gPointerLogLines = 0;
+std::atomic<int64_t> gMaskUntilMs{0};
+std::atomic<uint64_t> gInputCalls{0}, gInputMasked{0};
 
 alignas(16) unsigned char gSubmitA[0x200];
 alignas(16) unsigned char gSubmitB[0x200];
@@ -77,6 +92,11 @@ bool safeCopy(uintptr_t from, void* to, size_t n) {
     size_t got = 0;
     while (got < n) { const ssize_t r = read(pfd[0], static_cast<unsigned char*>(to) + got, n - got); if (r <= 0) return false; got += r; }
     return true;
+}
+
+int64_t nowMs() {
+    timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
 }
 
 uintptr_t libBase(const char* name) {
@@ -111,18 +131,11 @@ void buildSubmit() {
     putI(b, 4, 0);
     for (int k = 0; k < 2; ++k) { putI(b, 8 + 16 * k, 0); putI(b, 12 + 16 * k, 0); putI(b, 16 + 16 * k, tzpanel::kWidth); putI(b, 20 + 16 * k, tzpanel::kHeight); }
 
-    // where the panel sits: 1.15 m in front of the head, level, turned to face it
-    const float qx = gHead[0], qy = gHead[1], qz = gHead[2], qw = gHead[3];
-    float fx = -2.0f * (qx * qz + qw * qy), fz = -(1.0f - 2.0f * (qx * qx + qy * qy));
-    const float len = std::sqrt(fx * fx + fz * fz);
-    if (len < 1e-4f) { fx = 0; fz = -1; } else { fx /= len; fz /= len; }
-    const float yaw = std::atan2(-fx, -fz);
-    const float dist = 1.15f;
-    putF(b, 40, 0.0f); putF(b, 44, std::sin(yaw / 2)); putF(b, 48, 0.0f); putF(b, 52, std::cos(yaw / 2));
-    putF(b, 56, gHead[4] + fx * dist); putF(b, 60, gHead[5]); putF(b, 64, gHead[6] + fz * dist);
-
-    const float scale = gState.scale < 0.75f ? 0.75f : (gState.scale > 1.5f ? 1.5f : gState.scale);
-    const float w = 0.95f * scale, h = w * tzpanel::kHeight / tzpanel::kWidth;
+    // where the panel sits: 1.15 m in front of the head, level, turned to face it (shared with the pointer code)
+    gPlace = tzpanel::placeInFront(gHead, gAppliedScale, gAppliedDistance);
+    putF(b, 40, 0.0f); putF(b, 44, std::sin(gPlace.yaw / 2)); putF(b, 48, 0.0f); putF(b, 52, std::cos(gPlace.yaw / 2));
+    putF(b, 56, gPlace.pos[0]); putF(b, 60, gPlace.pos[1]); putF(b, 64, gPlace.pos[2]);
+    const float w = gPlace.width, h = gPlace.height;
     int sizeOff = 188;                                  // SDK minor >= 60
     if (gMinor < 60) sizeOff = (gMinor >= 31) ? 176 : 72;
     if (gMinor >= 31) { putF(b, 72, 1); putF(b, 76, 1); putF(b, 80, 1); putF(b, 84, 1); }   // colour scale 1,1,1,1
@@ -130,10 +143,23 @@ void buildSubmit() {
     gSubmit.store(b, std::memory_order_release);
 }
 
+void ensureBase() {
+    if (!gBase) gBase = new tzpanel::Canvas(tzpanel::kWidth, tzpanel::kHeight);
+    if (gDirty || !gBaseValid) { tzpanel::drawPanel(*gBase, gState, &gHits); gBaseValid = true; gDirty = false; }
+}
+
 bool postPicture(LogFn log) {
+    ensureBase();
     if (!gWindow || !gLock || !gUnlock) return false;
-    if (!gCanvas) gCanvas = new tzpanel::Canvas(tzpanel::kWidth, tzpanel::kHeight);
-    tzpanel::drawPanel(*gCanvas, gState, nullptr);
+    const tzpanel::Canvas* src = gBase;
+    const bool fade = gState.transparency > 0.001f;
+    if (gCursorOn || fade) {
+        if (!gComposite) gComposite = new tzpanel::Canvas(tzpanel::kWidth, tzpanel::kHeight);
+        *gComposite = *gBase;
+        if (fade) gComposite->fadeAll(1.0f - gState.transparency);     // see-through menu; the dot below stays solid
+        if (gCursorOn) tzpanel::drawCursor(*gComposite, gCurX, gCurY, gState, gCursorPressed);
+        src = gComposite;
+    }
     WindowBuffer buf; std::memset(&buf, 0, sizeof buf);
     const int32_t rc = gLock(gWindow, &buf, nullptr);
     if (rc != 0 || !buf.bits) { if (gPostCount < 3 && log) log("overlay: lock failed rc=%d", rc); ++gPostCount; return false; }
@@ -141,10 +167,19 @@ bool postPicture(LogFn log) {
     const int cw = tzpanel::kWidth, ch = tzpanel::kHeight;
     const int copyW = buf.width < cw ? buf.width : cw, copyH = buf.height < ch ? buf.height : ch;
     for (int y = 0; y < copyH; ++y)
-        std::memcpy(static_cast<unsigned char*>(buf.bits) + static_cast<size_t>(y) * buf.stride * 4, gCanvas->data() + static_cast<size_t>(y) * cw * 4, static_cast<size_t>(copyW) * 4);
+        std::memcpy(static_cast<unsigned char*>(buf.bits) + static_cast<size_t>(y) * buf.stride * 4, src->data() + static_cast<size_t>(y) * cw * 4, static_cast<size_t>(copyW) * 4);
     gUnlock(gWindow);
     ++gPostCount;
     return true;
+}
+
+void saveSettings(LogFn log) {
+    if (gSettingsPath.empty()) return;
+    FILE* f = std::fopen(gSettingsPath.c_str(), "w");
+    if (!f) { if (log) log("settings: could not write %s", gSettingsPath.c_str()); return; }
+    const std::string t = tzpanel::settingsToText(gState);
+    std::fwrite(t.data(), 1, t.size(), f);
+    std::fclose(f);
 }
 
 }  // namespace
@@ -233,10 +268,10 @@ bool init(void* ovr, LogFn log) {
 
     gLayerId = layerId;
     gDirty = true;
+    gCursorOn = false;
     const bool posted = postPicture(log);
     if (log) log("overlay: first picture posted: %s", posted ? "yes" : "NO");
     if (!posted) return false;
-    gDirty = false;
     gReady = true;
     say("READY - the panel exists. It will be shown when you open the menu.");
     return true;
@@ -247,24 +282,88 @@ void show(const float head[7]) {
     std::memcpy(gHead, head, sizeof gHead);
     gHaveHead = true;
     if (!gReady) return;
+    gState.hover = -1; gState.dragSlider = 0;
+    gAppliedScale = gState.scale; gAppliedDistance = gState.distance;
+    gInteraction.reset();
+    gCursorOn = false; gCursorPressed = false;
     buildSubmit();
     gShow.store(true, std::memory_order_release);
     gDirty = true;
 }
 
-void hide() { gShow.store(false, std::memory_order_release); }
+void hide() {
+    gShow.store(false, std::memory_order_release);
+    gMaskUntilMs.store(nowMs() + 400);        // keep hiding buttons from the game a moment: the B press that closed us is still down
+}
 
 void tick(double now, LogFn log) {
     std::lock_guard<std::mutex> g(gMutex);
     if (!gReady || !gShow.load()) return;
     if (gDirty || now - gLastPost > 0.5) {
-        const bool wasDirty = gDirty;
-        if (wasDirty) buildSubmit();                        // size/scale may have changed
         postPicture(gPostCount < 5 ? log : nullptr);
-        gDirty = false;
         gLastPost = now;
     }
 }
+
+PointerResult pointer(double now, const PointerSample& smp, LogFn log) {
+    std::lock_guard<std::mutex> g(gMutex);
+    PointerResult r;
+    if (!gReady || !gShow.load()) return r;
+    ensureBase();
+    tzpanel::HandAim aims[2];
+    for (int i = 0; i < 2; ++i) {
+        aims[i].valid = smp.valid[i];
+        aims[i].trigger = smp.trigger[i];
+        if (smp.valid[i]) aims[i].onPlane = tzpanel::intersect(tzpanel::rayFromPose(smp.pose[i], tzpanel::kPointerPitchDeg), gPlace, &aims[i].x, &aims[i].y);
+    }
+    static double lastAimLog = -100; static int aimLogs = 0;
+    if (log && aimLogs < 10 && now - lastAimLog > 2.0) {
+        lastAimLog = now; ++aimLogs;
+        log("pointer: aim left valid=%d onPlane=%d x=%.0f y=%.0f trig=%.2f | right valid=%d onPlane=%d x=%.0f y=%.0f trig=%.2f | panel centre=(%.2f %.2f %.2f) size=%.2fx%.2f m",
+            aims[0].valid, aims[0].onPlane, aims[0].x, aims[0].y, aims[0].trigger, aims[1].valid, aims[1].onPlane, aims[1].x, aims[1].y, aims[1].trigger,
+            gPlace.pos[0], gPlace.pos[1], gPlace.pos[2], gPlace.width, gPlace.height);
+    }
+    const bool wasCursor = gCursorOn;
+    const tzpanel::Outcome o = gInteraction.update(gState, gHits, aims);
+    if (o.layoutCommitted) { gAppliedScale = gState.scale; gAppliedDistance = gState.distance; buildSubmit(); }
+    if (o.saveNeeded) saveSettings(log);
+    if (o.redraw) gDirty = true;
+    if (log && gPointerLogLines < 14) {
+        if (o.cursorVisible && !wasCursor) { ++gPointerLogLines; log("pointer: dot appeared with the %s controller at picture x=%.0f y=%.0f", o.hand == 1 ? "RIGHT" : "LEFT", o.cursorX, o.cursorY); }
+        if (o.clickedId) { ++gPointerLogLines; log("pointer: clicked control #%d at x=%.0f y=%.0f (tab=%d sound=%d colour=%s size=%.2f transparency=%.2f distance=%.2f)", o.clickedId, o.cursorX, o.cursorY, gState.tab, gState.sound ? 1 : 0, tzpanel::colorChoice(gState.colorIndex).name, gState.scale, gState.transparency, gState.distance); }
+        if (o.close) { ++gPointerLogLines; log("pointer: X button pressed - closing the menu"); }
+        if (o.layoutCommitted) { ++gPointerLogLines; log("pointer: slider let go - panel is now %.2fx at %.2f m", gAppliedScale, gAppliedDistance); }
+    }
+    const bool moved = (o.cursorVisible != gCursorOn) || (o.cursorVisible && (std::fabs(o.cursorX - gCurX) > 1.0f || std::fabs(o.cursorY - gCurY) > 1.0f)) || (o.cursorVisible && o.pressed != gCursorPressed);
+    gCursorOn = o.cursorVisible; gCurX = o.cursorX; gCurY = o.cursorY; gCursorPressed = o.pressed;
+    if (gDirty || moved) { postPicture(gPostCount < 5 ? log : nullptr); gLastPost = now; }
+    r.close = o.close; r.clicked = o.clickedId != 0; r.clickedId = o.clickedId; r.hand = o.hand; r.onMenu = o.cursorVisible; r.x = o.cursorX; r.y = o.cursorY;
+    return r;
+}
+
+void setSettingsPath(const char* path, LogFn log) {
+    std::lock_guard<std::mutex> g(gMutex);
+    gSettingsPath = path ? path : "";
+    if (gSettingsPath.empty()) return;
+    FILE* f = std::fopen(gSettingsPath.c_str(), "r");
+    if (!f) { if (log) log("settings: no saved settings yet (%s)", gSettingsPath.c_str()); return; }
+    std::string text; char buf[256]; size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0 && text.size() < 4096) text.append(buf, n);
+    std::fclose(f);
+    const bool ok = tzpanel::settingsFromText(text, gState);
+    gAppliedScale = gState.scale; gAppliedDistance = gState.distance; gDirty = true;
+    if (log) log("settings: loaded %s -> sound=%d colour=%s size=%.2f transparency=%.2f distance=%.2f", ok ? "ok" : "(nothing usable)", gState.sound ? 1 : 0, tzpanel::colorChoice(gState.colorIndex).name, gState.scale, gState.transparency, gState.distance);
+}
+
+bool inputBlocked() { return gShow.load(std::memory_order_acquire) || nowMs() < gMaskUntilMs.load(std::memory_order_relaxed); }
+int filterControllerState(int rc, void* out) {
+    const bool block = out && rc >= 0 && inputBlocked();
+    if (block) std::memset(static_cast<unsigned char*>(out) + 4, 0, 60);     // buttons, touches, triggers, grips, sticks, touchpads
+    countInput(block);
+    return rc;
+}
+void countInput(bool masked) { gInputCalls.fetch_add(1, std::memory_order_relaxed); if (masked) gInputMasked.fetch_add(1, std::memory_order_relaxed); }
+InputStats inputStats() { return InputStats{gInputCalls.load(), gInputMasked.load()}; }
 
 int hookEndFrame4(int frame, const void* const* layers, int count, void* extra) {
     EndFrame4Fn real = reinterpret_cast<EndFrame4Fn>(gReal.load(std::memory_order_relaxed));

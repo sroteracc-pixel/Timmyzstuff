@@ -313,7 +313,7 @@ int patchHeapSlot(uint64_t target, uint64_t stub, std::vector<unsigned long>* wh
                 if (v != target) continue;
                 volatile uint64_t* slot = reinterpret_cast<volatile uint64_t*>(c + o);
                 if (*slot != target) continue;                  // changed since we read it
-                *slot = stub;                                   // one aligned 8-byte store
+                if (stub != 0) *slot = stub;                    // one aligned 8-byte store (stub == 0: only count, change nothing)
                 if (where) where->push_back(static_cast<unsigned long>(c + o));
                 ++patched;
             }
@@ -346,6 +346,39 @@ bool tryInstallWatches(void* ovr) {
 }
 
 
+
+// ---- stage D3: hide button presses from the game while the menu is open ---------------------
+// Same trick as the frame watcher: the game's VR plugin keeps a saved copy of the address of
+// ovrp_GetControllerState4. If we find it, we swap it for this doorway. The doorway calls the real
+// function, then (ONLY while the menu is open) blanks the buttons / triggers / sticks it reports to the
+// game. Our own menu reads the real function directly, so it still sees everything.
+// NOT confirmed: the game may read its controllers a different way. The facts file says which.
+uint64_t gInputReal = 0;
+bool gInputPatched = false;
+extern "C" int tzControllerState4Hook(unsigned int mask, void* out) {
+    typedef int (*Fn)(unsigned int, void*);
+    const Fn real = reinterpret_cast<Fn>(gInputReal);
+    if (!real) return -1;
+    return tzoverlay::filterControllerState(real(mask, out), out);
+}
+
+void installInputBlock(void* ovr, int attempt) {
+    static const char* others[] = {"ovrp_GetControllerState5", "ovrp_GetControllerState6", "ovrp_GetControllerState2", "ovrp_GetControllerState", nullptr};
+    void* real = dlsym(ovr, "ovrp_GetControllerState4");
+    if (!real) { fact("input block: ovrp_GetControllerState4 not found"); return; }
+    gInputReal = reinterpret_cast<uint64_t>(real);                 // set BEFORE patching
+    std::vector<unsigned long> where;
+    const int n = patchHeapSlot(gInputReal, reinterpret_cast<uint64_t>(&tzControllerState4Hook), &where);
+    if (n > 0) { gInputPatched = true; fact("input block: ovrp_GetControllerState4 doorway installed in %d heap slot(s), first at %lx", n, where.empty() ? 0UL : where[0]); }
+    else fact("input block: try %d - ovrp_GetControllerState4 is not saved in the heap table", attempt);
+    if (attempt == 1) {
+        for (int i = 0; others[i]; ++i) {
+            void* f = dlsym(ovr, others[i]);
+            if (!f) { fact("input block: %s does not exist in this plugin", others[i]); continue; }
+            fact("input block: %s exists; saved in %d heap slot(s) (read-only check, not changed)", others[i], patchHeapSlot(reinterpret_cast<uint64_t>(f), 0, nullptr));
+        }
+    }
+}
 
 // Read-only report: where are the plugin's regions, and where does each Meta address appear in memory?
 void diagnoseWatches(void* ovr, const char* when) {
@@ -448,9 +481,14 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D2: input probe + frame watcher + menu panel)");
+    fact("Timmyzstuff facts (stage D3: clickable menu - pointer, number pad, size slider, input block)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
+    {   // saved menu settings (sound, colour, size) live next to this file
+        const size_t slash = where.rfind('/');
+        const std::string settingsPath = (slash == std::string::npos ? std::string(".") : where.substr(0, slash)) + "/timmyzstuff_settings.txt";
+        tzoverlay::setSettingsPath(settingsPath.c_str(), fact);
+    }
     writeLoadedLibraries("at start");
 
     void* ovr = findOvrPlugin();
@@ -531,6 +569,8 @@ void* probeMain(void*) {
     bool diag2 = false;
     int overlayTries = 0;
     double overlayNextTry = 0;
+    int inputTries = 0;
+    double inputNextTry = 0;
     uint64_t lastCounts[3] = {0, 0, 0};
     double lastBeatTime = last;
     const double endAt = last + kSampleMillis / 1000.0;
@@ -563,10 +603,26 @@ void* probeMain(void*) {
                                  head[0], head[1], head[2], head[3], head[4], head[5], head[6], tzoverlay::ready() ? "shown" : "NOT READY, nothing to show");
             tzoverlay::show(head);
         }
-        if (!visible && wasVisible) { ++closes; fact("t=%.2f MENU CLOSE (#%d) - B pressed", now, closes); tzoverlay::hide(); }
+        if (!visible && wasVisible) { ++closes; fact("t=%.2f MENU CLOSE (#%d) - B button or the X button on the menu", now, closes); tzoverlay::hide(); }
         wasVisible = visible;
         if (aPressed) poseSnapshot("A pressed");
         else if (bPressed) poseSnapshot("B pressed");
+
+        // ---- stage D3: point and click while the menu is open
+        if (visible && poseFn && tzoverlay::ready()) {
+            tzoverlay::PointerSample ps; std::memset(&ps, 0, sizeof ps);
+            for (int hnd = 0; hnd < 2; ++hnd) {                 // node 3 = left hand, 4 = right hand (confirmed in stage C)
+                alignas(16) unsigned char pb[256]; std::memset(pb, 0, sizeof pb);
+                const int prc = poseFn(-1, -1, 3 + hnd, pb);
+                std::memcpy(ps.pose[hnd], pb, 16); std::memcpy(ps.pose[hnd] + 4, pb + 16, 12);
+                const float* q = ps.pose[hnd];
+                const float norm = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+                ps.valid[hnd] = prc >= 0 && std::fabs(norm - 1.0f) < 0.1f && std::isfinite(q[4]) && std::isfinite(q[5]) && std::isfinite(q[6]);
+            }
+            ps.trigger[0] = pad.leftTrigger; ps.trigger[1] = pad.rightTrigger;
+            const tzoverlay::PointerResult pr = tzoverlay::pointer(now, ps, fact);
+            if (pr.close) menu.close();                        // the X button on the menu
+        }
 
         if (lines < kMaxChangeLines && (samples == 1 || rc != lastRc || worthWriting(prev, buf))) {
             char hx[2 * kDumpBytes + 1];
@@ -580,12 +636,19 @@ void* probeMain(void*) {
         if (!watchesDone && now >= nextWatchTry && now < watchGiveUp) {
             watchesDone = tryInstallWatches(ovr);
             nextWatchTry = now + kWatchEvery;
-            if (watchesDone) { fact("t=%.1f all frame watches are installed", now); overlayNextTry = now + kOverlayDelay; }
+            if (watchesDone) { fact("t=%.1f all frame watches are installed", now); overlayNextTry = now + kOverlayDelay; inputNextTry = now + 1.0; }
         }
         if (!diag2 && now >= watchGiveUp) {
             diag2 = true;
             for (int i = 0; i < frameWatchCount(); ++i)
                 if (!gWatchPatched[i]) fact("frame watch %s: NOT installed after %d seconds of searching", frameWatch(i)->name, kWatchTrySeconds);
+        }
+        // ---- stage D3: input block (hide clicks from the game while the menu is open)
+        if (watchesDone && !gInputPatched && inputTries < 3 && now >= inputNextTry) {
+            ++inputTries;
+            installInputBlock(ovr, inputTries);
+            inputNextTry = now + 6.0;
+            if (!gInputPatched && inputTries == 3) fact("input block: NOT installed - the game reads its controllers another way, so clicks on the menu also reach the game");
         }
         // ---- stage D2: create the menu panel once the frame watcher is running
         if (watchesDone && overlayTries < 2 && now >= overlayNextTry) {
@@ -604,6 +667,8 @@ void* probeMain(void*) {
                 { const tzoverlay::Stats st = tzoverlay::stats();
                   fact("overlay: ready=%d menuVisible=%d frames-with-panel=%llu lastRc=%d firstBadRc=%d broken=%d",
                        tzoverlay::ready() ? 1 : 0, tzoverlay::visible() ? 1 : 0, (unsigned long long)st.withOverlay, st.lastRc, st.firstBadRc, st.broken ? 1 : 0); }
+                { const tzoverlay::InputStats is = tzoverlay::inputStats();
+                  fact("input: block %s; game asked for controller state %llu times, %llu of them blanked", gInputPatched ? "installed" : "not installed", (unsigned long long)is.calls, (unsigned long long)is.masked); }
                 for (int i = 0; i < frameWatchCount(); ++i) lastCounts[i] = *frameWatch(i)->count;
                 lastBeatTime = now;
             }
@@ -632,7 +697,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D2: pass-through + input probe + frame watcher + menu panel)");
+    logf_("payload loaded (stage D3: pass-through + input probe + frame watcher + clickable menu panel)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

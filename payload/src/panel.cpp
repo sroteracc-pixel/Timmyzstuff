@@ -29,20 +29,44 @@ const char* tabName(int i) {
     return (i >= 0 && i < kTabCount) ? names[i] : "";
 }
 
-bool parseRgb(const std::string& text, int rgb[3]) {
-    int v[3]; int n = 0; size_t i = 0;
-    while (i < text.size()) {
-        while (i < text.size() && (text[i] == ' ' || text[i] == ',')) ++i;
-        if (i >= text.size()) break;
-        if (text[i] < '0' || text[i] > '9') return false;
-        long x = 0; int digits = 0;
-        while (i < text.size() && text[i] >= '0' && text[i] <= '9') { x = x * 10 + (text[i] - '0'); ++i; if (++digits > 4) return false; }
-        if (n >= 3 || x > 255) return false;
-        v[n++] = static_cast<int>(x);
+const ColorChoice& colorChoice(int i) {
+    static const ColorChoice colors[kColorCount] = {
+        {"Default", {139, 92, 246}},    // the original purple
+        {"Red",     {239, 68, 68}},
+        {"Orange",  {249, 115, 22}},
+        {"Yellow",  {250, 204, 21}},
+        {"Lime",    {132, 204, 22}},
+        {"Green",   {34, 197, 94}},
+        {"Cyan",    {6, 182, 212}},
+        {"Blue",    {59, 130, 246}},
+        {"Pink",    {236, 72, 153}},
+        {"White",   {226, 232, 240}},
+    };
+    return colors[(i >= 0 && i < kColorCount) ? i : 0];
+}
+
+bool sliderRange(int id, float* lo, float* hi, float* step) {
+    switch (id) {
+    case HIT_SLIDER_SIZE:  *lo = kScaleMin; *hi = kScaleMax; *step = kScaleStep; return true;
+    case HIT_SLIDER_ALPHA: *lo = kAlphaMin; *hi = kAlphaMax; *step = kAlphaStep; return true;
+    case HIT_SLIDER_DIST:  *lo = kDistMin;  *hi = kDistMax;  *step = kDistStep;  return true;
+    default: return false;
     }
-    if (n != 3) return false;
-    rgb[0] = v[0]; rgb[1] = v[1]; rgb[2] = v[2];
-    return true;
+}
+float& sliderValue(PanelState& s, int id) {
+    static float dummy = 0;
+    switch (id) {
+    case HIT_SLIDER_SIZE: return s.scale;
+    case HIT_SLIDER_ALPHA: return s.transparency;
+    case HIT_SLIDER_DIST: return s.distance;
+    default: return dummy;
+    }
+}
+float snapSlider(int id, float v) {
+    float lo, hi, step;
+    if (!sliderRange(id, &lo, &hi, &step)) return v;
+    v = lo + std::round((v - lo) / step) * step;
+    return v < lo ? lo : (v > hi ? hi : v);
 }
 
 // ---------------------------------------------------------------------------------- Canvas
@@ -56,6 +80,12 @@ void Canvas::clear(Color c) {
         px_[i + 2] = static_cast<uint8_t>(clamp01(c.b * a) * 255 + 0.5f);
         px_[i + 3] = static_cast<uint8_t>(clamp01(a) * 255 + 0.5f);
     }
+}
+
+void Canvas::fadeAll(float keep) {
+    keep = clamp01(keep);
+    const unsigned k = static_cast<unsigned>(keep * 256.0f + 0.5f);       // 0..256
+    for (size_t i = 0; i < px_.size(); ++i) px_[i] = static_cast<uint8_t>((px_[i] * k) >> 8);
 }
 
 void Canvas::blend(int x, int y, Color c, float coverage) {
@@ -289,7 +319,8 @@ void drawIcon(Canvas& c, int id, float x, float y, Color col, Color bg) {
 // ---------------------------------------------------------------------------------- the menu picture
 void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
     if (hits) hits->clear();
-    const Color accent = rgba(s.rgb[0], s.rgb[1], s.rgb[2]);
+    const ColorChoice& chosen = colorChoice(s.colorIndex);
+    const Color accent = rgba(chosen.rgb[0], chosen.rgb[1], chosen.rgb[2]);
     const Color accentHi = mix(accent, rgba(255, 255, 255), 0.25f);
     const Color accentLo = scaleC(accent, 0.55f);
     const Color white = rgba(244, 244, 250), grey = rgba(150, 150, 172), dimGrey = rgba(104, 104, 124);
@@ -344,74 +375,90 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
 
     const float rx = cx0 + 24, rw = cw - 48;
     if (s.tab == 0) {
+        float y = cy0 + 70;
         // --- Sound effects
         {
-            const float ry = cy0 + 78, rh = 76;
+            const float ry = y, rh = 52;
             const bool hv = s.hover == HIT_SOUND;
-            c.fillRoundRect(rx, ry, rw, rh, 18, card);
-            c.strokeRoundRect(rx, ry, rw, rh, 18, 1.4f, hv ? withA(accentHi, 0.8f) : cardEdge);
-            c.text(kFontLabel, rx + 26, ry + rh / 2 + 8, "Sound effects", white);
-            const float tw = 80, th = 42, tx = rx + rw - tw - 26, ty = ry + (rh - th) / 2;
+            c.fillRoundRect(rx, ry, rw, rh, 16, card);
+            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, hv ? withA(accentHi, 0.8f) : cardEdge);
+            c.text(kFontLabel, rx + 22, ry + rh / 2 + 8, "Sound effects", white);
+            const float tw = 66, th = 32, tx = rx + rw - tw - 22, ty = ry + (rh - th) / 2;
             c.fillRoundRect(tx, ty, tw, th, th / 2, s.sound ? accent : rgba(58, 58, 74));
             c.strokeRoundRect(tx, ty, tw, th, th / 2, 1.4f, s.sound ? accentHi : rgba(84, 84, 104));
-            c.fillCircle(s.sound ? tx + tw - th / 2 : tx + th / 2, ty + th / 2, th / 2 - 5, rgba(250, 250, 255));
+            c.fillCircle(s.sound ? tx + tw - th / 2 : tx + th / 2, ty + th / 2, th / 2 - 4, rgba(250, 250, 255));
             if (hits) hits->push_back({HIT_SOUND, rx, ry, rw, rh});
+            y += rh + 8;
         }
-        // --- Menu color (RGB)
+        // --- Menu color: a list of colours, click one
         {
-            const float ry = cy0 + 166, rh = 100;
-            c.fillRoundRect(rx, ry, rw, rh, 18, card);
-            c.strokeRoundRect(rx, ry, rw, rh, 18, 1.4f, cardEdge);
-            c.text(kFontLabel, rx + 26, ry + 36, "Menu color (RGB)", white);
-            c.text(kFontTiny, rx + 262, ry + 35, "type like 255,0,0", dimGrey);
-            const float fx = rx + 26, fy = ry + 48, fw = 300, fh = 38;
-            const bool hvf = s.hover == HIT_RGBFIELD;
-            int tmp[3];
-            const bool ok = parseRgb(s.rgbText, tmp);
-            c.fillRoundRect(fx, fy, fw, fh, 11, rgba(14, 14, 20));
-            c.strokeRoundRect(fx, fy, fw, fh, 11, s.editingRgb ? 2.2f : 1.4f, s.editingRgb ? accentHi : (hvf ? withA(accentHi, 0.8f) : rgba(52, 52, 68)));
-            c.text(kFontLabel, fx + 14, fy + fh / 2 + 8, s.rgbText.empty() && !s.editingRgb ? std::string("255, 0, 0") : s.rgbText, s.rgbText.empty() ? dimGrey : (ok ? white : rgba(255, 130, 130)));
-            if (s.editingRgb) c.fillRoundRect(fx + 16 + c.textWidth(kFontLabel, s.rgbText), fy + 8, 2.5f, fh - 16, 1, accentHi);
-            // colour preview + apply
-            c.fillCircle(fx + fw + 30, fy + fh / 2, 15, ok ? rgba(tmp[0], tmp[1], tmp[2]) : accent);
-            c.strokeCircle(fx + fw + 30, fy + fh / 2, 15, 1.6f, rgba(230, 230, 245, 0.8f));
-            const float bx = fx + fw + 64, bw = 118;
-            const bool hva = s.hover == HIT_APPLY;
-            c.fillRoundRectGradient(bx, fy, bw, fh, 11, hva ? accentHi : accent, accentLo);
-            c.strokeRoundRect(bx, fy, bw, fh, 11, 1.4f, accentHi);
-            c.textCentered(kFontLabel, bx + bw / 2, fy + fh / 2 + 8, "Apply", white);
-            if (hits) { hits->push_back({HIT_RGBFIELD, fx, fy, fw, fh}); hits->push_back({HIT_APPLY, bx, fy, bw, fh}); }
+            const float ry = y, rh = 120;
+            c.fillRoundRect(rx, ry, rw, rh, 16, card);
+            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, cardEdge);
+            c.text(kFontLabel, rx + 22, ry + 30, "Menu color", white);
+            c.text(kFontTiny, rx + 22 + c.textWidth(kFontLabel, "Menu color") + 14, ry + 29, "click one", dimGrey);
+            const float pad = 14, gap = 8, pw = (rw - 2 * pad - 4 * gap) / 5, ph = 32, py0 = ry + 42;
+            for (int i = 0; i < kColorCount; ++i) {
+                const ColorChoice& cc = colorChoice(i);
+                const Color col = rgba(cc.rgb[0], cc.rgb[1], cc.rgb[2]);
+                const float px = rx + pad + (i % 5) * (pw + gap), py = py0 + (i / 5) * (ph + gap);
+                const bool sel = (i == s.colorIndex), hv = (s.hover == HIT_COLOR0 + i);
+                if (sel) {
+                    c.glowRoundRect(px, py, pw, ph, 12, 7, withA(col, 0.45f));
+                    c.fillRoundRectGradient(px, py, pw, ph, 12, scaleC(col, 0.55f), scaleC(col, 0.32f));
+                    c.strokeRoundRect(px, py, pw, ph, 12, 2.2f, mix(col, rgba(255, 255, 255), 0.35f));
+                } else {
+                    c.fillRoundRectGradient(px, py, pw, ph, 12, hv ? rgba(48, 48, 64) : rgba(36, 36, 49), hv ? rgba(36, 36, 50) : rgba(27, 27, 37));
+                    c.strokeRoundRect(px, py, pw, ph, 12, 1.4f, hv ? mix(col, rgba(255, 255, 255), 0.2f) : rgba(56, 56, 74));
+                }
+                c.fillCircle(px + 18, py + ph / 2, 8, col);
+                c.strokeCircle(px + 18, py + ph / 2, 8, 1.2f, rgba(255, 255, 255, 0.55f));
+                c.text(kFontSmall, px + 34, py + ph / 2 + 6, cc.name, sel ? white : rgba(222, 222, 234));
+                if (hits) hits->push_back({HIT_COLOR0 + i, px, py, pw, ph});
+            }
+            y += rh + 8;
         }
-        // --- Menu size
-        {
-            const float ry = cy0 + 278, rh = 100;
-            c.fillRoundRect(rx, ry, rw, rh, 18, card);
-            c.strokeRoundRect(rx, ry, rw, rh, 18, 1.4f, cardEdge);
-            c.text(kFontLabel, rx + 26, ry + 36, "Menu size", white);
-            char buf[16]; std::snprintf(buf, sizeof buf, "%.2fx", s.scale);
-            c.text(kFontLabel, rx + rw - 26 - c.textWidth(kFontLabel, buf), ry + 36, buf, accentHi);
-            const float tx0 = rx + 34, tx1 = rx + rw - 34, ty = ry + 64;
-            const float t = clamp01((s.scale - 0.75f) / 0.75f), kx = tx0 + (tx1 - tx0) * t;
+        // --- three sliders: size, transparency, distance
+        struct SliderRow { int id; const char* label; bool onRelease; };
+        static const SliderRow rows[3] = {{HIT_SLIDER_SIZE, "Menu size", true}, {HIT_SLIDER_ALPHA, "Menu transparency", false}, {HIT_SLIDER_DIST, "Menu distance", true}};
+        for (const SliderRow& row : rows) {
+            const float ry = y, rh = 52;
+            c.fillRoundRect(rx, ry, rw, rh, 16, card);
+            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, cardEdge);
+            c.text(kFontLabel, rx + 22, ry + rh / 2 + 8, row.label, white);
+            float lo, hi, step; sliderRange(row.id, &lo, &hi, &step);
+            PanelState tmp = s;
+            const float v = sliderValue(tmp, row.id);
+            char buf[24];
+            if (row.id == HIT_SLIDER_SIZE) std::snprintf(buf, sizeof buf, "%.2fx", v);
+            else if (row.id == HIT_SLIDER_ALPHA) std::snprintf(buf, sizeof buf, "%.2f", v);
+            else std::snprintf(buf, sizeof buf, "%.2f m", v);
+            const bool drag = s.dragSlider == row.id;
+            const float vy = (drag && row.onRelease) ? ry + 24 : ry + rh / 2 + 8;
+            c.text(kFontLabel, rx + rw - 22 - c.textWidth(kFontLabel, buf), vy, buf, accentHi);
+            if (drag && row.onRelease) c.text(kFontTiny, rx + rw - 22 - c.textWidth(kFontTiny, "applies when you let go"), ry + 45, "applies when you let go", dimGrey);
+            const float tx0 = rx + 284, tx1 = rx + rw - 140, ty = ry + rh / 2;
+            const float t = clamp01((v - lo) / (hi - lo)), kx = tx0 + (tx1 - tx0) * t;
             c.fillRoundRect(tx0, ty - 5, tx1 - tx0, 10, 5, rgba(14, 14, 20));
             c.strokeRoundRect(tx0, ty - 5, tx1 - tx0, 10, 5, 1.2f, rgba(52, 52, 68));
             c.fillRoundRectGradient(tx0, ty - 5, std::max(10.0f, kx - tx0), 10, 5, accentHi, accent);
-            c.glowRoundRect(kx - 4, ty - 4, 8, 8, 4, 8, withA(accent, 0.5f));
-            c.fillCircle(kx, ty, 14, rgba(250, 250, 255));
-            c.strokeCircle(kx, ty, 14, 3, accent);
-            c.text(kFontTiny, tx0 - 8, ry + rh - 8, "0.75x", dimGrey);
-            c.text(kFontTiny, tx1 + 8 - c.textWidth(kFontTiny, "1.5x"), ry + rh - 8, "1.5x", dimGrey);
-            if (hits) hits->push_back({HIT_SLIDER, tx0 - 16, ty - 22, tx1 - tx0 + 32, 44});
+            const bool hot = drag || s.hover == row.id;
+            if (hot) c.glowRoundRect(kx - 10, ty - 10, 20, 20, 10, 10, withA(accentHi, 0.7f));
+            c.fillCircle(kx, ty, hot ? 14.5f : 12.5f, rgba(250, 250, 255));
+            c.strokeCircle(kx, ty, hot ? 14.5f : 12.5f, 3, hot ? accentHi : accent);
+            if (hits) hits->push_back({row.id, tx0 - 16, ry + 4, tx1 - tx0 + 32, rh - 8});
+            y += rh + 8;
         }
         // --- Test button
         {
-            const float ry = cy0 + 390, rh = 66;
+            const float ry = y, rh = 46;
             const bool hv = s.hover == HIT_TEST;
-            c.fillRoundRectGradient(rx, ry, rw, rh, 18, hv ? rgba(48, 48, 64) : rgba(38, 38, 52), hv ? rgba(34, 34, 46) : rgba(28, 28, 38));
-            c.strokeRoundRect(rx, ry, rw, rh, 18, 1.8f, hv ? accentHi : withA(accentHi, 0.55f));
+            c.fillRoundRectGradient(rx, ry, rw, rh, 16, hv ? rgba(48, 48, 64) : rgba(38, 38, 52), hv ? rgba(34, 34, 46) : rgba(28, 28, 38));
+            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.8f, hv ? accentHi : withA(accentHi, 0.55f));
             c.textCentered(kFontLabel, rx + rw / 2, ry + rh / 2 + 8, "Test button", white);
             if (s.testClicks > 0) {
                 char buf[32]; std::snprintf(buf, sizeof buf, "Pressed %d", s.testClicks);
-                c.text(kFontSmall, rx + rw - 24 - c.textWidth(kFontSmall, buf), ry + rh / 2 + 7, buf, accentHi);
+                c.text(kFontSmall, rx + rw - 22 - c.textWidth(kFontSmall, buf), ry + rh / 2 + 7, buf, accentHi);
             }
             if (hits) hits->push_back({HIT_TEST, rx, ry, rw, rh});
         }
@@ -439,6 +486,41 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
         c.strokeCircle(ax, fy + 36, 17, 2.6f, accentHi);   c.textCentered(kFontLabel, ax, fy + 44, "A", white);
         c.strokeCircle(ax, fy + 76, 17, 2.6f, accentHi);   c.textCentered(kFontLabel, ax, fy + 84, "B", white);
     }
+}
+
+// ---------------------------------------------------------------------------------- pointer dot
+void drawCursor(Canvas& c, float x, float y, const PanelState& s, bool pressed) {
+    const ColorChoice& cc = colorChoice(s.colorIndex);
+    const Color accent = rgba(cc.rgb[0], cc.rgb[1], cc.rgb[2]);
+    const Color accentHi = mix(accent, rgba(255, 255, 255), 0.35f);
+    c.fillCircle(x + 1.5f, y + 2.0f, 13, rgba(0, 0, 0, 0.35f));                 // soft shadow
+    c.fillCircle(x, y, pressed ? 9.0f : 11.0f, withA(accentHi, 0.28f));
+    c.strokeCircle(x, y, pressed ? 9.0f : 11.0f, 3.0f, rgba(255, 255, 255));
+    c.strokeCircle(x, y, pressed ? 9.0f : 11.0f, 1.2f, accent);
+    c.fillCircle(x, y, 3.6f, rgba(255, 255, 255));
+}
+
+// ---------------------------------------------------------------------------------- saved settings
+std::string settingsToText(const PanelState& s) {
+    char b[200];
+    std::snprintf(b, sizeof b, "sound=%d\ncolor=%d\nscale=%.2f\ntransparency=%.2f\ndistance=%.2f\n", s.sound ? 1 : 0, s.colorIndex, s.scale, s.transparency, s.distance);
+    return b;
+}
+bool settingsFromText(const std::string& text, PanelState& s) {
+    bool any = false; size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find('\n', pos); if (end == std::string::npos) end = text.size();
+        const std::string line = text.substr(pos, end - pos); pos = end + 1;
+        const size_t eq = line.find('='); if (eq == std::string::npos) continue;
+        const std::string key = line.substr(0, eq), val = line.substr(eq + 1);
+        char* e = nullptr;
+        if (key == "sound" && (val == "0" || val == "1")) { s.sound = (val == "1"); any = true; }
+        else if (key == "color") { const long v = std::strtol(val.c_str(), &e, 10); if (e != val.c_str() && v >= 0 && v < kColorCount) { s.colorIndex = static_cast<int>(v); any = true; } }
+        else if (key == "scale") { const float f = std::strtof(val.c_str(), &e); if (e != val.c_str() && f >= kScaleMin - 1e-4f && f <= kScaleMax + 1e-4f) { s.scale = snapSlider(HIT_SLIDER_SIZE, f); any = true; } }
+        else if (key == "transparency") { const float f = std::strtof(val.c_str(), &e); if (e != val.c_str() && f >= kAlphaMin - 1e-4f && f <= kAlphaMax + 1e-4f) { s.transparency = snapSlider(HIT_SLIDER_ALPHA, f); any = true; } }
+        else if (key == "distance") { const float f = std::strtof(val.c_str(), &e); if (e != val.c_str() && f >= kDistMin - 1e-4f && f <= kDistMax + 1e-4f) { s.distance = snapSlider(HIT_SLIDER_DIST, f); any = true; } }
+    }
+    return any;
 }
 
 }  // namespace tzpanel

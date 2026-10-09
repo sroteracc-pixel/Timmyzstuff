@@ -39,6 +39,7 @@ public:
     void strokeCircle(float cx, float cy, float r, float width, Color c);
     void line(float x0, float y0, float x1, float y1, float width, Color c);
     void fillPolygon(const std::vector<float>& xy, Color c);                                 // x0,y0,x1,y1,...
+    void fadeAll(float keep);                    // keeps only `keep` (0..1) of the picture's opacity, e.g. 0.25 = 75% see-through
 
     float textWidth(const Font& f, const std::string& s) const;
     void text(const Font& f, float x, float baselineY, const std::string& s, Color c);
@@ -50,27 +51,40 @@ private:
     std::vector<uint8_t> px_;
 };
 
+// The colours you can pick for the menu. Number 0 ("Default") is the purple the menu started with.
+struct ColorChoice { const char* name; int rgb[3]; };
+const int kColorCount = 10;
+const ColorChoice& colorChoice(int i);
+
+// Slider ranges
+const float kScaleMin = 0.75f, kScaleMax = 1.5f, kScaleStep = 0.05f;               // menu size
+const float kAlphaMin = 0.0f,  kAlphaMax = 0.75f, kAlphaStep = 0.05f;              // menu transparency (0.75 = 75% see-through)
+const float kDistMin = 0.6f,   kDistMax = 2.0f,  kDistStep = 0.05f;                // menu distance in metres
+const float kDistDefault = 1.15f;
+
 // Everything the picture depends on.
 struct PanelState {
     int tab = 0;                    // 0 Settings ... 10 Troll
     bool sound = true;              // "Sound effects" switch
-    int rgb[3] = {139, 92, 246};    // menu colour (default: purple)
+    int colorIndex = 0;             // which colour in the list (0 = Default purple)
     float scale = 1.0f;             // menu size, 0.75 .. 1.5
+    float transparency = 0.0f;      // 0 = solid ... 0.75 = 75% see-through
+    float distance = kDistDefault;  // how far in front of you the menu floats (metres)
     int testClicks = 0;             // how many times Test button was pressed
     int hover = -1;                 // which control the pointer is over (a HitId, or -1)
-    std::string rgbText = "139, 92, 246";   // what is typed in the colour box
-    bool editingRgb = false;        // the colour box is being typed into
+    int dragSlider = 0;             // HitId of the slider being dragged (0 = none)
 };
 
-// Clickable areas (in picture pixels), so a pointer can later find what it points at.
+// Clickable areas (in picture pixels), so a pointer can find what it points at.
 enum HitId {
     HIT_CLOSE = 1,
     HIT_TAB0 = 10,                  // 10 .. 20 = the 11 sidebar entries
     HIT_SOUND = 30,
-    HIT_RGBFIELD = 31,
-    HIT_APPLY = 32,
-    HIT_SLIDER = 33,
+    HIT_SLIDER_SIZE = 33,
     HIT_TEST = 34,
+    HIT_SLIDER_ALPHA = 35,
+    HIT_SLIDER_DIST = 36,
+    HIT_COLOR0 = 60,                // 60 .. 69 = the 10 colours
 };
 struct HitRect { int id; float x, y, w, h; };
 
@@ -80,7 +94,16 @@ const char* tabName(int i);
 // Paints the whole menu. `hits` (optional) receives the clickable areas.
 void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits);
 
-// Parses "255, 0, 0" (also "255 0 0" or "255,0,0"). Returns false (and leaves rgb alone) if it is not 3 numbers 0-255.
-bool parseRgb(const std::string& text, int rgb[3]);
+// The little pointer dot drawn on top of the menu (drawn separately so moving it does not repaint the menu).
+void drawCursor(Canvas& c, float x, float y, const PanelState& s, bool pressed);
+
+// ---- sliders: one place that knows each slider's range, so the picture and the pointer agree ----
+bool sliderRange(int hitId, float* lo, float* hi, float* step);   // false if hitId is not a slider
+float& sliderValue(PanelState& s, int hitId);
+float snapSlider(int hitId, float v);                              // rounds to the slider's steps and keeps it in range
+
+// Saved settings: a few short lines of text (sound, colour, size, transparency, distance).
+std::string settingsToText(const PanelState& s);
+bool settingsFromText(const std::string& text, PanelState& s);   // false if nothing usable was found
 
 }  // namespace tzpanel
