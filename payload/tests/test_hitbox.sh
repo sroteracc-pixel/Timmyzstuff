@@ -1,5 +1,5 @@
 #!/bin/bash
-# PC test of the "Hitbox expander" + "See hitbox" part of the game link (aim_hitbox.cpp) against a PRETEND libil2cpp.so and pretend hands. Proves the logic, not the real game.
+# PC test of the "Hitbox expander" part of the game link (aim_hitbox.cpp) against a PRETEND libil2cpp.so and pretend hands. Proves the logic, not the real game.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 g++ -std=c++17 -shared -fPIC "$HERE/fake_il2cpp_aim.cpp" -o "$W/libil2cpp.so" || exit 2

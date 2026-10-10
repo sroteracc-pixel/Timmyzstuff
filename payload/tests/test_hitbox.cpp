@@ -1,8 +1,9 @@
-// PC test of the "Hitbox expander" + "See hitbox" part of the game link (aim_hitbox.cpp) against the PRETEND game (fake_il2cpp_aim.cpp).
+// PC test of the "Hitbox expander" part of the game link (aim_hitbox.cpp, stage D11b) against the PRETEND game (fake_il2cpp_aim.cpp).
 // The pretend game has two hands of YOURS (reached from your ball control manager) and one hand of ANOTHER player. Every hand has five hitboxes: a box, a sphere,
 // two capsules and a mesh (a kind whose size cannot be changed). Index 0-4 = your left hand, 5-9 = your right hand, 10-14 = the other player's hand.
-// It proves the logic (find the hands, scale from the game's own sizes, put them back, survive a game that changes things) and that the part leaves everything else alone.
-// It does NOT prove that the REAL game's steal / block code uses these hitboxes, that other players see them, or what the game's own display draws.
+// Every hand also has four GRAB-REACH values (Hand.reachDistance, Hand.palmRadius, BallControl._gravityDistance, BallControl._grabVolume's local scale).
+// It proves the logic (find the hands, scale from the game's own values, put them back, survive a game that changes things) and that the part leaves everything else alone.
+// It does NOT prove that the REAL game's grab uses these numbers, that other players see them, or that very big hands feel good.
 #include <dlfcn.h>
 #include <unistd.h>
 #include <cmath>
@@ -119,12 +120,25 @@ static double hbAt(int i) { double s[12]; hb_state(s); return s[i]; }
 static long sets() { return static_cast<long>(hbAt(0)); }
 static long gets() { return static_cast<long>(hbAt(1)); }
 static long vizCalls() { return static_cast<long>(hbAt(2)); }
-static int vizOn(int hand) { return static_cast<int>(hbAt(6 + hand)); }
-static int vizOff(int hand) { return static_cast<int>(hbAt(8 + hand)); }
-static int vizNow(int hand) { return static_cast<int>(hbAt(3 + hand)); }
 static double reachOf(int hand) { return hb_reach(hand); }
 static double gameAt(int i) { double s[10]; fake_state(s); return s[i]; }
 static double score() { double s[8]; pts_state(s); return s[0]; }
+// ---- the grab-reach values: 0 reachDistance, 1 palmRadius, 2 _gravityDistance, 3-5 grab volume scale now; 6-11 the game's own; 12 alive
+static void (*hb_tw)(int, double*) = nullptr;
+static void (*hb_twset)(int, int, double, int) = nullptr;
+static void (*hb_tfcounts)(double*) = nullptr;
+static bool twScaled(int hand, double mul) {
+    double t[13]; hb_tw(hand, t);
+    for (int j = 0; j < 6; ++j) if (!nearD(t[j], t[6 + j] * mul)) return false;
+    return true;
+}
+static bool twOwn(int hand) { return twScaled(hand, 1.0); }
+static bool mineTw(double mul) { return twScaled(0, mul) && twScaled(1, mul); }
+static bool otherTw() { return twOwn(2); }
+static double twAt(int hand, int j) { double t[13]; hb_tw(hand, t); return t[j]; }
+static long tfGets() { double c[2]; hb_tfcounts(c); return static_cast<long>(c[0]); }
+static long tfSets() { double c[2]; hb_tfcounts(c); return static_cast<long>(c[1]); }
+static bool everythingOwn() { return allOwn() && twOwn(0) && twOwn(1) && twOwn(2); }
 
 static void throwFrom(double fx, double fy, double fz, double tx, double tz, double elevDeg, double speed, double offDeg, int hand = 2) {
     const double dx = tx - fx, dz = tz - fz;
@@ -151,6 +165,10 @@ int main(int, char** argv) {
     hb_reach = reinterpret_cast<double (*)(int)>(dlsym(gLib, "fake_hb_reach"));
     hb_hide = reinterpret_cast<void (*)(const char*, const char*)>(dlsym(gLib, "fake_hb_hide"));
     hb_field = reinterpret_cast<void (*)(const char*, const char*, int)>(dlsym(gLib, "fake_hb_field"));
+    hb_tw = reinterpret_cast<void (*)(int, double*)>(dlsym(gLib, "fake_hb_tw"));
+    hb_twset = reinterpret_cast<void (*)(int, int, double, int)>(dlsym(gLib, "fake_hb_twset"));
+    hb_tfcounts = reinterpret_cast<void (*)(double*)>(dlsym(gLib, "fake_hb_tfcounts"));
+    if (!hb_tw || !hb_twset || !hb_tfcounts) { std::printf("the pretend runtime lacks the grab-reach functions\n"); return 2; }
     if (!hb_set || !hb_state || !hb_col || !hb_reach || !hb_hide || !hb_field || !pts_state) { std::printf("the pretend runtime lacks the hitbox functions\n"); return 2; }
 
     std::printf("== the pretend world itself (so the checks below mean something)\n");
@@ -159,119 +177,130 @@ int main(int, char** argv) {
         CHECK("15 hitboxes: kinds box, sphere, capsule, capsule, mesh for each of the three hands", kindOf(0) == 1 && kindOf(1) == 2 && kindOf(2) == 3 && kindOf(3) == 3 && kindOf(4) == 4 && kindOf(5) == 1 && kindOf(9) == 4 && kindOf(10) == 1 && kindOf(14) == 4);
         CHECK("all start at the game's own size", allOwn());
         CHECK("the other player's hand is 3 times bigger than yours", reachOf(2) > 2.9 * reachOf(0) && reachOf(2) < 3.1 * reachOf(0));
+        CHECK("every hand has its grab-reach values, at the game's own numbers (0.20, 0.05, 0.07, scale 0.10)", everythingOwn() && nearD(twAt(0, 0), 0.20) && nearD(twAt(0, 1), 0.05) && nearD(twAt(0, 2), 0.07) && nearD(twAt(0, 3), 0.10) && nearD(twAt(2, 0), 0.60));
     }
 
     std::printf("== every switch is off: the hitbox part touches nothing, and says nothing\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(false, 3.0f, false);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(false, 3.0f);
         r.run(1.5);
-        CHECK("not a single engine call about hitboxes", sets() == 0 && gets() == 0 && vizCalls() == 0 && gameAt(6) == 0);
-        CHECK("every hitbox is at the game's own size", allOwn());
+        CHECK("not a single engine call about hitboxes or the grab volume", sets() == 0 && gets() == 0 && vizCalls() == 0 && tfGets() == 0 && tfSets() == 0 && gameAt(6) == 0);
+        CHECK("every hitbox and every grab-reach value is at the game's own number", everythingOwn());
         CHECK("menu state is 'off' and the headline is empty", r.link->hitboxUiState() == 0 && r.link->hitboxHeadline().empty());
         CHECK("no hitbox lines in the facts file", countPrefix("hitbox:") == 0);
-        CHECK("the counters are all zero", r.link->hitboxCounters().resized == 0 && r.link->hitboxCounters().censuses == 0 && r.link->hitboxCounters().hands == 0);
+        CHECK("the counters are all zero", r.link->hitboxCounters().resized == 0 && r.link->hitboxCounters().censuses == 0 && r.link->hitboxCounters().hands == 0 && r.link->hitboxCounters().grabSet == 0);
         CHECK("the link is not even running for it (the Aimbot and Shot points are off too)", r.link->uiState() == 0);
         r.link->stop();
     }
 
-    std::printf("== Hitbox expander ON at 2.0x (Aimbot and Shot points off): your hands get bigger, nothing else does\n");
+    std::printf("== Hitbox expander ON at 2.0x (Aimbot and Shot points off): your hands get bigger AND reach further, nothing else does\n");
     {
-        Rig r; const double reach0 = reachOf(0); r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, false);
+        Rig r; const double reach0 = reachOf(0); r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
         const bool ok = r.connectHb(); r.run(0.4);
         CHECK("the hitbox part connects (state 1)", ok && r.link->hitboxUiState() == 1);
-        CHECK("the headline says 2 hands and 8 hitboxes made 2.0x bigger", r.link->hitboxHeadline() == "connected: 2 hands, 8 hitboxes made 2.0x bigger");
+        CHECK("the headline says 2 hands, 8 hitboxes and 8 grab values made 2.0x bigger", r.link->hitboxHeadline() == "connected: 2 hands, 8 hitboxes + 8 grab values made 2.0x bigger");
         CHECK("all 8 resizable hitboxes of YOUR two hands are exactly 2.0 times the game's own size", mineScaled(2.0));
         CHECK("the two mesh hitboxes (size cannot be changed) are untouched", meshesOwn());
-        CHECK("the OTHER player's hand is untouched", otherOwn());
+        CHECK("the OTHER player's hand is untouched (hitboxes and grab-reach values)", otherOwn() && otherTw());
         CHECK("your hands now reach twice as far (both of them), the other player's hand not", reach0 > 0 && nearD(reachOf(0), 2.0 * reach0) && nearD(reachOf(1), 2.0 * reach0) && nearD(reachOf(2), 3.0 * reach0));
+        CHECK("Hand.reachDistance, Hand.palmRadius, BallControl._gravityDistance and the grab volume's scale are exactly 2.0x on both of your hands", mineTw(2.0));
+        CHECK("... as real numbers: reach 0.40, palm radius 0.10, gravity distance 0.14, grab volume scale 0.20", nearD(twAt(0, 0), 0.40) && nearD(twAt(1, 1), 0.10) && nearD(twAt(0, 2), 0.14) && nearD(twAt(1, 3), 0.20) && nearD(twAt(1, 5), 0.20));
         CHECK("the Aimbot is NOT on (state off) and no throw was touched", r.link->uiState() == 0 && gameAt(7) == 0);
+        CHECK("the game's own display function was never called (See hitbox is gone)", vizCalls() == 0);
         CHECK("the facts file says where the hands keep their hitboxes", countNotes("hitbox: found where your hands keep their hitboxes") == 1 && findNote("hitbox: found where").find("_handColliders@144") != std::string::npos);
+        CHECK("the facts file lists the 4 grab-reach values it found, with their places", findNote("hitbox: GRAB-REACH values found").find("Hand.reachDistance@92(Hand), Hand.palmRadius@96(Hand), BallControl._gravityDistance@168(BallControl), BallControl._grabVolume@152(BallControl)") != std::string::npos);
+        CHECK("... and the way the Transform scale is read", findNote("hitbox: GRAB-REACH values found").find("Transform scale call: game call") != std::string::npos);
         CHECK("the facts file says the switch went on, at 2.0x", countNotes("hitbox: Hitbox expander turned ON at 2.0x") == 1);
         CHECK("the facts file says it found both hands and counts 10 hitboxes, 8 resizable", countNotes("hitbox: found your hands") == 1 && findNote("hitbox: your hands have 10 hitboxes").find("8 can be resized (box 2, sphere 2, capsule 4), mesh 2, other kinds 0") != std::string::npos);
         CHECK("... and names the first hitboxes with their sizes", findNote("hitbox: your hands have").find("BoxCollider") != std::string::npos && findNote("hitbox: your hands have").find("size (0.080, 0.020, 0.100)") != std::string::npos);
-        CHECK("the facts file says 8 hitboxes were set to 2.0x", countNotes("hitbox: set 8 hitboxes of your hands to 2.0x their own size") == 1);
+        CHECK("the facts file says what the game's own grab-reach values were, for each hand", findNote("hitbox: the game's own grab-reach values").find("left hand: Hand.reachDistance 0.200, Hand.palmRadius 0.050, BallControl._gravityDistance 0.070, BallControl._grabVolume scale (0.100, 0.100, 0.100) | right hand: Hand.reachDistance 0.200") != std::string::npos);
+        CHECK("the facts file says 8 hitboxes and 8 grab-reach values were set to 2.0x", countNotes("hitbox: set 8 hitboxes of your hands to 2.0x their own size") == 1 && countNotes("hitbox: set 8 grab-reach values of your hands to 2.0x their own value") == 1);
         CHECK("the counters: 8 resized, no failures, no game resets", r.link->hitboxCounters().resized == 8 && r.link->hitboxCounters().readFails == 0 && r.link->hitboxCounters().writeFails == 0 && r.link->hitboxCounters().gameResets == 0);
+        CHECK("the grab counters: 8 values can be changed, 8 set, none failed, the game did not change any", r.link->hitboxCounters().grabValues == 8 && r.link->hitboxCounters().grabSet == 8 && r.link->hitboxCounters().grabWriteFails == 0 && r.link->hitboxCounters().grabReadFails == 0 && r.link->hitboxCounters().grabResets == 0);
         CHECK("it counts hands 2, hitboxes 10, resizable 8 (box 2, sphere 2, capsule 4, mesh 2)", r.link->hitboxCounters().hands == 2 && r.link->hitboxCounters().hitboxes == 10 && r.link->hitboxCounters().resizable == 8 &&
               r.link->hitboxCounters().boxes == 2 && r.link->hitboxCounters().spheres == 2 && r.link->hitboxCounters().capsules == 4 && r.link->hitboxCounters().meshes == 2);
-        const long setsNow = sets();
+        const long setsNow = sets(), tfNow = tfSets();
         r.run(3.0);
-        CHECK("it does not keep writing: no new size changes in 3 more seconds", sets() == setsNow);
-        CHECK("it does not read all the time either (a few reads per second at most)", gets() < 400);
-        CHECK("the summary line for the facts file has the state, the asked size and the counts", r.link->hitboxSummary().find("hitbox: link connected | asked: expander 2.0x, see hitbox off | hands 2, hitboxes 10 (can be resized 8: box 2, sphere 2, capsule 4; other kinds 0, mesh 2)") == 0);
+        CHECK("it does not keep writing: no new size changes in 3 more seconds", sets() == setsNow && tfSets() == tfNow && mineScaled(2.0) && mineTw(2.0));
+        CHECK("it does not read all the time either (a few reads per second at most)", gets() < 400 && tfGets() < 400);
+        CHECK("the summary line for the facts file has the state, the asked size and the counts", r.link->hitboxSummary().find("hitbox: link connected | asked: expander 2.0x | hands 2, hitboxes 10 (can be resized 8: box 2, sphere 2, capsule 4; other kinds 0, mesh 2)") == 0);
+        CHECK("... and the grab-reach numbers", r.link->hitboxSummary().find("GRAB-REACH values: 8 can be changed, set 8 times, put back 0 times") != std::string::npos);
         r.link->stop();
     }
 
-    std::printf("== the slider's stops: 1.0 ... 5.0 (and out-of-range values are pulled in)\n");
+    std::printf("== the slider's stops: 1.0 ... 10.0 in steps of 0.5 (and out-of-range values are pulled in)\n");
     {
         bool allOk = true; double badStop = 0;
-        for (int st = 10; st <= 50; st += 5) {
-            Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, static_cast<float>(st) / 10.0f, false);
+        for (int st = 10; st <= 100; st += 5) {
+            Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, static_cast<float>(st) / 10.0f);
             r.connectHb(); r.run(0.4);
             const double mul = st / 10.0;
-            const bool ok = mineScaled(mul) && meshesOwn() && otherOwn() && r.link->hitboxUiState() == 1;
+            const bool ok = mineScaled(mul) && mineTw(mul) && meshesOwn() && otherOwn() && otherTw() && r.link->hitboxUiState() == 1;
             if (!ok) { allOk = false; badStop = mul; }
             r.link->stop();
         }
-        CHECK("1.0x, 1.5x, 2.0x ... 5.0x each give exactly that many times the game's own size", allOk);
+        CHECK("1.0x, 1.5x, 2.0x ... 10.0x (19 stops) each give exactly that many times the game's own size AND grab-reach values", allOk);
         if (!allOk) std::printf("      first bad stop: %.1f\n", badStop);
-        { Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 1.0f, false); r.connectHb(); r.run(1.0);
-          CHECK("1.0x is the normal size: nothing was changed, not one set call", mineScaled(1.0) && sets() == 0);
-          CHECK("... and the headline says so", r.link->hitboxHeadline() == "connected: 2 hands, 8 hitboxes at the normal size (1.0x)");
+        { Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 1.0f); r.connectHb(); r.run(1.0);
+          CHECK("1.0x is the normal size: nothing was changed, not one set call", mineScaled(1.0) && mineTw(1.0) && sets() == 0 && tfSets() == 0);
+          CHECK("... and the headline says so", r.link->hitboxHeadline() == "connected: 2 hands, 8 hitboxes + 8 grab values at the normal size (1.0x)");
           r.link->stop(); }
-        { Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 9.0f, false); r.connectHb(); r.run(0.4);
-          CHECK("9.0 is pulled in to 5.0x", mineScaled(5.0)); r.link->stop(); }
-        { Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 0.2f, false); r.connectHb(); r.run(0.4);
-          CHECK("0.2 is pulled up to 1.0x (never smaller than normal)", mineScaled(1.0) && sets() == 0); r.link->stop(); }
-        { Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, std::nanf(""), false); r.connectHb(); r.run(0.4);
-          CHECK("a number that is not a number becomes 1.0x", mineScaled(1.0) && sets() == 0); r.link->stop(); }
+        { Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 12.0f); r.connectHb(); r.run(0.4);
+          CHECK("12.0 is pulled in to 10.0x", mineScaled(10.0) && mineTw(10.0)); r.link->stop(); }
+        { Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 0.2f); r.connectHb(); r.run(0.4);
+          CHECK("0.2 is pulled up to 1.0x (never smaller than normal)", mineScaled(1.0) && mineTw(1.0) && sets() == 0); r.link->stop(); }
+        { Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, std::nanf("")); r.connectHb(); r.run(0.4);
+          CHECK("a number that is not a number becomes 1.0x", mineScaled(1.0) && mineTw(1.0) && sets() == 0); r.link->stop(); }
+        { Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 10.0f); r.connectHb(); r.run(0.4);
+          CHECK("at 10.0x: the grab reach is 2.0 m, palm radius 0.5, gravity distance 0.7 m, grab volume scale 1.0", nearD(twAt(0, 0), 2.0) && nearD(twAt(0, 1), 0.5) && nearD(twAt(0, 2), 0.7) && nearD(twAt(0, 3), 1.0));
+          CHECK("... and the headline says 10.0x", r.link->hitboxHeadline() == "connected: 2 hands, 8 hitboxes + 8 grab values made 10.0x bigger"); r.link->stop(); }
     }
 
     std::printf("== moving the slider while it is on: always from the game's own size, never on top of the last change\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, false);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
         r.connectHb(); r.run(0.4);
-        CHECK("2.0x first", mineScaled(2.0));
-        r.link->setHitbox(true, 3.5f, false); r.run(0.5);
-        CHECK("then 3.5x: exactly 3.5 times the game's own size (not 7x)", mineScaled(3.5));
-        r.link->setHitbox(true, 5.0f, false); r.run(0.5);
-        CHECK("then 5.0x", mineScaled(5.0));
-        r.link->setHitbox(true, 1.5f, false); r.run(0.5);
-        CHECK("then 1.5x (it can shrink again)", mineScaled(1.5));
-        r.link->setHitbox(true, 1.0f, false); r.run(0.5);
-        CHECK("then 1.0x: back to exactly the game's own size", mineScaled(1.0) && allOwn());
+        CHECK("2.0x first", mineScaled(2.0) && mineTw(2.0));
+        r.link->setHitbox(true, 3.5f); r.run(0.5);
+        CHECK("then 3.5x: exactly 3.5 times the game's own value (not 7x)", mineScaled(3.5) && mineTw(3.5));
+        r.link->setHitbox(true, 10.0f); r.run(0.5);
+        CHECK("then 10.0x", mineScaled(10.0) && mineTw(10.0));
+        r.link->setHitbox(true, 1.5f); r.run(0.5);
+        CHECK("then 1.5x (it can shrink again)", mineScaled(1.5) && mineTw(1.5));
+        r.link->setHitbox(true, 1.0f); r.run(0.5);
+        CHECK("then 1.0x: back to exactly the game's own values", mineScaled(1.0) && allOwn() && everythingOwn());
         CHECK("... and the headline says 'at the normal size'", r.link->hitboxHeadline().find("at the normal size (1.0x)") != std::string::npos);
-        CHECK("... and the counters know 8 hitboxes were put back", r.link->hitboxCounters().restored == 8);
+        CHECK("... and the counters know 8 hitboxes and 8 grab values were put back", r.link->hitboxCounters().restored == 8 && r.link->hitboxCounters().grabRestored == 8);
         const long s0 = sets();
-        r.link->setHitbox(true, 2.0f, false); r.run(0.5);
-        CHECK("2.0x again works after a trip through 1.0x", mineScaled(2.0) && sets() > s0);
-        for (int i = 0; i < 40; ++i) { r.link->setHitbox(true, 1.0f + (i % 9) * 0.5f, false); r.run(0.02); }
-        r.link->setHitbox(true, 4.0f, false); r.run(0.6);
-        CHECK("wiggling the slider 40 times quickly ends exactly at the last value (4.0x)", mineScaled(4.0) && meshesOwn() && otherOwn());
+        r.link->setHitbox(true, 2.0f); r.run(0.5);
+        CHECK("2.0x again works after a trip through 1.0x", mineScaled(2.0) && mineTw(2.0) && sets() > s0);
+        for (int i = 0; i < 40; ++i) { r.link->setHitbox(true, 1.0f + (i % 9) * 0.5f); r.run(0.02); }
+        r.link->setHitbox(true, 4.0f); r.run(0.6);
+        CHECK("wiggling the slider 40 times quickly ends exactly at the last value (4.0x)", mineScaled(4.0) && mineTw(4.0) && meshesOwn() && otherOwn() && otherTw());
         r.link->stop();
     }
 
-    std::printf("== the switch goes OFF: the game's own sizes are put back exactly\n");
+    std::printf("== the switch goes OFF: the game's own values are put back exactly\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 4.0f, false);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 4.0f);
         r.connectHb(); r.run(0.4);
-        CHECK("4.0x is on", mineScaled(4.0));
-        r.link->setHitbox(false, 4.0f, false); r.run(0.5);
-        CHECK("switch off: every hitbox is exactly the game's own size again", allOwn());
+        CHECK("4.0x is on", mineScaled(4.0) && mineTw(4.0));
+        r.link->setHitbox(false, 4.0f); r.run(0.5);
+        CHECK("switch off: every hitbox and every grab-reach value is exactly the game's own again", allOwn() && everythingOwn());
         CHECK("the menu state is off again and the headline is empty", r.link->hitboxUiState() == 0 && r.link->hitboxHeadline().empty());
-        CHECK("the facts file says it switched off and put 8 hitboxes back", countNotes("hitbox: switched off") == 1 && findNote("hitbox: switched off").find("8 hitboxes put back to the game's own size") != std::string::npos);
-        CHECK("the counters: 8 resized, 8 put back", r.link->hitboxCounters().resized == 8 && r.link->hitboxCounters().restored == 8);
-        const long s0 = sets(), g0 = gets();
+        CHECK("the facts file says it switched off and put 8 hitboxes and 8 grab-reach values back", countNotes("hitbox: switched off") == 1 && findNote("hitbox: switched off").find("8 hitboxes and 8 grab-reach values put back to the game's own") != std::string::npos);
+        CHECK("the counters: 8 resized, 8 put back; 8 grab values set, 8 put back", r.link->hitboxCounters().resized == 8 && r.link->hitboxCounters().restored == 8 && r.link->hitboxCounters().grabSet == 8 && r.link->hitboxCounters().grabRestored == 8);
+        const long s0 = sets(), g0 = gets(), t0 = tfGets(), t1 = tfSets();
         r.run(2.0);
-        CHECK("after that it does nothing at all (no more reads or writes)", sets() == s0 && gets() == g0);
-        r.link->setHitbox(true, 3.0f, false); r.connectHb(); r.run(0.5);
-        CHECK("turning it on again works and scales from the same game sizes (3.0x)", mineScaled(3.0));
+        CHECK("after that it does nothing at all (no more reads or writes)", sets() == s0 && gets() == g0 && tfGets() == t0 && tfSets() == t1);
+        r.link->setHitbox(true, 3.0f); r.connectHb(); r.run(0.5);
+        CHECK("turning it on again works and scales from the same game values (3.0x)", mineScaled(3.0) && mineTw(3.0));
         r.link->stop();
-        CHECK("stopping the whole link puts the game's sizes back too", allOwn() || mineScaled(3.0));      // (stop() ends the thread; the stand-down already ran for every switch-off, this only has to not crash)
     }
 
     std::printf("== the game puts the sizes back by itself (a new round, a respawn): the mod notices and sets them again\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 3.0f, false);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 3.0f);
         r.connectHb(); r.run(0.4);
         hb_set("game_reset", 0, 0);
         CHECK("(the pretend game just put all hitboxes back to its own size)", allOwn());
@@ -284,23 +313,23 @@ int main(int, char** argv) {
         double c[8]; hb_col(0, c);
         CHECK("the game gave the hitboxes a NEW own size (1.5x bigger): the mod scales from that new size", mineScaled(3.0) && nearD(c[4], 0.08 * 1.5));
         CHECK("... and the facts file says it was a NEW own size", countNotes("(0 back to its own size, 8 to a NEW own size)") == 1);
-        r.link->setHitbox(false, 3.0f, false); r.run(0.5);
+        r.link->setHitbox(false, 3.0f); r.run(0.5);
         CHECK("switch off: it puts back the NEW own size (not the old one)", allOwn() && nearD(c[4], 0.08 * 1.5));
         r.link->stop();
     }
 
     std::printf("== the game destroys a hitbox: no crash, the rest keep working\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, false);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
         r.connectHb(); r.run(0.4);
         hb_set("destroy_col", 1, 0);           // your left hand's sphere
-        r.link->setHitbox(true, 3.0f, false); r.run(2.6);
+        r.link->setHitbox(true, 3.0f); r.run(2.6);
         double c[8]; hb_col(1, c);
         CHECK("the destroyed hitbox was not written to (still the old size, 2.0x)", isScaled(1, 2.0) && c[7] == 0);
         bool restOk = true; for (int i : kMine) if (i != 1 && !isScaled(i, 3.0)) restOk = false;
         CHECK("all the other 7 hitboxes follow the slider to 3.0x", restOk);
         CHECK("still connected, no engine errors", r.link->hitboxUiState() == 1 && r.link->counters().errors == 0);
-        r.link->setHitbox(false, 3.0f, false); r.run(0.5);
+        r.link->setHitbox(false, 3.0f); r.run(0.5);
         bool back = true; for (int i : kMine) if (i != 1 && !isOwn(i)) back = false;
         CHECK("switch off: the 7 living ones are back to their own size", back);
         r.link->stop();
@@ -308,33 +337,34 @@ int main(int, char** argv) {
 
     std::printf("== the game builds new hands (new avatar / new scene): the mod finds them\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.5f, false);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.5f);
         r.connectHb(); r.run(0.4);
         CHECK("2.5x on the first hands", mineScaled(2.5));
         hb_set("rebuild", 0, 0);
         CHECK("(the pretend game just made new hands with their own sizes)", allOwn());
         r.run(1.0);
-        CHECK("the new hands are 2.5x within a second", mineScaled(2.5) && meshesOwn() && otherOwn());
+        CHECK("the new hands are 2.5x within a second (hitboxes and grab-reach values, each from the new hand's own numbers)", mineScaled(2.5) && mineTw(2.5) && meshesOwn() && otherOwn() && otherTw());
         CHECK("the facts file says it found hands again", countNotes("hitbox: found your hands") >= 2);
         CHECK("still connected with 2 hands", r.link->hitboxUiState() == 1 && r.link->hitboxCounters().hands == 2);
-        r.link->setHitbox(false, 2.5f, false); r.run(0.5);
-        CHECK("switch off: the new hands are at their own size", allOwn());
+        r.link->setHitbox(false, 2.5f); r.run(0.5);
+        CHECK("switch off: the new hands are at their own size and values", allOwn() && everythingOwn());
         r.link->stop();
     }
 
     std::printf("== a hand disappears from your ball control, or its hitbox list is emptied: what was changed is put back\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 3.0f, false);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 3.0f);
         r.connectHb(); r.run(0.4);
         hb_set("unlink", 0, 0);                 // the left hand is no longer linked from your ball control
         r.run(0.6);
         CHECK("the left hand's hitboxes were put back to normal (the mod does not leave them big)", isOwn(0) && isOwn(1) && isOwn(2) && isOwn(3));
-        CHECK("the right hand is still 3.0x", isScaled(5, 3.0) && isScaled(6, 3.0) && isScaled(7, 3.0) && isScaled(8, 3.0));
+        CHECK("... and so were its grab-reach values", twOwn(0));
+        CHECK("the right hand is still 3.0x (hitboxes and grab-reach values)", isScaled(5, 3.0) && isScaled(6, 3.0) && isScaled(7, 3.0) && isScaled(8, 3.0) && twScaled(1, 3.0));
         CHECK("the menu says 1 hand", r.link->hitboxCounters().hands == 1 && r.link->hitboxHeadline().find("1 hand,") != std::string::npos && r.link->hitboxUiState() == 1);
         CHECK("the facts file says some hitboxes left the lists", countNotes("left the lists of your hands' hitboxes - put back to the game's own size") >= 1);
         hb_set("relink", 0, 0);
         r.run(0.6);
-        CHECK("linked again: the left hand is 3.0x from ITS OWN size (not 9x)", mineScaled(3.0));
+        CHECK("linked again: the left hand is 3.0x from ITS OWN size (not 9x), the grab-reach values too", mineScaled(3.0) && mineTw(3.0));
         hb_set("arr_null", 1, 0);               // the right hand's list of hitboxes is gone
         r.run(0.6);
         CHECK("the right hand's list is empty: its hitboxes are put back; the left hand stays 3.0x", isOwn(5) && isOwn(6) && isOwn(7) && isOwn(8) && isScaled(0, 3.0) && isScaled(3, 3.0));
@@ -350,7 +380,7 @@ int main(int, char** argv) {
     }
     std::printf("== a hand that the game says it has no authority over is still handled, and the report shows the flag\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, false);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
         hb_set("authority", 0, 0);
         r.connectHb(); r.run(0.4);
         CHECK("2.0x is applied", mineScaled(2.0));
@@ -360,30 +390,31 @@ int main(int, char** argv) {
 
     std::printf("== the engine refuses to SET a size: the part gives up cleanly after a few tries and says why\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, false);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
         hb_set("set_throws", 1, 0);
         r.run(3.0);
         CHECK("the menu shows FAILED (state 3)", r.link->hitboxUiState() == 3);
         CHECK("the headline says why", r.link->hitboxHeadline().find("FAILED:") == 0);
-        CHECK("nothing was changed in the game", allOwn());
+        CHECK("nothing is left changed in the game (what was set before it stopped is put back)", everythingOwn());
         CHECK("the facts file says it stopped, once", countNotes("hitbox: STOPPED") == 1);
         const long s0 = sets();
         r.run(2.0);
         CHECK("it stopped trying (no more set calls)", sets() == s0);
         CHECK("the failures are counted", r.link->hitboxCounters().writeFails >= 1);
-        r.link->setHitbox(false, 2.0f, false); r.run(0.3);
+        r.link->setHitbox(false, 2.0f); r.run(0.3);
         hb_set("set_throws", 0, 0);
-        r.link->setHitbox(true, 2.0f, false);
-        CHECK("switching it off and on again tries again and works", r.connectHb() && (r.run(0.5), mineScaled(2.0)));
+        r.link->setHitbox(true, 2.0f);
+        CHECK("switching it off and on again tries again and works", r.connectHb() && (r.run(0.5), mineScaled(2.0) && mineTw(2.0)));
         r.link->stop();
     }
     std::printf("== the engine refuses to READ a size: nothing is changed (the mod does not guess the game's own size)\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, false);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
         hb_set("get_throws", 1, 0);
         const int st = r.waitState(); r.run(1.5);
         CHECK("the menu shows FAILED (state 3)", st == 3 && r.link->hitboxUiState() == 3);
-        CHECK("nothing was set", sets() == 0 && allOwn());
+        r.run(0.5);
+        CHECK("nothing was set, and nothing is left changed", sets() == 0 && everythingOwn());
         CHECK("the read failures are counted", r.link->hitboxCounters().readFails >= 1);
         r.link->stop();
     }
@@ -395,47 +426,51 @@ int main(int, char** argv) {
         hb_hide("BoxCollider", "get_size"); hb_hide("BoxCollider", "set_size");
         hb_hide("SphereCollider", "get_radius"); hb_hide("SphereCollider", "set_radius");
         hb_hide("CapsuleCollider", "get_radius"); hb_hide("CapsuleCollider", "set_radius"); hb_hide("CapsuleCollider", "get_height"); hb_hide("CapsuleCollider", "set_height");
-        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, false);
+        hb_hide("Transform", "get_localScale"); hb_hide("Transform", "set_localScale");
+        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
         const bool ok = r.connectHb(); r.run(0.4);
         CHECK("connects through the internal calls", ok && r.link->hitboxUiState() == 1);
-        CHECK("all 8 hitboxes are 2.0x", mineScaled(2.0) && meshesOwn() && otherOwn());
-        CHECK("the facts file says the calls are 'engine call'", findNote("hitbox: found where").find("Box size read engine call / set engine call") != std::string::npos);
-        r.link->setHitbox(false, 2.0f, false); r.run(0.4);
-        CHECK("switch off puts the sizes back through them too", allOwn());
+        CHECK("all 8 hitboxes are 2.0x, and so are the grab-reach values (the grab volume's scale through the engine's internal call)", mineScaled(2.0) && mineTw(2.0) && meshesOwn() && otherOwn() && otherTw() && tfSets() >= 2);
+        CHECK("the facts file says the calls are 'engine call'", findNote("hitbox: found where").find("Box size read engine call / set engine call") != std::string::npos && findNote("hitbox: GRAB-REACH values found").find("Transform scale call: engine call") != std::string::npos);
+        r.link->setHitbox(false, 2.0f); r.run(0.4);
+        CHECK("switch off puts the sizes back through them too", allOwn() && everythingOwn());
         r.link->stop();
     }
     std::printf("== only the setters are missing for one kind (capsules): the other kinds still work\n");
     {
         Rig r;
         hb_hide("CapsuleCollider", "set_height");
-        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, false);
+        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
         const bool ok = r.connectHb(); r.run(0.4);
         CHECK("connects", ok);
         CHECK("boxes and spheres are 2.0x", isScaled(0, 2.0) && isScaled(1, 2.0) && isScaled(5, 2.0) && isScaled(6, 2.0));
         CHECK("capsules (cannot be fully resized) are left alone", isOwn(2) && isOwn(3) && isOwn(7) && isOwn(8));
-        CHECK("the headline counts only the 4 hitboxes it can resize", r.link->hitboxHeadline() == "connected: 2 hands, 4 hitboxes made 2.0x bigger");
+        CHECK("the headline counts only the 4 hitboxes it can resize", r.link->hitboxHeadline() == "connected: 2 hands, 4 hitboxes + 8 grab values made 2.0x bigger");
         r.link->stop();
     }
-    std::printf("== no hitbox can be resized and no display exists: it says so and does nothing\n");
+    std::printf("== no hitbox can be resized: the grab-reach values still work\n");
     {
         Rig r;
         hb_hide("BoxCollider", "set_size"); hb_hide("SphereCollider", "set_radius"); hb_hide("CapsuleCollider", "set_radius");
-        hb_hide("BallControl", "SetHandColliderVisual");
-        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, false);
+        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
+        const bool ok = r.connectHb(); r.run(0.8);
+        CHECK("connected (state 1): the grab-reach values can be changed", ok && r.link->hitboxUiState() == 1);
+        CHECK("the hitboxes are untouched, the grab-reach values are 2.0x", allOwn() && sets() == 0 && mineTw(2.0));
+        CHECK("the headline says 0 hitboxes + 8 grab values", r.link->hitboxHeadline() == "connected: 2 hands, 0 hitboxes + 8 grab values made 2.0x bigger");
+        CHECK("the facts file warns that no kind of hitbox can be resized", countNotes("WARNING: no kind of hitbox can be resized") == 1);
+        r.link->setHitbox(false, 2.0f); r.run(0.5);
+        CHECK("switch off: the grab-reach values are back", everythingOwn());
+        r.link->stop();
+    }
+    std::printf("== no hitbox can be resized AND the game has none of the grab-reach values: it says so and does nothing\n");
+    {
+        Rig r;
+        hb_hide("BoxCollider", "set_size"); hb_hide("SphereCollider", "set_radius"); hb_hide("CapsuleCollider", "set_radius");
+        hb_field("Hand", "reachDistance", 0); hb_field("Hand", "palmRadius", 0); hb_field("BallControl", "_gravityDistance", 0); hb_field("BallControl", "_grabVolume", 0);
+        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
         const int st = r.waitState(); r.run(0.5);
-        CHECK("FAILED (state 3) and the headline names both problems", st == 3 && r.link->hitboxHeadline().find("FAILED: neither the hitbox sizes can be changed") == 0);
-        CHECK("nothing touched", allOwn() && sets() == 0 && vizCalls() == 0);
-        r.link->stop();
-    }
-    std::printf("== the setters are missing but the display exists: Hitbox expander says 'none can be resized', See hitbox still works\n");
-    {
-        Rig r;
-        hb_hide("BoxCollider", "set_size"); hb_hide("SphereCollider", "set_radius"); hb_hide("CapsuleCollider", "set_radius");
-        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, true);
-        const int st = r.waitState(); r.run(0.8);
-        CHECK("state 3: the hitboxes were found but none can be resized", st == 3 && r.link->hitboxHeadline().find("none of them can be resized") != std::string::npos);
-        CHECK("... but the game's display was still asked to show them", vizOn(0) == 1 && vizOn(1) == 1);
-        CHECK("the facts file warns about it", countNotes("WARNING: no kind of hitbox can be resized") == 1);
+        CHECK("FAILED (state 3) and the headline names both problems", st == 3 && r.link->hitboxHeadline().find("FAILED: neither the hitbox sizes can be changed") == 0 && r.link->hitboxHeadline().find("Hand.reachDistance, Hand.palmRadius, BallControl._gravityDistance, BallControl._grabVolume") != std::string::npos);
+        CHECK("nothing touched", everythingOwn() && sets() == 0 && tfSets() == 0 && vizCalls() == 0);
         r.link->stop();
     }
 
@@ -453,104 +488,157 @@ int main(int, char** argv) {
         for (const Case& c : cases) {
             Rig r;
             hb_field(c.klass, c.field, c.action);
-            r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, false);
+            r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
             const int st = r.waitState(); r.run(0.3);
             const bool ok = st == 3 && r.link->hitboxHeadline().find(c.expect) != std::string::npos && allOwn() && sets() == 0;
             CHECK(c.name, ok);
             if (!ok) std::printf("      state %d headline '%s'\n", st, r.link->hitboxHeadline().c_str());
             r.link->stop();
         }
+    }
+
+    std::printf("== a grab-reach value is missing or changed its type in the game: the other values still work, and the facts file says which one is missing\n");
+    {
+        struct Case { const char* name; const char* klass; const char* field; int action; const char* missing; int values; };
+        const Case cases[] = {
+            {"Hand.reachDistance removed", "Hand", "reachDistance", 0, "not in this game: Hand.reachDistance", 6},
+            {"Hand.palmRadius became an int", "Hand", "palmRadius", 1, "not in this game: Hand.palmRadius", 6},
+            {"BallControl._gravityDistance removed", "BallControl", "_gravityDistance", 0, "not in this game: BallControl._gravityDistance", 6},
+            {"BallControl._grabVolume removed", "BallControl", "_grabVolume", 0, "not in this game: BallControl._grabVolume", 6},
+        };
+        for (const Case& c : cases) {
+            Rig r;
+            hb_field(c.klass, c.field, c.action);
+            r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
+            const bool ok = r.connectHb(); r.run(0.5);
+            const bool good = ok && mineScaled(2.0) && r.link->hitboxCounters().grabValues == c.values && findNote("hitbox: GRAB-REACH values found").find(c.missing) != std::string::npos &&
+                              r.link->hitboxHeadline() == std::string("connected: 2 hands, 8 hitboxes + ") + std::to_string(c.values) + " grab values made 2.0x bigger";
+            CHECK(c.name, good);
+            if (!good) std::printf("      headline '%s'\n", r.link->hitboxHeadline().c_str());
+            r.link->setHitbox(false, 2.0f); r.run(0.4);
+            CHECK("... and switching off puts everything back", everythingOwn());
+            r.link->stop();
+        }
+    }
+
+    std::printf("== the grab volume (a Transform): the game has no way to read or set its scale -> it is left alone, the rest works\n");
+    {
         Rig r;
-        hb_field("BallControl", "_fingerVizPrefab", 0);
-        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, false);
-        const bool ok = r.connectHb(); r.run(0.4);
-        CHECK("_fingerVizPrefab removed: Hitbox expander still works (only See hitbox needs it)", ok && mineScaled(2.0));
-        r.link->setHitbox(true, 2.0f, true); r.run(0.6);
-        CHECK("... and See hitbox then says why it cannot work", r.link->hitboxHeadline().find("See hitbox not available") != std::string::npos && vizCalls() == 0);
+        hb_hide("Transform", "get_localScale"); hb_hide("Transform", "set_localScale");
+        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 3.0f);
+        const bool ok = r.connectHb(); r.run(0.5);
+        CHECK("connected, with 6 grab values (3 per hand)", ok && r.link->hitboxHeadline() == "connected: 2 hands, 8 hitboxes + 6 grab values made 3.0x bigger");
+        double t[13]; hb_tw(0, t);
+        CHECK("reach, palm radius and gravity distance are 3.0x; the grab volume's scale was not touched", nearD(t[0], 0.60) && nearD(t[1], 0.15) && nearD(t[2], 0.21) && nearD(t[3], 0.10) && tfSets() == 0);
+        CHECK("the facts file says why the grab volume is left alone", findNote("hitbox: GRAB-REACH values found").find("BallControl._grabVolume left alone: neither the game nor the engine has Transform.get_localScale / set_localScale") != std::string::npos);
+        r.link->setHitbox(false, 3.0f); r.run(0.4);
+        CHECK("switch off: all values back", everythingOwn());
+        r.link->stop();
+    }
+    std::printf("== the grab volume's scale cannot be SET (the engine refuses): that one value is given up after 3 tries, the rest keeps working, no stop\n");
+    {
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
+        hb_set("tf_set_throws", 1, 0);
+        r.connectHb(); r.run(1.5);
+        double t[13]; hb_tw(0, t);
+        CHECK("the other 3 values per hand are 2.0x; the grab volume is at its own scale", nearD(t[0], 0.40) && nearD(t[1], 0.10) && nearD(t[2], 0.14) && nearD(t[3], 0.10) && mineScaled(2.0));
+        CHECK("the part did not stop (state 1), 6 grab values are left, 6 refused writes were counted", r.link->hitboxUiState() == 1 && r.link->hitboxCounters().grabValues == 6 && r.link->hitboxCounters().grabWriteFails == 6);
+        CHECK("the facts file says the grab volume could not be set (left hand and right hand)", countNotes("BallControl._grabVolume (left hand) could not be set 3 times - left alone") == 1 && countNotes("BallControl._grabVolume (right hand) could not be set 3 times - left alone") == 1);
+        const long t0 = tfSets();
+        r.run(2.0);
+        CHECK("it does not keep trying", tfSets() == t0);
+        r.link->setHitbox(false, 2.0f); r.run(0.4);
+        CHECK("switch off: everything back", everythingOwn());
+        r.link->stop();
+    }
+    std::printf("== the grab volume's scale cannot be READ: that value is given up, the rest keeps working\n");
+    {
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
+        hb_set("tf_get_throws", 1, 0);
+        r.connectHb(); r.run(1.5);
+        double t[13]; hb_tw(0, t);
+        CHECK("the other values are 2.0x, the grab volume untouched, not stopped", nearD(t[0], 0.40) && nearD(t[2], 0.14) && nearD(t[3], 0.10) && mineScaled(2.0) && r.link->hitboxUiState() == 1 && tfSets() == 0);
+        CHECK("the facts file says the grab volume cannot be read", countNotes("BallControl._grabVolume (left hand) cannot be read - left alone") == 1);
+        r.link->setHitbox(false, 2.0f); r.run(0.4);
+        CHECK("switch off: everything back", everythingOwn());
         r.link->stop();
     }
 
-    std::printf("== See hitbox ON (Hitbox expander OFF): the game's own display is asked for, on your hands only\n");
+    std::printf("== the game puts its grab-reach values back by itself: noticed within a moment, set again, and counted\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(false, 1.0f, true);
-        const bool ok = r.connectHb(); r.run(1.0);
-        CHECK("connected (state 1) with the display on", ok && r.link->hitboxHeadline() == "connected: 2 hands | See hitbox: the game's display is on");
-        CHECK("the game's display function was called once for the left and once for the right hand, with 'show'", vizOn(0) == 1 && vizOn(1) == 1 && vizNow(0) == 1 && vizNow(1) == 1);
-        CHECK("the other player's hand got no call", vizOn(2) == 0 && vizOff(2) == 0 && vizNow(2) == 0);
-        CHECK("no hitbox size was touched (Hitbox expander is off)", sets() == 0 && allOwn());
-        CHECK("it does not call the display again and again", vizCalls() == 2);
-        r.run(3.0);
-        CHECK("... not even after 3 more seconds", vizCalls() == 2);
-        CHECK("the facts file says it asked for the display, and that it cannot see what it draws", countNotes("hitbox: asked the game to show its hand collider display on the left hand") == 1 && findNote("hitbox: asked the game").find("I cannot see from here") != std::string::npos);
-        CHECK("the facts file says the switch went on", countNotes("hitbox: See hitbox turned ON") == 1);
-        r.link->setHitbox(false, 1.0f, false); r.run(0.5);
-        CHECK("switch off: the display was hidden on both hands", vizOff(0) == 1 && vizOff(1) == 1 && vizNow(0) == 0 && vizNow(1) == 0);
-        CHECK("... and the menu is off", r.link->hitboxUiState() == 0);
-        CHECK("the facts file says the display was switched off", findNote("hitbox: switched off").find("game display switched off") != std::string::npos);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 3.0f);
+        r.connectHb(); r.run(0.4);
+        hb_set("tw_game_reset", 0, 0);
+        CHECK("(the pretend game just put all grab-reach values back to its own)", twOwn(0) && twOwn(1));
+        r.run(0.6);
+        CHECK("within a fraction of a second they are 3.0x again", mineTw(3.0));
+        CHECK("the facts file says the game changed 8 values (ONE line) and that they went back to the game's own value", countNotes("hitbox: the game changed 8 of your grab-reach values") == 1 && findNote("hitbox: the game changed 8 of your grab-reach values").find("(8 back to its own value, 0 to a NEW own value)") != std::string::npos);
+        CHECK("... the counter knows", r.link->hitboxCounters().grabResets == 8);
+        hb_set("tw_game_new", 1.5, 0);
+        r.run(0.6);
+        CHECK("the game gave NEW own values (1.5x): the mod scales from them", mineTw(3.0) && nearD(twAt(0, 6), 0.30) && nearD(twAt(0, 0), 0.90));
+        CHECK("... and the facts file says they were NEW own values", countNotes("(0 back to its own value, 8 to a NEW own value)") == 1);
+        r.link->setHitbox(false, 3.0f); r.run(0.5);
+        CHECK("switch off: the NEW own values are put back, not the old ones", twOwn(0) && twOwn(1) && nearD(twAt(0, 0), 0.30));
         r.link->stop();
     }
-    std::printf("== See hitbox with the Hitbox expander: the display follows the slider (hidden and shown again once, after the slider rests)\n");
+    std::printf("== the game changes ONE value for its own reasons (a new ball type, ...) while the expander is on\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, true);
-        r.connectHb(); r.run(1.0);
-        CHECK("both on: hitboxes are 2.0x and the display is on", mineScaled(2.0) && vizNow(0) == 1 && vizNow(1) == 1);
-        CHECK("the headline shows both", r.link->hitboxHeadline() == "connected: 2 hands, 8 hitboxes made 2.0x bigger | See hitbox: the game's display is on");
-        for (int i = 0; i < 20; ++i) { r.link->setHitbox(true, 1.0f + (i % 9) * 0.5f, true); r.run(0.05); }
-        r.link->setHitbox(true, 4.0f, true);
-        r.run(1.5);
-        CHECK("after the slider rested at 4.0x: hitboxes are 4.0x and the display is on", mineScaled(4.0) && vizNow(0) == 1 && vizNow(1) == 1);
-        CHECK("the display was re-shown only a few times, not on every slider step (at most 3 on-calls per hand)", vizOn(0) <= 3 && vizOn(1) <= 3 && vizOn(0) >= 2);
-        r.link->setHitbox(true, 4.0f, false); r.run(0.5);
-        CHECK("See hitbox off, expander still on: display hidden, hitboxes still 4.0x", vizNow(0) == 0 && vizNow(1) == 0 && mineScaled(4.0));
-        r.link->setHitbox(false, 4.0f, false); r.run(0.5);
-        CHECK("all off: everything back to normal", allOwn() && vizNow(0) == 0);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
+        r.connectHb(); r.run(0.4);
+        hb_twset(0, 2, 0.10, 1);               // the game sets _gravityDistance of your left ball control to 0.10 and keeps that as ITS value
+        r.run(0.5);
+        CHECK("the new game value is made 2.0x (0.20), the other values are untouched", nearD(twAt(0, 2), 0.20) && nearD(twAt(0, 0), 0.40) && nearD(twAt(1, 2), 0.14));
+        hb_twset(0, 3, 0.5, 1);                // the game changes the grab volume's x scale
+        r.run(0.5);
+        CHECK("same for the grab volume's x scale: 1.0, and y and z stay 0.20", nearD(twAt(0, 3), 1.0) && nearD(twAt(0, 4), 0.20) && nearD(twAt(0, 5), 0.20));
+        r.link->setHitbox(false, 2.0f); r.run(0.4);
+        CHECK("switch off: the game's latest values are back (gravity 0.10, scale x 0.5)", nearD(twAt(0, 2), 0.10) && nearD(twAt(0, 3), 0.5) && nearD(twAt(0, 4), 0.10));
         r.link->stop();
     }
-    std::printf("== the game's display function takes (prefab, bool) instead of (prefab, float): still works\n");
+    std::printf("== the expander is OFF and the game changes a grab-reach value: the mod does not interfere, and later scales from the new value\n");
     {
-        Rig r;
-        hb_set("viz_bool", 1, 0);
-        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(false, 1.0f, true);
-        const bool ok = r.connectHb(); r.run(0.6);
-        CHECK("connected, shown on both hands", ok && vizNow(0) == 1 && vizNow(1) == 1);
-        CHECK("the facts file names the parameter types it read", findNote("hitbox: found where").find("SetHandColliderVisual(UnityEngine.GameObject, System.Boolean)") != std::string::npos);
-        r.link->setHitbox(false, 1.0f, false); r.run(0.4);
-        CHECK("hidden again", vizNow(0) == 0 && vizNow(1) == 0);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 1.0f);
+        r.connectHb(); r.run(0.4);
+        hb_twset(0, 0, 0.30, 1);
+        r.run(0.5);
+        CHECK("at 1.0x nothing is written", tfSets() == 0 && nearD(twAt(0, 0), 0.30));
+        r.link->setHitbox(true, 2.0f); r.run(0.5);
+        CHECK("then 2.0x is made from the NEW value (0.60), not from the old 0.20", nearD(twAt(0, 0), 0.60));
         r.link->stop();
     }
-    std::printf("== the display function has parameters I do not know: it is not called at all, and the menu says why\n");
+    std::printf("== the grab volume is destroyed, emptied, replaced or comes back\n");
     {
-        Rig r;
-        hb_set("viz_weird", 1, 0);
-        r.start(); r.link->setAsk(false, 50); r.link->setHitbox(false, 1.0f, true);
-        r.run(1.5);
-        CHECK("not a single call", vizCalls() == 0);
-        CHECK("the headline says See hitbox is not available and why", r.link->hitboxHeadline().find("See hitbox not available: SetHandColliderVisual has parameters (System.Int32, System.Int32)") != std::string::npos);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
+        r.connectHb(); r.run(0.4);
+        hb_set("tf_destroy", 0, 0);
+        r.run(0.8);
+        CHECK("a destroyed grab volume: no crash, the other values keep working, the right hand's grab volume too", r.link->hitboxUiState() == 1 && nearD(twAt(0, 0), 0.40) && nearD(twAt(1, 3), 0.20) && r.link->counters().errors == 0);
+        hb_set("tf_null", 1, 0);
+        r.run(0.5);
+        hb_set("tf_back", 1, 0);
+        r.run(0.5);
+        CHECK("the right hand's grab volume field is emptied and filled again with the SAME object: it is still 2.0x (not 4x)", nearD(twAt(1, 3), 0.20));
+        hb_set("tf_swap", 1, 0);
+        r.run(0.5);
+        CHECK("the game gives the right hand a NEW grab volume: it is scaled from ITS own scale (0.20), not 0.40", nearD(twAt(1, 3), 0.20) && nearD(twAt(1, 4), 0.20));
+        r.link->setHitbox(false, 2.0f); r.run(0.4);
+        CHECK("switch off: the new grab volume is back at its own scale", nearD(twAt(1, 3), 0.10) && nearD(twAt(1, 5), 0.10));
         r.link->stop();
     }
-    std::printf("== your hand has no display model yet: nothing is called, the menu says so, and it works once the model is there\n");
+    std::printf("== a grab-reach value of 0 (multiplying it changes nothing): left alone, said once\n");
     {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(false, 1.0f, true);
-        hb_set("prefab_null", 1, 0);
-        r.run(1.5);
-        CHECK("no call while there is no model", vizCalls() == 0);
-        CHECK("the headline says the model is empty", r.link->hitboxHeadline().find("_fingerVizPrefab is empty") != std::string::npos);
-        r.link->stop();
-    }
-    std::printf("== the game's display function throws: three tries, then See hitbox is marked failed; the Hitbox expander keeps working\n");
-    {
-        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f, true);
-        hb_set("viz_throws", 1, 0);
-        r.connectHb(); r.run(2.0);
-        CHECK("the Hitbox expander is fine (2.0x)", mineScaled(2.0) && r.link->hitboxUiState() == 1);
-        CHECK("the display was tried a few times only", vizCalls() == 0 && r.link->hitboxCounters().visualCalls >= 3 && r.link->hitboxCounters().visualCalls <= 8);
-        CHECK("the headline says See hitbox failed", r.link->hitboxHeadline().find("See hitbox failed") != std::string::npos);
+        Rig r; r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 2.0f);
+        hb_set("tw_zero", 0, 0);
+        r.connectHb(); r.run(0.5);
+        CHECK("Hand.reachDistance of the left hand is left at 0, everything else is 2.0x", nearD(twAt(0, 0), 0.0) && nearD(twAt(1, 0), 0.40) && nearD(twAt(0, 1), 0.10) && mineScaled(2.0));
+        CHECK("the facts file says so, once", countNotes("Hand.reachDistance (left hand) is 0.000 - multiplying that changes nothing, so it is left alone") == 1);
         r.link->stop();
     }
 
     std::printf("== it works next to the Aimbot and Shot points, and each one can be switched off without disturbing the others\n");
     {
-        Rig r; r.start(); r.link->setAsk(true, 50); r.link->setPoints(11); r.link->setHitbox(true, 3.0f, false);
+        Rig r; r.start(); r.link->setAsk(true, 50); r.link->setPoints(11); r.link->setHitbox(true, 3.0f);
         r.connectAim(); r.connectPts(); r.connectHb(); r.run(0.5);
         CHECK("all three connect", r.link->uiState() == 1 && r.link->pointsUiState() == 1 && r.link->hitboxUiState() == 1);
         CHECK("the hitboxes are 3.0x", mineScaled(3.0));
@@ -559,20 +647,20 @@ int main(int, char** argv) {
         CHECK("the Aimbot fixed the throw and it went in", r.link->counters().aimed == 1 && gameAt(8) == 1);
         CHECK("Shot points counted 11", score() == 11);
         CHECK("the hitboxes are still 3.0x after the shot", mineScaled(3.0));
-        r.link->setHitbox(false, 3.0f, false); r.run(0.6);
+        r.link->setHitbox(false, 3.0f); r.run(0.6);
         CHECK("Hitbox expander off while the Aimbot stays on: sizes are back", allOwn());
         CHECK("... and the Aimbot is still connected", r.link->uiState() == 1 && r.link->pointsUiState() == 1);
-        r.link->setHitbox(true, 2.0f, false); r.run(0.6);
+        r.link->setHitbox(true, 2.0f); r.run(0.6);
         CHECK("on again: 2.0x", mineScaled(2.0));
         r.link->setAsk(false, 50); r.link->setPoints(0); r.run(0.6);
         CHECK("Aimbot and points off: the hitboxes are still 2.0x and still connected", mineScaled(2.0) && r.link->hitboxUiState() == 1 && r.link->uiState() == 0);
-        r.link->setHitbox(false, 2.0f, false); r.run(0.6);
+        r.link->setHitbox(false, 2.0f); r.run(0.6);
         CHECK("now everything is off: sizes back, link idle", allOwn() && r.link->hitboxUiState() == 0);
         r.link->stop();
     }
     std::printf("== a hitbox error never switches off the Aimbot\n");
     {
-        Rig r; r.start(); r.link->setAsk(true, 50); r.link->setHitbox(true, 2.0f, false);
+        Rig r; r.start(); r.link->setAsk(true, 50); r.link->setHitbox(true, 2.0f);
         hb_set("set_throws", 1, 0);
         r.connectAim(); r.run(3.0);
         CHECK("the hitbox part failed", r.link->hitboxUiState() == 3);
@@ -584,9 +672,9 @@ int main(int, char** argv) {
 
     std::printf("== not on the game's own thread: nothing happens\n");
     {
-        Rig r("UnityMain"); r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 3.0f, true);
+        Rig r("UnityMain"); r.start(); r.link->setAsk(false, 50); r.link->setHitbox(true, 3.0f);
         r.run(1.5);
-        CHECK("a doorway call from some other thread is ignored: nothing was read, set or shown", allOwn() && sets() == 0 && gets() == 0 && vizCalls() == 0);
+        CHECK("a doorway call from some other thread is ignored: nothing was read or set", everythingOwn() && sets() == 0 && gets() == 0 && vizCalls() == 0 && tfGets() == 0 && tfSets() == 0);
         r.link->stop();
     }
 
@@ -594,14 +682,14 @@ int main(int, char** argv) {
     {
         Rig r; r.start(); r.link->setAsk(false, 50);
         for (int i = 0; i < 60; ++i) {
-            r.link->setHitbox(true, 1.5f + (i % 7) * 0.5f, (i % 2) == 0); r.run(0.5);
+            r.link->setHitbox(true, 1.5f + (i % 7) * 0.5f); r.run(0.5);
             if (i % 5 == 0) hb_set("game_reset", 0, 0);
             if (i % 11 == 0) hb_set("rebuild", 0, 0);
-            r.link->setHitbox(false, 2.0f, false); r.run(0.3);
+            r.link->setHitbox(false, 2.0f); r.run(0.3);
         }
         r.settle(0.2);
         CHECK("60 rounds of switching on and off, resets and new hands: not more than 62 hitbox lines in all", countPrefix("hitbox:") <= 62);
-        CHECK("... and everything is back to the game's own size at the end", allOwn());
+        CHECK("... and everything is back to the game's own size and values at the end", everythingOwn());
         r.link->stop();
     }
 

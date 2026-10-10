@@ -670,21 +670,21 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
         }
     } else if (s.tab == kTabTroll) {
         float y = cy0 + 66;
-        // ---- stage D11: "Hitbox expander" card: switch + slider (1.0x ... 5.0x) + one status line
+        // ---- stage D11: "Hitbox expander" card: switch + slider (1.0x ... 10.0x) + one status line
         {
             const float ry = y, rh = 126;
             const bool on = s.hitboxOn, hvT = s.hover == HIT_TOGGLE_HITBOX;
             c.fillRoundRect(rx, ry, rw, rh, 16, card);
             c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, on ? withA(accentHi, 0.7f) : cardEdge);
             c.text(kFontLabel, rx + 22, ry + 32, "Hitbox expander", on ? white : rgba(222, 222, 234));
-            c.text(kFontTiny, rx + 22 + c.textWidth(kFontLabel, "Hitbox expander") + 16, ry + 31, "bigger hands: easier steals and blocks", dimGrey);
+            c.text(kFontTiny, rx + 22 + c.textWidth(kFontLabel, "Hitbox expander") + 16, ry + 31, "bigger hands and a longer grab reach", dimGrey);
             const float tw = 66, th = 32, tx = rx + rw - tw - 22, ty0 = ry + 14;
             c.fillRoundRect(tx, ty0, tw, th, th / 2, on ? accent : rgba(58, 58, 74));
             c.strokeRoundRect(tx, ty0, tw, th, th / 2, hvT ? 2.2f : 1.4f, on ? accentHi : (hvT ? withA(accentHi, 0.9f) : rgba(84, 84, 104)));
             c.fillCircle(on ? tx + tw - th / 2 : tx + th / 2, ty0 + th / 2, th / 2 - 4, rgba(250, 250, 255));
             if (hits) hits->push_back({HIT_TOGGLE_HITBOX, tx - 14, ry + 4, tw + 28, 52});
             c.text(kFontSmall, rx + 22, ry + 62, "Hand hitbox size", grey);
-            c.text(kFontTiny, rx + 22 + c.textWidth(kFontSmall, "Hand hitbox size") + 14, ry + 61, "1.0x = normal ... 5.0x", dimGrey);
+            c.text(kFontTiny, rx + 22 + c.textWidth(kFontSmall, "Hand hitbox size") + 14, ry + 61, "1.0x = normal ... 10x", dimGrey);
             const std::string label = hitboxText(s.hitboxMul);
             float lo, hi, step; sliderRange(HIT_SLIDER_HITBOX, &lo, &hi, &step);
             const float sx0 = rx + 26, sx1 = rx + rw - 110, sy = ry + 82;
@@ -693,13 +693,13 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
             c.fillRoundRect(sx0, sy - 5, sx1 - sx0, 10, 5, rgba(14, 14, 20));
             c.strokeRoundRect(sx0, sy - 5, sx1 - sx0, 10, 5, 1.2f, rgba(52, 52, 68));
             if (kx - sx0 > 1) c.fillRoundRectGradient(sx0, sy - 5, std::max(10.0f, kx - sx0), 10, 5, on ? accentHi : rgba(110, 110, 130), on ? accent : rgba(84, 84, 104));
-            for (int i = 0; i < 5; ++i) c.fillCircle(sx0 + (sx1 - sx0) * static_cast<float>(i) / 4.0f, sy + 14, 2.2f, std::fabs(s.hitboxMul - (1.0f + static_cast<float>(i))) < 0.05f ? (on ? accentHi : grey) : rgba(70, 70, 88));     // one dot under 1x, 2x, 3x, 4x, 5x
+            for (int i = 0; i < 10; ++i) c.fillCircle(sx0 + (sx1 - sx0) * static_cast<float>(i) / 9.0f, sy + 14, 2.2f, std::fabs(s.hitboxMul - (1.0f + static_cast<float>(i))) < 0.05f ? (on ? accentHi : grey) : rgba(70, 70, 88));     // one dot under 1x, 2x ... 10x
             if (hot) c.glowRoundRect(kx - 10, sy - 10, 20, 20, 10, 10, withA(accentHi, 0.7f));
             c.fillCircle(kx, sy, hot ? 13.5f : 11.5f, rgba(250, 250, 255));
             c.strokeCircle(kx, sy, hot ? 13.5f : 11.5f, 3, on ? (hot ? accentHi : accent) : rgba(120, 120, 140));
             c.text(kFontLabel, rx + rw - 22 - c.textWidth(kFontLabel, label), sy + 8, label, on ? accentHi : grey);
             if (hits) hits->push_back({HIT_SLIDER_HITBOX, sx0 - 16, ry + 64, sx1 - sx0 + 32, 34});
-            // status line (one dot + one short text). It follows the hitbox link: Expander and See hitbox share it.
+            // status line (one dot + one short text). It follows the hitbox link.
             const int ls = s.hitboxLinkState;      // 0 off, 1 connected, 2 looking for your hands, 3 failed
             const Color dot = ls == 1 ? rgba(80, 220, 130) : (ls == 3 ? rgba(240, 90, 90) : (ls == 2 ? rgba(240, 170, 60) : rgba(150, 150, 170)));
             c.fillCircle(rx + 28, ry + 108, 5, dot);
@@ -707,23 +707,8 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
                 ls == 1 ? "Connected to your hands." :
                 ls == 2 ? "Looking for your hands in the game... a few seconds." :
                 ls == 3 ? "Could not connect. Press Get facts and send me the file." :
-                "Turn Hitbox expander or See hitbox on and the menu connects to the game.";
+                "Turn Hitbox expander on and the menu connects to the game.";
             c.text(kFontTiny, rx + 42, ry + 113, fitText(c, kFontTiny, head, rw - 66), ls == 3 ? rgba(255, 190, 80) : grey);
-            y += rh + 8;
-        }
-        // ---- stage D11: "See hitbox" switch (shows the game's own hand-collider display on your hands)
-        {
-            const float ry = y, rh = 60;
-            const bool on = s.hitboxSee, hvT = s.hover == HIT_TOGGLE_HITBOXSEE;
-            c.fillRoundRect(rx, ry, rw, rh, 16, card);
-            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, on ? withA(accentHi, 0.7f) : cardEdge);
-            c.text(kFontLabel, rx + 22, ry + 30, "See hitbox", on ? white : rgba(222, 222, 234));
-            c.text(kFontTiny, rx + 22, ry + 50, on ? "the game's own hand hitbox display is on (your hands)" : "shows where your hands can touch the ball", dimGrey);
-            const float tw = 66, th = 32, tx = rx + rw - tw - 22, ty0 = ry + (rh - th) / 2;
-            c.fillRoundRect(tx, ty0, tw, th, th / 2, on ? accent : rgba(58, 58, 74));
-            c.strokeRoundRect(tx, ty0, tw, th, th / 2, hvT ? 2.2f : 1.4f, on ? accentHi : (hvT ? withA(accentHi, 0.9f) : rgba(84, 84, 104)));
-            c.fillCircle(on ? tx + tw - th / 2 : tx + th / 2, ty0 + th / 2, th / 2 - 4, rgba(250, 250, 255));
-            if (hits) hits->push_back({HIT_TOGGLE_HITBOXSEE, tx - 14, ry + 4, tw + 28, rh - 8});
             y += rh + 8;
         }
         // ---- stage D10: "Shot points" card: switch + slider (stops 1 ... 11, then 999)

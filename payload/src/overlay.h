@@ -73,9 +73,9 @@ AimAsk aimAsk();
 struct PointsAsk { bool on; float stop; };
 PointsAsk pointsAsk();
 void setPointsInfo(int state, const char* headline, const char* lastBasket);     // state: 0 off, 1 connected, 2 looking for your ball, 3 failed
-// stage D11 (Troll page, "Hitbox expander" + "See hitbox"): what the page asks for right now, and the status line going back to the page.
-// `mul` is the slider value 1.0 .. 5.0 (1.0 = normal size). `see` is the See hitbox switch.
-struct HitboxAsk { bool on; float mul; bool see; };
+// stage D11b (Troll page, "Hitbox expander"): what the page asks for right now, and the status line going back to the page.
+// `mul` is the slider value 1.0 .. 10.0 (1.0 = normal size). (The "See hitbox" switch of stage D11 is gone.)
+struct HitboxAsk { bool on; float mul; };
 HitboxAsk hitboxAsk();
 void setHitboxInfo(int state, const char* headline);     // state: 0 off, 1 connected, 2 looking for your hands, 3 failed
 

@@ -87,14 +87,16 @@ struct PointsCounters {
     unsigned long long readFails = 0, writeFails = 0;
 };
 
-// stage D11 ("Hitbox expander" + "See hitbox"): what the hitbox part did. Numbers only; nothing here changes behaviour.
+// stage D11b ("Hitbox expander"): what the hitbox part did. Numbers only; nothing here changes behaviour.
 struct HitboxCounters {
     unsigned long long censuses = 0;        // times the list of hand hitboxes was rebuilt
     unsigned long long resized = 0;         // single hitbox size changes made (to the asked size)
     unsigned long long restored = 0;        // single hitboxes put back to the game's own size
     unsigned long long gameResets = 0;      // times the game had put a hitbox back to its own size after we changed it (so we set ours again)
     unsigned long long readFails = 0, writeFails = 0;     // hitboxes that could not be read / set
-    unsigned long long visualCalls = 0;     // calls of the game's own "show hand colliders" function
+    // the grab-reach values (stage D11b): the game's own numbers for how far a hand can grab (Hand.reachDistance / palmRadius, BallControl._gravityDistance / _grabVolume)
+    unsigned long long grabSet = 0, grabRestored = 0, grabResets = 0, grabReadFails = 0, grabWriteFails = 0;     // times set / put back / the game put its own number back / could not read / could not set
+    int grabValues = 0;                     // grab-reach values found on your two hands that can be changed right now (0 ... 8)
     int hands = 0;                          // hands found right now (0, 1 or 2)
     int hitboxes = 0, resizable = 0;        // hitboxes found on those hands / of them the ones whose size I can change
     int boxes = 0, spheres = 0, capsules = 0, meshes = 0, others = 0;   // by kind
@@ -124,10 +126,10 @@ public:
     std::string pointsSummary() const;      // one line for the facts file
     PointsCounters pointsCounters() const;
 
-    // ---- stage D11 (Troll page, "Hitbox expander" + "See hitbox"). `expand` = the Hitbox expander switch, `mul` = its slider (1.0 = normal size ... 5.0), `see` = the See hitbox switch.
-    // It only ever touches the hands of YOUR player (the two BallControl objects of your ball control manager) and puts the game's own sizes back when the switches go off.
-    // It works on its own: the Aimbot and Shot points do not have to be on. Cheap; called often.
-    void setHitbox(bool expand, float mul, bool see);
+    // ---- stage D11b (Troll page, "Hitbox expander"). `expand` = the switch, `mul` = its slider (1.0 = normal size ... 10.0).
+    // It only ever touches the hands of YOUR player (the two BallControl objects of your ball control manager): their hitboxes AND the game's grab-reach numbers.
+    // The game's own values are put back when the switch goes off. It works on its own: the Aimbot and Shot points do not have to be on. Cheap; called often.
+    void setHitbox(bool expand, float mul);
     int hitboxUiState() const;              // 0 off, 1 connected, 2 looking for your hands, 3 failed
     std::string hitboxHeadline() const;     // short text for the menu: what the hitbox part is doing
     std::string hitboxSummary() const;      // one line for the facts file
@@ -231,15 +233,17 @@ private:
         bool ok = false;
         tzscan::ClassInfo bc, hand;                // BallControl, Autohand.Hand
         int cL = -1, cR = -1;                      // in the ball control manager: _leftBallControl, _rightBallControl
-        int bcHand = -1, bcViz = -1;               // in a BallControl: _hand, _fingerVizPrefab (optional: only the "See hitbox" display needs it)
+        int bcHand = -1;                           // in a BallControl: _hand
         int hColl = -1, hAuth = -1;                // in a hand: _handColliders, _hasAuthority (optional: only written into the report)
+        // stage D11b: the game's grab-reach values (all optional; each one that is found is scaled with the slider)
+        struct Tweak { const char* name = ""; int owner = 0; int off = -1; int type = 0; };      // owner 0 = a field of the Hand, 1 = a field of the BallControl; type 0 = a float, 1 = a Transform (its localScale)
+        Tweak tw[4];
+        int nTw = 0;                               // how many of them exist in this game
+        void *mTGetLS = nullptr, *mTSetLS = nullptr, *iTGetLS = nullptr, *iTSetLS = nullptr;     // Transform.get_localScale / set_localScale (the game's call, or the engine's own internal one)
         uint64_t kBox = 0, kSphere = 0, kCapsule = 0, kMesh = 0;     // the engine's class pointers, to tell which kind a hitbox is
         void *gBox = nullptr, *sBox = nullptr, *gSph = nullptr, *sSph = nullptr, *gCapR = nullptr, *sCapR = nullptr, *gCapH = nullptr, *sCapH = nullptr;      // the engine's get_/set_ calls (null = not found)
         void *iGBox = nullptr, *iSBox = nullptr, *iGSph = nullptr, *iSSph = nullptr, *iGCapR = nullptr, *iSCapR = nullptr, *iGCapH = nullptr, *iSCapH = nullptr;  // the engine's own internal calls (used only when the call above is missing)
         void* mName = nullptr;                     // Object.get_name (for the report)
-        void* mViz = nullptr; int vizKind = 0;     // BallControl.SetHandColliderVisual: 1 = (GameObject, Single), 2 = (GameObject, Boolean), 0 = unknown parameters
-        std::string vizTypes;                      // its parameter types, for the report
-        std::string vizWhy;                        // why "See hitbox" cannot be used ("" = it can)
         std::string callList;                      // which of the engine calls exist (for the report)
         bool resizeOk = false;                     // at least one kind of hitbox can be read and set
     };
@@ -249,6 +253,14 @@ private:
         bool usable = false;                       // can be read and set
         bool haveOrig = false, applied = false;
         float orig[3] = {0, 0, 0}, last[3] = {0, 0, 0};    // the game's own size / the size we set last (box: x y z; sphere: radius; capsule: radius, height)
+        int fails = 0;
+    };
+    // one grab-reach value of one of your hands (game thread only). A float is a field of the Hand / BallControl itself; a Transform is another game object that the field points to.
+    struct HbTw {
+        uintptr_t owner = 0;                       // the Hand / BallControl that has the field
+        uintptr_t obj = 0; uint64_t klass = 0;     // Transform only: the Transform object and its class pointer (to know it is still the same running object)
+        bool haveOrig = false, applied = false, dead = false;
+        float orig[3] = {0, 0, 0}, last[3] = {0, 0, 0};    // the game's own value / the value we set last (a float: [0]; a Transform: its local scale x y z)
         int fails = 0;
     };
     enum Phase { IDLE = 0, WAIT = 1, WATCH = 2 };
@@ -347,17 +359,23 @@ private:
     void sayPoints(const char* fmt, ...) __attribute__((format(printf, 2, 3)));   // facts file, with its own line budget (does not eat the aim lines)
     void queuePoints(const std::string& line);                                    // game thread: queued, written by the link thread
 
-    // ---- stage D11 (Hitbox expander + See hitbox), aim_hitbox.cpp
+    // ---- stage D11b (Hitbox expander), aim_hitbox.cpp
     bool linkWanted() const;                                                      // the link runs for the Aimbot, Shot points OR the hitbox part
     bool resolveHitboxLayout(std::string* why, bool* transient);                  // link thread
-    void hitboxTick(double now);                                                  // game thread: keep your hand hitboxes at the asked size, show / hide the game's hitbox display
-    void hitboxStandDown(const char* why);                                        // game thread: the switches went off - put everything back the way the game had it
+    void hitboxTick(double now);                                                  // game thread: keep your hand hitboxes and grab-reach values at the asked size
+    void hitboxStandDown(const char* why);                                        // game thread: the switch went off - put everything back the way the game had it
     bool hbFindHands(uintptr_t bc[2], uintptr_t hand[2], uintptr_t arr[2], int* auth);   // game thread: the two BallControl objects, hands and hitbox arrays of your player
     bool hbCensus(const uintptr_t arr[2], bool log);                              // game thread: rebuild the list of hitboxes
     bool hbGet(const HbCol& c, float v[3]);                                       // game thread: the hitbox's current size
     bool hbSet(const HbCol& c, const float v[3]);                                 // game thread: set the hitbox's size
     bool hbPutBack(HbCol& c);                                                     // game thread: give one hitbox the game's own size back (only if it is alive and still at the size we set)
-    bool hbCallVisual(uintptr_t bc, bool show);                                   // game thread: the game's own "show hand colliders" function
+    // grab-reach values (game thread)
+    bool hbTwRead(int t, const HbTw& r, float v[3]);                              // the value now (a float: v[0]; a Transform: its local scale)
+    bool hbTwWrite(int t, const HbTw& r, const float v[3]);                       // set it (checked by reading it back)
+    bool hbTwAlive(int t, const HbTw& r);                                         // the owner (and the Transform) are still the running objects we saw
+    bool hbTwPutBack(int t, HbTw& r);                                             // give the game its own value back (only if it is alive and still at the value we set)
+    void hbTwTick(const uintptr_t bc[2], const uintptr_t hand[2], int x10, float mul, int* setNow, int* failedNow);   // read / set / check all grab-reach values of both hands
+    void hbTwReleaseAll(int* back);                                               // put every grab-reach value back and forget them
     void hbNoteErr(bool threw);                                                   // game thread: counts engine refusals
     void hbSetInfo(const std::string& text);                                      // game thread: the menu's status text
     void hbDie(const std::string& why);                                           // the hitbox part stops (shown as FAILED)
@@ -399,11 +417,10 @@ private:
     std::atomic<bool> ptsWriteDead_{false};      // the system refused five writes in a row: the points part stopped
     std::vector<unsigned char> ptsBallBuf_, ptsPropsBuf_;
     std::atomic<unsigned long long> ptsWrites_{0}, ptsGameWrites_{0}, ptsBaskets_{0}, ptsBalls_{0}, ptsReadFails_{0}, ptsWriteFails_{0};
-    // stage D11 (Hitbox expander + See hitbox)
+    // stage D11b (Hitbox expander)
     HitboxLayout H_;                             // written once by the link thread, then read-only (published by hitboxReady_)
     std::atomic<bool> hitboxReady_{false};
     std::atomic<int> hitboxX10_{0};              // 0 = Hitbox expander off, else the factor times ten (10 ... 50)
-    std::atomic<bool> hitboxSee_{false};         // the See hitbox switch
     double nextHitboxAt_ = 0; int hitboxTries_ = 0;       // under mu_
     std::string hitboxFailWhy_;                  // under mu_: why the layout cannot be used yet / at all ("" = no problem known)
     std::atomic<bool> hitboxDead_{false};        // it cannot work at all (fields missing / the engine refused the calls): shown as FAILED, not retried
@@ -411,8 +428,8 @@ private:
     std::string hbInfo_;                         // under mu_: the menu's status text from the game thread
     std::atomic<int> hbNotes_{0};
     std::vector<unsigned char> hbBcBuf_, hbHandBuf_;
-    std::atomic<unsigned long long> hbCensuses_{0}, hbResized_{0}, hbRestored_{0}, hbGameResets_{0}, hbReadFails_{0}, hbWriteFails_{0}, hbVisualCalls_{0};
-    std::atomic<int> hbHands_{0}, hbBoxCount_{0}, hbUsable_{0}, hbBoxes_{0}, hbSpheres_{0}, hbCapsules_{0}, hbMeshes_{0}, hbOthers_{0};
+    std::atomic<unsigned long long> hbCensuses_{0}, hbResized_{0}, hbRestored_{0}, hbGameResets_{0}, hbReadFails_{0}, hbWriteFails_{0}, hbTwSet_{0}, hbTwRestored_{0}, hbTwResets_{0}, hbTwReadFails_{0}, hbTwWriteFails_{0};
+    std::atomic<int> hbTwUsable_{0}, hbHands_{0}, hbBoxCount_{0}, hbUsable_{0}, hbBoxes_{0}, hbSpheres_{0}, hbCapsules_{0}, hbMeshes_{0}, hbOthers_{0};
     std::atomic<bool> bankReady_{false}, bankTried_{false};
     double nextBankLayoutAt_ = 0; int bankLayoutTries_ = 0;       // under mu_
     std::string bankFailWhy_;                    // under mu_: why Bank mode cannot be used (shown in the menu)
@@ -449,18 +466,16 @@ private:
         std::vector<PtsBall> ptsBalls;             // your balls that are being kept at the asked number (at most 4)
         int ptsNotes = 0, ptsWriteFailRun = 0, ptsAsked = 0;
         bool ptsWasOn = false;
-        // stage D11 (Hitbox expander + See hitbox)
+        // stage D11b (Hitbox expander)
         bool hbOn = false;                         // the hitbox part has been doing something (so it must clean up when the switches go off)
         double hbNext = 0, hbCensusAt = 0, hbChangedAt = 0;
         uintptr_t hbBc[2] = {0, 0}, hbHand[2] = {0, 0}, hbArr[2] = {0, 0};   // your two BallControl objects / hands / hitbox arrays as last seen
         std::vector<HbCol> hbCols;                 // the hitboxes of your two hands (at most 64)
         int hbAppliedX10 = 0;                      // the factor (times ten) the hitboxes were last set to (0 = none are changed)
-        int hbErrRun = 0, hbNotes = 0, hbCensusLogs = 0, hbResetNotes = 0, hbWriteFailRun = 0;
-        uintptr_t hbSeeFor[2] = {0, 0};            // the BallControl objects the "show hand colliders" display was switched on for
-        int hbSeeX10 = 0, hbSeeFails = 0, hbLastX10 = 0;     // the factor the display was switched on at / failed calls of the display function / the factor asked at the last look
+        int hbErrRun = 0, hbNotes = 0, hbCensusLogs = 0, hbResetNotes = 0, hbWriteFailRun = 0, hbLastX10 = 0;     // hbLastX10: the factor asked at the last look
+        HbTw hbTw[2][4];                           // the grab-reach values of the left / right hand
+        int hbTwNotes = 0, hbTwAppliedX10 = 0, hbTwWriteFailRun = 0;
         std::string hbInfoText;                    // the status text last given to the menu
-        bool hbSeeDead = false;                    // the display function does not work: not tried again
-        std::string hbSeeWhy;
     } g_;
     std::vector<unsigned char> bcmBuf_, ballBuf_, gmBuf_, locoBuf_;
     // reports from the game thread to the facts file

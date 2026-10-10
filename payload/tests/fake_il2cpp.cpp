@@ -30,7 +30,7 @@ Type tInt{"System.Int32", nullptr}, tFloat{"System.Single", nullptr}, tVoid{"Sys
      tBool{"System.Boolean", nullptr}, tVec3{"UnityEngine.Vector3", nullptr}, tMode{"Game.Mode", &kEnumMode}, tPair{"Game.Pair", &kPairStruct}, tOther{"Game.OtherThing", &kOther},
      tVec2{"UnityEngine.Vector2", nullptr}, tQuat{"UnityEngine.Quaternion", nullptr};
 Klass kBehaviour{"MonoBehaviour", "UnityEngine", nullptr, {}, {}, 0, false, false, 24};
-char gCode[0x4000];                       // the pretend "code": method pointers point into this (inside the pretend library, like the real thing)
+char gCode[0x5000];                       // the pretend "code": method pointers point into this (inside the pretend library, like the real thing)
 
 Method* mk(const char* n, unsigned p, Type* r, uint64_t rva, uint32_t fl = 0) { return new Method{reinterpret_cast<uint64_t>(gCode) + rva, n, p, r, fl}; }
 
@@ -101,6 +101,7 @@ Klass kPredicted{"PredictedShotResult", "ShovelTools", &kValueType, {{"willScore
 Klass kGoal{"BasketballGoal", "ShovelTools", &kBehaviour, {{"_rimTransform", &tTransform, 24, 0}, {"_isNorth", &tBool, 32, 0}}, {}, 0, false, false, 48};
 Klass kGameMgr{"GameManager", "ShovelTools", &kBehaviour, {{"_officialMatch", &tBool, 24, 0}, {"_mode", &tInt, 28, 0}}, {}, 0, false, false, 48};
 Klass kScoreMgr{"ScoreManager", "ShovelTools", &kBehaviour, {{"_northScore", &tInt, 24, 0}, {"_southScore", &tInt, 28, 0}}, {}, 0, false, false, 48};     // stage D10: only in the world after fake_add_score_class(1)
+Klass kBallControlA{"BallControl", "ShovelTools", &kBehaviour, {{"_hand", &tOther, 48, 0}, {"_gravityDistance", &tFloat, 168, 0}}, {}, 0, false, false, 232};     // stage D11b: only in the world after fake_add_grab_code(0)
 Klass kCannon{"CannonBall", "", &kBehaviour, {{"explosion", &tOther, 24, 0}}, {}, 0, false, false, 32};          // a "ball" name that is noise: never written out
 Klass kTether{"TetherBallCollision", "", &kBehaviour, {{"x", &tInt, 24, 0}}, {}, 0, false, false, 32};
 Image iShot{"IRL.GymFake", {&kRimSync, &kRimBend, &kSlider, &kBall, &kShotPrefs, &kPrimary, &kFootball, &kBaseball, &kParamMass, &kBallPhys, &kACommand, &kShotCmd,
@@ -210,23 +211,47 @@ __attribute__((visibility("default"))) void fake_add_score_class(int on) {      
     for (size_t i = 0; i < iShot.classes.size(); ++i) if (iShot.classes[i] == &kScoreMgr) { iShot.classes.erase(iShot.classes.begin() + static_cast<long>(i)); break; }
     if (on) iShot.classes.push_back(&kScoreMgr);
 }
-// stage D11: hand and steal methods join the pretend ball (Basketball) and the pretend hand (Autohand.Hand). extra < 0 takes them all away again; extra >= 0 adds the three ball methods,
-// two hand methods with "Collider" in the name, one without (Grab), and `extra` more hand methods with "Collider" in the name (to test the limit on the number of code dumps)
-__attribute__((visibility("default"))) void fake_add_hand_code(int extra) {
+// stage D11b: the grab classes join the pretend game. extra < 0 takes them all away again. extra >= 0: the ball gets its sphere-grab trigger methods (SetInSphereGrab, OnTriggerEnter,
+// OnTriggerExit, plus the steal ones the old scan wanted: CheckHandCollision), BallControl joins the game's own assembly (with IsHandNearBasketball, InitGrabVolumes, ProcessHand, IsGripped
+// - wanted - and Update, get_Grip, OnParameterSwayStrength - not wanted), and Autohand.Hand joins it too (TryGrab, GetReachTarget, OverlapPalm - wanted; get_IsGrabbing, set_GrabPoint,
+// OnRelease, SetColliderRadius - not wanted), then `extra` more hand methods with "Grab" in the name (to test the limit on the number of code dumps).
+__attribute__((visibility("default"))) void fake_add_grab_code(int extra) {
     init();
     kBasketball.methods.resize(2);
-    kHandA.methods.clear();
-    for (Image* im : {&iAuto, &iShot}) for (size_t i = 0; i < im->classes.size();) { if (im->classes[i] == &kHandA) im->classes.erase(im->classes.begin() + static_cast<long>(i)); else ++i; }
+    kHandA.methods.clear(); kBallControlA.methods.clear();
+    for (Image* im : {&iAuto, &iShot}) for (size_t i = 0; i < im->classes.size();) { if (im->classes[i] == &kHandA || im->classes[i] == &kBallControlA) im->classes.erase(im->classes.begin() + static_cast<long>(i)); else ++i; }
     if (extra < 0) { iAuto.classes.push_back(&kHandA); return; }               // (back where the other tests expect it)
-    iShot.classes.push_back(&kHandA);                                          // in the REAL game Autohand.Hand lives in the game's own assembly (Assembly-CSharp.dll)
-    kBasketball.methods.push_back(mk("CheckHandCollision", 1, &tVoid, 0x3b00));
-    kBasketball.methods.push_back(mk("TryKnockLooseFromBotHold", 3, &tInt, 0x3b40));
-    kBasketball.methods.push_back(mk("PlayKnockLooseHaptics", 1, &tVoid, 0x3b80));
-    kHandA.methods.push_back(mk("SetColliderRadius", 1, &tVoid, 0x3bc0));
-    kHandA.methods.push_back(mk("GetColliders", 0, &tOther, 0x3c00));
-    kHandA.methods.push_back(mk("Grab", 0, &tVoid, 0x3c40));
-    for (int i = 0; i < extra && i < 6; ++i) kHandA.methods.push_back(mk(("ExtraCollider" + std::to_string(i)).c_str(), 0, &tVoid, 0x3c80 + 0x40 * static_cast<uint64_t>(i)));
-    for (int i = 0; i < extra - 6 && i < 20; ++i) kHandA.methods.push_back(mk(("MoreCollider" + std::to_string(i)).c_str(), 0, &tVoid, 0x3c00 + 0x20 * static_cast<uint64_t>(i)));
+    for (int i = 0; i < 0x1300; ++i) gCode[0x3b00 + i] = static_cast<char>(i & 0xff);       // a recognisable pattern: byte n of a dump is n modulo 256 (relative to 0x3b00; the methods are 0x40 apart)
+    iShot.classes.push_back(&kHandA);                                          // in the REAL game these live in the game's own assembly (Assembly-CSharp.dll)
+    iShot.classes.push_back(&kBallControlA);
+    kBasketball.methods.push_back(mk("SetInSphereGrab", 1, &tVoid, 0x3b00));
+    kBasketball.methods.push_back(mk("OnTriggerEnter", 1, &tVoid, 0x3b40));
+    kBasketball.methods.push_back(mk("OnTriggerExit", 1, &tVoid, 0x3b80));
+    kBasketball.methods.push_back(mk("CheckHandCollision", 1, &tVoid, 0x3bc0));          // (the old steal scan wanted this one; the grab scan does not)
+    kBallControlA.methods.push_back(mk("IsHandNearBasketball", 2, &tBool, 0x3c00));
+    kBallControlA.methods.push_back(mk("InitGrabVolumes", 0, &tVoid, 0x3c40));
+    kBallControlA.methods.push_back(mk("ProcessHand", 2, &tVoid, 0x3c80));
+    kBallControlA.methods.push_back(mk("IsGripped", 0, &tBool, 0x3cc0));
+    kBallControlA.methods.push_back(mk("Update", 0, &tVoid, 0x3d00));
+    kBallControlA.methods.push_back(mk("get_Grip", 0, &tFloat, 0x3d40));
+    kBallControlA.methods.push_back(mk("OnParameterSwayStrength", 1, &tVoid, 0x3d80));
+    kHandA.methods.push_back(mk("TryGrab", 0, &tVoid, 0x3dc0));
+    kHandA.methods.push_back(mk("GetReachTarget", 1, &tOther, 0x3e00));
+    kHandA.methods.push_back(mk("OverlapPalm", 0, &tVoid, 0x3e40));
+    kHandA.methods.push_back(mk("get_IsGrabbing", 0, &tBool, 0x3e80));
+    kHandA.methods.push_back(mk("set_GrabPoint", 1, &tVoid, 0x3ec0));
+    kHandA.methods.push_back(mk("OnRelease", 0, &tVoid, 0x3f00));
+    kHandA.methods.push_back(mk("SetColliderRadius", 1, &tVoid, 0x3f40));
+    for (int i = 0; i < extra && i < 40; ++i) kHandA.methods.push_back(mk(("GrabExtra" + std::to_string(i)).c_str(), 0, &tVoid, 0x3f80 + 0x40 * static_cast<uint64_t>(i % 8)));
+}
+// stage D11b: the shot assist gets `n` more fields and `n` more methods (to test the cut-down output of the older classes: at most 8 fields and 8 methods). n = 0 takes them away again.
+__attribute__((visibility("default"))) void fake_pad_shot_assist(int n) {
+    init();
+    kShotAssist.fields.resize(2); kShotAssist.methods.resize(1);
+    for (int i = 0; i < n && i < 40; ++i) {
+        kShotAssist.fields.push_back({"_pad" + std::to_string(i), &tInt, static_cast<size_t>(32 + 4 * i), 0});
+        kShotAssist.methods.push_back(mk(("Pad" + std::to_string(i)).c_str(), 0, &tVoid, 0x3a00));
+    }
 }
 __attribute__((visibility("default"))) void fake_set_shot_world(int on) {
     gShotWorld = on != 0;

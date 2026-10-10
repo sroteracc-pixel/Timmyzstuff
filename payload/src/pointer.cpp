@@ -106,9 +106,8 @@ void Interaction::press(int id, float x, PanelState& s, const std::vector<HitRec
     case HIT_TOGGLE_AIMBANK: s.aimBank = !s.aimBank; if (s.aimBank) s.aimOn = false; o.redraw = true; break;
     // Troll page (stage D10): the Shot points switch is never saved (an effect, like the Aimbot); the slider position is.
     case HIT_TOGGLE_POINTS: s.pointsOn = !s.pointsOn; o.redraw = true; break;
-    // Troll page (stage D11): the Hitbox expander and See hitbox switches are never saved (effects); the slider position is.
+    // Troll page (stage D11): the Hitbox expander switch is never saved (an effect); the slider position is.
     case HIT_TOGGLE_HITBOX: s.hitboxOn = !s.hitboxOn; o.redraw = true; break;
-    case HIT_TOGGLE_HITBOXSEE: s.hitboxSee = !s.hitboxSee; o.redraw = true; break;
     case HIT_TOGGLE_AIMY: s.aimHoldY = !s.aimHoldY; o.redraw = o.saveNeeded = true; break;      // this one IS saved (it is a setting, not an effect)
     case HIT_SCAN_SHOT:
         if (s.scanState != 1) { s.scanState = 1; o.shotScanRequested = true; }

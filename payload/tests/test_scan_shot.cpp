@@ -9,7 +9,7 @@
 #include "il2cpp_scan.h"
 
 static std::vector<std::string> gLines;
-static void logFn(const char* fmt, ...) { char b[1024]; va_list ap; va_start(ap, fmt); std::vsnprintf(b, sizeof b, fmt, ap); va_end(ap); gLines.push_back(b); }
+static void logFn(const char* fmt, ...) { char b[4096]; va_list ap; va_start(ap, fmt); std::vsnprintf(b, sizeof b, fmt, ap); va_end(ap); gLines.push_back(b); }
 static int pass = 0, failn = 0;
 static void check(const char* what, bool ok) { if (ok) { ++pass; std::printf("  PASS  %s\n", what); } else { ++failn; std::printf("  FAIL  %s\n", what); } }
 static bool has(const char* needle) { for (const auto& l : gLines) if (l.find(needle) != std::string::npos) return true; return false; }
@@ -128,63 +128,85 @@ int main(int, char** argv) {
     check("the summary counts the live copies (2 balls + 2 syncs + 2 hoops + 1 assist + 1 settings + 1 manager = 9)", s.liveObjects == 9 && has("live-copies=9"));
     check("no waiting without a delay setting (the scan was quick)", !has("scan: waiting") && secondsTaken < 20.0);
     check("DONE line is there", has("scan: DONE."));
-
-    std::printf("== stage D10: the scoring classes and the code of the scoring methods\n");
+    std::printf("== stage D11b: the grab classes and the machine code of the grab methods\n");
     {
+        auto addGrab = reinterpret_cast<void (*)(int)>(dlsym(lib, "fake_add_grab_code"));
         auto addScore = reinterpret_cast<void (*)(int)>(dlsym(lib, "fake_add_score_class"));
-        check("the pretend game can have a ScoreManager", addScore != nullptr);
-        if (addScore) {
-            addScore(1); gLines.clear();
-            const Summary sc = run(api, opt, logFn);
-            check("run says ok", sc.ok && sc.error.empty());
-            check("ScoreManager is written out in full (fields and methods)", has("scan: CLASS ShovelTools.ScoreManager : MonoBehaviour") && has("field _northScore : System.Int32 @24") && has("method AddScore(1) : System.Void rva=") && has("method GetScore(0) : System.Int32 rva="));
-            check("the code of the SCORING methods is written out: AddScore, GetScore and IncreasePoints (3 lines), not Reset", countOf("scan:   code320 ShovelTools.ScoreManager.") == 0 && countOf("scan:   code320 ScoreManager.") == 3 && !has("code320 ScoreManager.Reset"));
-            // the method lines and the code lines must show the SAME rva (the fake keeps its method code 0x40 bytes apart: byte pattern 0x00, 0x01, 0x02 ... from the first method on)
-            auto rvaOf = [&](const char* methodLine) { std::string r; for (const std::string& l : gLines) { const size_t p = l.find(methodLine); if (p != std::string::npos) { const size_t q = l.find("rva=", p); if (q != std::string::npos) r = l.substr(q + 4); } } return r; };
-            const std::string rvaAdd = rvaOf("scan:   method AddScore(1) : System.Void"), rvaGet = rvaOf("scan:   method GetScore(0) : System.Int32");
+        auto padAssist = reinterpret_cast<void (*)(int)>(dlsym(lib, "fake_pad_shot_assist"));
+        auto noCalls = [&] { int* invokes = static_cast<int*>(dlsym(lib, "fake_invoke_count")); return invokes && *invokes == 0; };
+        check("the pretend game can have grab methods, a ScoreManager and a long shot assist", addGrab && addScore && padAssist);
+        if (addGrab && addScore && padAssist) {
+            addGrab(0); gLines.clear();
+            const Summary sg = run(api, opt, logFn);
+            check("run says ok", sg.ok && sg.error.empty());
+            check("BallControl is written out in full (fields and methods)", has("scan: CLASS ShovelTools.BallControl : MonoBehaviour") && has("field _gravityDistance : System.Single @168") && has("method IsHandNearBasketball(2) : System.Boolean rva=") && has("method Update(0)") && has("method OnParameterSwayStrength(1)"));
+            check("Autohand.Hand is written out in full (its field and ALL its methods, also the ones that are not dumped)", has("scan: CLASS Autohand.Hand : MonoBehaviour") && has("field holdingObj") && has("method TryGrab(0)") && has("method GetReachTarget(1)") && has("method OverlapPalm(0)") && has("method get_IsGrabbing(0)") && has("method SetColliderRadius(1)"));
+            check("the ball has its sphere-grab methods (Basketball is written out in full)", has("scan: CLASS ShovelTools.Basketball : MonoBehaviour") && has("method SetInSphereGrab(1)") && has("method OnTriggerEnter(1)") && has("method OnTriggerExit(1)"));
+            check("10 code dumps of 640 bytes: Basketball (SetInSphereGrab, OnTriggerEnter, OnTriggerExit), BallControl (IsHandNearBasketball, InitGrabVolumes, ProcessHand, IsGripped), Hand (TryGrab, GetReachTarget, OverlapPalm)",
+                  countOf("scan:   code640 ") == 10 && has("code640 Basketball.SetInSphereGrab(1) rva=") && has("code640 Basketball.OnTriggerEnter(1) rva=") && has("code640 Basketball.OnTriggerExit(1) rva=") &&
+                  has("code640 BallControl.IsHandNearBasketball(2) rva=") && has("code640 BallControl.InitGrabVolumes(0) rva=") && has("code640 BallControl.ProcessHand(2) rva=") && has("code640 BallControl.IsGripped(0) rva=") &&
+                  has("code640 Hand.TryGrab(0) rva=") && has("code640 Hand.GetReachTarget(1) rva=") && has("code640 Hand.OverlapPalm(0) rva="));
+            check("NOT dumped: Update, get_Grip, OnParameterSwayStrength, get_IsGrabbing, set_GrabPoint, OnRelease, SetColliderRadius and the old steal method CheckHandCollision",
+                  !has("code640 BallControl.Update") && !has("code640 BallControl.get_Grip") && !has("code640 BallControl.OnParameterSwayStrength") && !has("code640 Hand.get_IsGrabbing") && !has("code640 Hand.set_GrabPoint") &&
+                  !has("code640 Hand.OnRelease") && !has("code640 Hand.SetColliderRadius") && !has("code640 Basketball.CheckHandCollision") && !has("code640 Basketball.OnRelease") && !has("code640 Basketball.Shoot"));
+            check("the old 320-byte dumps (steal / hitbox / scoring) are gone", countOf("scan:   code320") == 0);
+            // the method line and the dump line must show the SAME rva; the fake keeps its grab code 0x40 bytes apart (byte pattern 0x00, 0x01, 0x02 ... from 0x3b00 on)
+            auto rvaOf = [&](const char* methodLine) { std::string r; for (const std::string& l : gLines) { const size_t p = l.find(methodLine); if (p != std::string::npos) { const size_t q = l.find("rva=", p); if (q != std::string::npos) r = l.substr(q + 4, l.find_first_of(" \t", q + 4) == std::string::npos ? std::string::npos : l.find_first_of(" \t", q + 4) - q - 4); } } return r; };
+            const std::string rvaSet = rvaOf("scan:   method SetInSphereGrab(1) : System.Void"), rvaEnter = rvaOf("scan:   method OnTriggerEnter(1) : System.Void");
             std::string line;
-            for (const std::string& l : gLines) if (!rvaAdd.empty() && l.find("scan:   code320 ScoreManager.AddScore(1) rva=" + rvaAdd + " : ") != std::string::npos) line = l;
+            for (const std::string& l : gLines) if (!rvaSet.empty() && l.find("scan:   code640 Basketball.SetInSphereGrab(1) rva=" + rvaSet + " : ") != std::string::npos) line = l;
             const size_t colon = line.find(" : ");
             const std::string hex = colon == std::string::npos ? std::string() : line.substr(colon + 3);
-            check("the dump has exactly 320 bytes (640 hex characters) and they are the bytes of the method (0x00 0x01 0x02 ... 0x3e 0x3f)", hex.size() == 640 && hex.compare(0, 12, "000102030405") == 0 && hex.compare(hex.size() - 4, 4, "3e3f") == 0);
-            check("the dump of the second method has its own rva (the one of its method line) and starts with its own byte 0x40", !rvaGet.empty() && rvaGet != rvaAdd && has(("code320 ScoreManager.GetScore(0) rva=" + rvaGet + " : 404142434445").c_str()));
-            check("nothing was CALLED in the game", [&] { int* invokes = static_cast<int*>(dlsym(lib, "fake_invoke_count")); return invokes && *invokes == 0; }());
-            addScore(0); gLines.clear();
+            if (hex.size() != 1280) std::printf("       (dump length %zu, rva '%s', start '%s', end '%s')\n", hex.size(), rvaSet.c_str(), hex.substr(0, 16).c_str(), hex.size() >= 8 ? hex.substr(hex.size() - 8).c_str() : "");
+            check("a dump has exactly 640 bytes (1280 hex characters) and they are the bytes of the method (0x00 0x01 0x02 ... 0x7e 0x7f)", hex.size() == 1280 && hex.compare(0, 12, "000102030405") == 0 && hex.compare(hex.size() - 4, 4, "7e7f") == 0);
+            check("the next method has its own rva (the one of its method line) and starts with its own byte 0x40", !rvaEnter.empty() && rvaEnter != rvaSet && has(("code640 Basketball.OnTriggerEnter(1) rva=" + rvaEnter + " : 404142434445").c_str()));
+            check("order: ball first, then BallControl, then Hand, then the shot assist, then the hoop, then the game manager", [&] {
+                int pBall = -1, pCtl = -1, pHand = -1, pAssist = -1, pGoal = -1, pMgr = -1;
+                for (size_t i = 0; i < gLines.size(); ++i) {
+                    const std::string& l = gLines[i];
+                    if (l.find("scan: CLASS ShovelTools.Basketball :") != std::string::npos) pBall = (int)i;
+                    if (l.find("scan: CLASS ShovelTools.BallControl :") != std::string::npos) pCtl = (int)i;
+                    if (l.find("scan: CLASS Autohand.Hand :") != std::string::npos) pHand = (int)i;
+                    if (l.find("scan: CLASS ShovelTools.BasketballShotAssist") != std::string::npos) pAssist = (int)i;
+                    if (l.find("scan: CLASS ShovelTools.BasketballGoal :") != std::string::npos) pGoal = (int)i;
+                    if (l.find("scan: CLASS ShovelTools.GameManager") != std::string::npos) pMgr = (int)i;
+                }
+                return pBall >= 0 && pCtl > pBall && pHand > pCtl && pAssist > pHand && pGoal > pAssist && pMgr > pGoal; }());
+            check("10 classes written out now (the 8 from before + BallControl + Hand), and BallControl / Hand are not in the 'NOT found' line",
+                  sg.matchedClasses == 10 && has("classes asked for by name but NOT found in this game:") && !has("NOT found in this game: BallControl") && !has("BallControl BallControlManager") && !has("Hand BasketballShotAssist"));
+            check("BallControl is also searched in the running game (7 classes planned), no copy exists in this pretend game", sg.liveClasses == 7 && sg.liveObjects == 9);
+            check("nothing was CALLED in the game", noCalls());
+
+            addGrab(20); gLines.clear();
+            const Summary sm = run(api, opt, logFn);
+            check("with many more Grab methods the dumps stop at 26 (the facts file stays small)", sm.ok && countOf("scan:   code640 ") == 26);
+            check("... the first ones (Basketball, BallControl) came first, so they are all still there", countOf("scan:   code640 Basketball.") == 3 && countOf("scan:   code640 BallControl.") == 4 && countOf("scan:   code640 Hand.") == 19);
+
+            addScore(1); gLines.clear();
+            const Summary ss = run(api, opt, logFn);
+            check("ScoreManager is still shown (the old scoring classes stay in the file), but only briefly: no code dumps for it", ss.ok && has("scan: CLASS ShovelTools.ScoreManager : MonoBehaviour") && has("field _northScore : System.Int32 @24") && has("method AddScore(1)") && countOf("code640 ScoreManager.") == 0);
+            addScore(0);
+
+            addGrab(0); padAssist(12); gLines.clear();
+            const Summary sp = run(api, opt, logFn);
+            auto linesOfClass = [&](const char* header, const char* what) {        // how many "field" / "method" lines come right after the class line, before the next CLASS line
+                int n = 0; bool in = false;
+                for (const std::string& l : gLines) {
+                    if (l.find("scan: CLASS ") != std::string::npos) in = l.find(header) != std::string::npos;
+                    else if (in && l.find(what) != std::string::npos) ++n;
+                }
+                return n; };
+            check("an older class with many members is cut down: the shot assist shows 8 fields and 8 methods and says more were not shown",
+                  sp.ok && linesOfClass("ShovelTools.BasketballShotAssist", "scan:   field ") == 8 && linesOfClass("ShovelTools.BasketballShotAssist", "scan:   method ") == 8 && countOf("(more fields not shown)") >= 1 && countOf("(more methods not shown)") >= 1);
+            check("... while the ball, BallControl and Hand are never cut", linesOfClass("ShovelTools.Basketball :", "scan:   method ") == 6 && linesOfClass("ShovelTools.BallControl", "scan:   method ") == 7 && linesOfClass("Autohand.Hand", "scan:   method ") == 7);
+            padAssist(0);
+
+            addGrab(-1); gLines.clear();
             const Summary s0 = run(api, opt, logFn);
-            check("without a scoring class there are no code dumps and the scan is as before", s0.ok && countOf("scan:   code320") == 0 && s0.matchedClasses == 8);
+            check("without those methods and classes there are no code dumps and the scan is as before", s0.ok && countOf("scan:   code640") == 0 && s0.matchedClasses == 8 && s0.liveClasses == 6);
         }
     }
 
-    std::printf("== stage D11: the hand classes and the code of the steal / hitbox methods\n");
-    {
-        auto addScore_ = reinterpret_cast<void (*)(int)>(dlsym(lib, "fake_add_score_class"));
-        auto addHand = reinterpret_cast<void (*)(int)>(dlsym(lib, "fake_add_hand_code"));
-        check("the pretend game can have hand methods", addHand != nullptr);
-        if (addHand) {
-            addHand(0); gLines.clear();
-            const Summary sh = run(api, opt, logFn);
-            check("run says ok", sh.ok && sh.error.empty());
-            check("the Hand class is written out in full (its field, and the Basketball class has the steal methods)", has("scan: CLASS Autohand.Hand : MonoBehaviour") && has("field holdingObj") && has("method CheckHandCollision(1) : System.Void rva=") && has("method TryKnockLooseFromBotHold(3)"));
-            check("the code of the steal / hitbox methods is written out: CheckHandCollision, TryKnockLooseFromBotHold, PlayKnockLooseHaptics, SetColliderRadius, GetColliders (5 lines), not Grab or Shoot or OnRelease",
-                  countOf("scan:   code320 ") == 5 && has("code320 Basketball.CheckHandCollision(1) rva=") && has("code320 Basketball.TryKnockLooseFromBotHold(3) rva=") && has("code320 Basketball.PlayKnockLooseHaptics(1) rva=") &&
-                  has("code320 Hand.SetColliderRadius(1) rva=") && has("code320 Hand.GetColliders(0) rva=") && !has("code320 Hand.Grab") && !has("code320 Basketball.Shoot") && !has("code320 Basketball.OnRelease"));
-            std::string line;
-            for (const std::string& l : gLines) if (l.find("scan:   code320 Basketball.CheckHandCollision(1) rva=") != std::string::npos) line = l;
-            const size_t colon = line.find(" : ");
-            check("the dump has exactly 320 bytes (640 hex characters)", colon != std::string::npos && line.size() - colon - 3 == 640);
-            check("nothing was CALLED in the game", [&] { int* invokes = static_cast<int*>(dlsym(lib, "fake_invoke_count")); return invokes && *invokes == 0; }());
-            addHand(20); gLines.clear();
-            const Summary sm = run(api, opt, logFn);
-            check("with many more Collider methods the code dumps stop at 12 (the facts file stays small)", sm.ok && countOf("scan:   code320 ") == 12);
-            addScore_(1); gLines.clear();
-            const Summary sb = run(api, opt, logFn);
-            check("scoring dumps and hitbox dumps have their own limits: 3 scoring + 12 hitbox", sb.ok && countOf("scan:   code320 ScoreManager.") == 3 && countOf("scan:   code320 ") == 15);
-            addScore_(0);
-            addHand(-1); gLines.clear();
-            const Summary s0 = run(api, opt, logFn);
-            check("without those methods there are no code dumps and the scan is as before", s0.ok && countOf("scan:   code320") == 0 && s0.matchedClasses == 8);
-        }
-    }
 
     std::printf("== the pause before the live search\n");
     {

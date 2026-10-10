@@ -1,11 +1,15 @@
-// aim_hitbox.cpp - stage D11: the "Hitbox expander" and "See hitbox" parts of the game link (Troll page).
+// aim_hitbox.cpp - stage D11b: the "Hitbox expander" part of the game link (Troll page).
 //
 // WHAT THIS DOES (plain words)
 //   Your hands are made of "hitboxes" (the game's word is "hand colliders": invisible solid shapes). When a hitbox touches the ball, the game's physics reacts:
-//   the ball bounces off your hand, and the game's own steal code (Basketball.CheckHandCollision / the knock-out thresholds) looks at those touches.
-//   When the "Hitbox expander" switch is ON, this part makes every hitbox of YOUR two hands bigger by the slider's factor (1.0x = the normal size, 5.0x = five times
-//   as big). The game's own sizes are remembered and put back when the switch goes OFF (or the slider goes back to 1.0x).
-//   When "See hitbox" is ON, it asks the game to show its own "hand collider" display (the game has a function for it: BallControl.SetHandColliderVisual).
+//   the ball bounces off your hand, and the game plays the hand-touch haptics (Basketball.CheckHandCollision). In stage D11 the expander only made these hitboxes
+//   bigger - and the test showed the ball could be TOUCHED from further away (you felt the vibration) but not GRABBED: the game grabs with other numbers.
+//   Stage D11b therefore makes two things bigger by the slider's factor (1.0x = the normal size ... 10.0x):
+//     (1) the hitboxes of YOUR two hands (as before), and
+//     (2) the game's own grab-reach numbers of your two hands (all from the game's own files; each one that exists is used):
+//           Autohand.Hand.reachDistance and palmRadius (floats), ShovelTools.BallControl._gravityDistance (a float: how close the ball has to be before the game pulls
+//           it into the hand) and BallControl._grabVolume (a Transform: the game's grab volume on the hand; its local scale is multiplied).
+//   The game's own values are remembered and put back when the switch goes OFF (or the slider goes back to 1.0x).
 //
 // HOW IT FINDS YOUR HANDS (all names are from the game's own files, the stage D7c / D10 scans)
 //   your ball control manager (BallControlManager, the same object the Aimbot uses) -> _leftBallControl / _rightBallControl (BallControl) -> _hand (Autohand.Hand)
@@ -14,14 +18,14 @@
 //   belong to your ball control manager are.
 //
 // WHAT IS PROVEN AND WHAT IS NOT
-//   Proven by the game's own files: all the class names and fields above (the Hand dump lists _handColliders : Collider[]), and that the game has its own
-//   "show hand colliders" function. NOT proven (never run in the real game): which of the hitboxes the game's steal / block code really looks at; whether other players
-//   see your bigger hitboxes (the game may decide a steal on the other player's side); whether very big hitboxes make your hand physics jump around; what the game's
-//   own display draws (and whether it follows a changed size). The facts file gets a full report of everything this part finds and does, so the next version can be fixed.
+//   Proven by the game's own files: all the class and field names above (with their types and positions). NOT proven (never run in the real game): which of the four
+//   grab-reach numbers the game's grab really uses (so all of them are scaled together and the facts file says what each one was and what it was set to); whether
+//   the game puts its own numbers back (the sizes are checked ten times a second and every change by the game is counted and written down); whether other players
+//   see the bigger hands (the game may decide a steal on the other player's side); whether very big hitboxes make your hand physics jump around.
 //
 // WHAT IT NEVER DOES
-//   It never touches anything but the hitboxes of your two hands and that one display function. It only makes engine calls when something changed (at most ten
-//   looks a second), stops on its own after 12 refused calls in a row, and puts the game's own sizes back when it is switched off.
+//   It never touches anything but the hitboxes and the grab-reach numbers of your two hands. It only makes engine calls when something changed (at most ten
+//   looks a second), stops on its own after 12 refused calls in a row, and puts the game's own values back when it is switched off.
 #include "aim_link.h"
 
 #include <stdarg.h>
@@ -46,7 +50,7 @@ const int kMaxLines = 60;               // all hitbox lines together in the fact
 const int kNoteLimit = 30;              // game-thread lines (census, resets, display)
 const double kPace = 0.10;              // the game thread looks at most this often (seconds)
 const double kCensusEvery = 2.0;        // the list of hitboxes is rebuilt (and the sizes checked) this often
-const double kSeeSettle = 0.4;          // the slider has to stay still this long before the game's display is switched off and on again
+const float kMaxGrabValue = 1000.0f;    // a grab-reach value (or Transform scale) that would get bigger than this is left alone
 const float kMaxWorldSize = 50.0f;      // a hitbox that would get bigger than this (metres) is left alone
 
 const char* kindName(int k) { return k == 1 ? "BoxCollider" : (k == 2 ? "SphereCollider" : (k == 3 ? "CapsuleCollider" : "?")); }
@@ -89,49 +93,45 @@ void AimLink::queueHitbox(const std::string& line) {
 }
 
 bool AimLink::linkWanted() const {
-    return mode_.load() != 0 || points_.load() != 0 || hitboxX10_.load() != 0 || hitboxSee_.load();
+    return mode_.load() != 0 || points_.load() != 0 || hitboxX10_.load() != 0;
 }
 
 // ---------------------------------------------------------------- the menu's request
-void AimLink::setHitbox(bool expand, float mul, bool see) {
+void AimLink::setHitbox(bool expand, float mul) {
     int x10 = 0;
     if (expand) {
         if (!(mul >= 1.0f)) mul = 1.0f;                    // (also catches NaN)
-        if (mul > 5.0f) mul = 5.0f;
+        if (mul > 10.0f) mul = 10.0f;
         x10 = static_cast<int>(std::lround(mul * 10.0f));
     }
     const int was = hitboxX10_.exchange(x10);
-    const bool seeWas = hitboxSee_.exchange(see);
-    const bool wantedBefore = was != 0 || seeWas, wantedNow = x10 != 0 || see;
     const bool linkOn = linkWanted();
     const bool linkWas = on_.exchange(linkOn);
     if (linkOn && !linkWas) initOn();
-    if (wantedNow && !wantedBefore) {
+    if (x10 != 0 && was == 0) {
         std::lock_guard<std::mutex> lock(mu_);
         nextHitboxAt_ = 0; hitboxTries_ = 0; hitboxFailWhy_.clear(); hitboxDeadWhy_.clear(); hbInfo_.clear();
         hitboxDead_.store(false);
     }
-    if (x10 != 0 && was == 0) sayHitbox("hitbox: Hitbox expander turned ON at %.1fx: every hitbox of your two hands is made that much bigger (the game's own sizes are put back when it goes off)", static_cast<double>(x10) / 10.0);
-    else if (x10 == 0 && was != 0) sayHitbox("hitbox: Hitbox expander turned OFF (the game's own hitbox sizes are put back)");
-    if (see && !seeWas) sayHitbox("hitbox: See hitbox turned ON: I ask the game to show its own hand collider display on your hands");
-    else if (!see && seeWas) sayHitbox("hitbox: See hitbox turned OFF");
+    if (x10 != 0 && was == 0) sayHitbox("hitbox: Hitbox expander turned ON at %.1fx: every hitbox and every grab-reach number of your two hands is made that much bigger (the game's own values are put back when it goes off)", static_cast<double>(x10) / 10.0);
+    else if (x10 == 0 && was != 0) sayHitbox("hitbox: Hitbox expander turned OFF (the game's own values are put back)");
 }
 
 // ---------------------------------------------------------------- state for the menu and the facts file
 int AimLink::hitboxUiState() const {
     const int x10 = hitboxX10_.load();
-    if (x10 == 0 && !hitboxSee_.load()) return 0;
+    if (x10 == 0) return 0;
     if (!failReason().empty()) return 3;
     if (hitboxDead_.load()) return 3;
     if (!layoutReady_.load() || !hitboxReady_.load() || !bound_.load()) return 2;
     if (hbHands_.load() == 0) return 2;
-    if (x10 != 0 && hbBoxCount_.load() > 0 && hbUsable_.load() == 0) return 3;       // hitboxes were found but none of them can be resized
-    if (x10 != 0 && hbBoxCount_.load() == 0) return 2;                                 // the hands have no hitboxes yet (the game makes them a moment after the hands)
+    if (hbBoxCount_.load() > 0 && hbUsable_.load() == 0 && hbTwUsable_.load() == 0) return 3;       // hitboxes were found but none of them can be resized, and no grab-reach value can be changed
+    if (hbBoxCount_.load() == 0 && hbTwUsable_.load() == 0) return 2;                                 // the hands have no hitboxes yet (the game makes them a moment after the hands)
     return 1;
 }
 
 std::string AimLink::hitboxHeadline() const {
-    if (hitboxX10_.load() == 0 && !hitboxSee_.load()) return "";
+    if (hitboxX10_.load() == 0) return "";
     const std::string why = failReason();
     if (!why.empty()) return "FAILED: " + why;
     {
@@ -154,7 +154,8 @@ std::string AimLink::hitboxHeadline() const {
 HitboxCounters AimLink::hitboxCounters() const {
     HitboxCounters c;
     c.censuses = hbCensuses_.load(); c.resized = hbResized_.load(); c.restored = hbRestored_.load(); c.gameResets = hbGameResets_.load();
-    c.readFails = hbReadFails_.load(); c.writeFails = hbWriteFails_.load(); c.visualCalls = hbVisualCalls_.load();
+    c.readFails = hbReadFails_.load(); c.writeFails = hbWriteFails_.load();
+    c.grabSet = hbTwSet_.load(); c.grabRestored = hbTwRestored_.load(); c.grabResets = hbTwResets_.load(); c.grabReadFails = hbTwReadFails_.load(); c.grabWriteFails = hbTwWriteFails_.load(); c.grabValues = hbTwUsable_.load();
     c.hands = hbHands_.load(); c.hitboxes = hbBoxCount_.load(); c.resizable = hbUsable_.load();
     c.boxes = hbBoxes_.load(); c.spheres = hbSpheres_.load(); c.capsules = hbCapsules_.load(); c.meshes = hbMeshes_.load(); c.others = hbOthers_.load();
     return c;
@@ -166,9 +167,10 @@ std::string AimLink::hitboxSummary() const {
     const char* state = ui == 1 ? "connected" : (ui == 2 ? "looking" : (ui == 3 ? "FAILED" : "off"));
     const std::string why = ui == 3 ? hitboxHeadline() : std::string();
     const int x10 = hitboxX10_.load();
-    return fmt("hitbox: link %s%s%s | asked: expander %s, see hitbox %s | hands %d, hitboxes %d (can be resized %d: box %d, sphere %d, capsule %d; other kinds %d, mesh %d) | sizes set %llu, put back %llu, the game put a size back after mine %llu times | could not read %llu, could not set %llu | game display calls %llu | lists made %llu",
-               state, why.empty() ? "" : ": ", why.c_str(), x10 == 0 ? "off" : fmt("%.1fx", static_cast<double>(x10) / 10.0).c_str(), hitboxSee_.load() ? "ON" : "off",
-               c.hands, c.hitboxes, c.resizable, c.boxes, c.spheres, c.capsules, c.others, c.meshes, c.resized, c.restored, c.gameResets, c.readFails, c.writeFails, c.visualCalls, c.censuses);
+    return fmt("hitbox: link %s%s%s | asked: expander %s | hands %d, hitboxes %d (can be resized %d: box %d, sphere %d, capsule %d; other kinds %d, mesh %d) | sizes set %llu, put back %llu, the game put a size back after mine %llu times | could not read %llu, could not set %llu | GRAB-REACH values: %d can be changed, set %llu times, put back %llu times, the game put its own value back after mine %llu times, could not read %llu, could not set %llu | lists made %llu",
+               state, why.empty() ? "" : ": ", why.c_str(), x10 == 0 ? "off" : fmt("%.1fx", static_cast<double>(x10) / 10.0).c_str(),
+               c.hands, c.hitboxes, c.resizable, c.boxes, c.spheres, c.capsules, c.others, c.meshes, c.resized, c.restored, c.gameResets, c.readFails, c.writeFails,
+               c.grabValues, c.grabSet, c.grabRestored, c.grabResets, c.grabReadFails, c.grabWriteFails, c.censuses);
 }
 
 void AimLink::hbSetInfo(const std::string& text) {
@@ -203,9 +205,24 @@ bool AimLink::resolveHitboxLayout(std::string* why, bool* transient) {
     if (!needField(L_.bcm, "_leftBallControl", "ShovelTools.BallControl", 8, true, &H.cL, &w)) return fail(w);
     if (!needField(L_.bcm, "_rightBallControl", "ShovelTools.BallControl", 8, true, &H.cR, &w)) return fail(w);
     if (!needField(H.bc, "_hand", "Autohand.Hand", 8, true, &H.bcHand, &w)) return fail(w);
-    needField(H.bc, "_fingerVizPrefab", "UnityEngine.GameObject", 8, false, &H.bcViz, &w);
     if (!needField(H.hand, "_handColliders", "UnityEngine.Collider[]", 8, true, &H.hColl, &w)) return fail(w);
     needField(H.hand, "_hasAuthority", "System.Boolean", 1, false, &H.hAuth, &w);
+    // the grab-reach values: every one that exists in this game is used (which one the game's grab really looks at is not known - they are scaled together)
+    struct TwDef { const char* name; int owner; const char* field; const char* type; int kind; int bytes; };
+    static const TwDef defs[4] = {
+        {"Hand.reachDistance", 0, "reachDistance", "System.Single", 0, 4},
+        {"Hand.palmRadius", 0, "palmRadius", "System.Single", 0, 4},
+        {"BallControl._gravityDistance", 1, "_gravityDistance", "System.Single", 0, 4},
+        {"BallControl._grabVolume", 1, "_grabVolume", "UnityEngine.Transform", 1, 8},
+    };
+    std::string twMissing;
+    for (const TwDef& d : defs) {
+        int off = -1; std::string ww;
+        needField(d.owner == 0 ? H.hand : H.bc, d.field, d.type, d.bytes, false, &off, &ww);
+        if (off < 0) { twMissing += std::string(twMissing.empty() ? "" : ", ") + d.name; continue; }
+        HitboxLayout::Tweak& t = H.tw[H.nTw++];
+        t.name = d.name; t.owner = d.owner; t.off = off; t.type = d.kind;
+    }
 
     // the engine's own classes and calls
     std::string err;
@@ -219,6 +236,8 @@ bool AimLink::resolveHitboxLayout(std::string* why, bool* transient) {
     H.gCapR = m0(kCap, "get_radius", 0);   H.sCapR = m0(kCap, "set_radius", 1);
     H.gCapH = m0(kCap, "get_height", 0);   H.sCapH = m0(kCap, "set_height", 1);
     H.mName = m0(kObject, "get_name", 0);
+    void* kTransform = cls("Transform");
+    H.mTGetLS = m0(kTransform, "get_localScale", 0); H.mTSetLS = m0(kTransform, "set_localScale", 1);
     // The engine's own internal calls: only looked up for the calls above that the game's code does not have (stripped).
     auto ic = [&](const char* a, const char* b) -> void* {
         if (!api.resolve_icall) return nullptr;
@@ -234,6 +253,17 @@ bool AimLink::resolveHitboxLayout(std::string* why, bool* transient) {
     if (kCap && !H.sCapR) H.iSCapR = ic("UnityEngine.CapsuleCollider::set_radius", nullptr);
     if (kCap && !H.gCapH) H.iGCapH = ic("UnityEngine.CapsuleCollider::get_height", nullptr);
     if (kCap && !H.sCapH) H.iSCapH = ic("UnityEngine.CapsuleCollider::set_height", nullptr);
+    bool needScale = false;
+    for (int i = 0; i < H.nTw; ++i) if (H.tw[i].type == 1) needScale = true;
+    if (needScale && !H.mTGetLS) H.iTGetLS = ic("UnityEngine.Transform::get_localScale_Injected(UnityEngine.Vector3&)", "UnityEngine.Transform::get_localScale_Injected");
+    if (needScale && !H.mTSetLS) H.iTSetLS = ic("UnityEngine.Transform::set_localScale_Injected(UnityEngine.Vector3&)", "UnityEngine.Transform::set_localScale_Injected");
+    std::string scaleNote;
+    if (needScale && !((H.mTGetLS || H.iTGetLS) && (H.mTSetLS || H.iTSetLS))) {      // the grab volume cannot be read / set: drop it, the rest still works
+        int k = 0;
+        for (int i = 0; i < H.nTw; ++i) if (H.tw[i].type != 1) H.tw[k++] = H.tw[i];
+        scaleNote = std::string("BallControl._grabVolume left alone: neither the game nor the engine has Transform.get_localScale / set_localScale for me (") + (kTransform ? "class found" : "no Transform class") + ")";
+        H.nTw = k;
+    }
     auto yn = [](bool b) { return b ? "yes" : "NO"; };
     auto have = [](void* m, void* i) { return m ? "game call" : (i ? "engine call" : "NO"); };
     H.callList = fmt("Box size read %s / set %s, Sphere radius read %s / set %s, Capsule radius read %s / set %s, Capsule height read %s / set %s, Object.get_name %s, MeshCollider class %s",
@@ -245,26 +275,8 @@ bool AimLink::resolveHitboxLayout(std::string* why, bool* transient) {
     const bool capOk = kCap && (H.gCapR || H.iGCapR) && (H.sCapR || H.iSCapR) && (H.gCapH || H.iGCapH) && (H.sCapH || H.iSCapH);
     H.resizeOk = boxOk || sphOk || capOk;
 
-    // the game's own "show hand colliders" function: BallControl.SetHandColliderVisual(GameObject prefab, float / bool value) (the parameter types are READ here, not assumed)
-    H.mViz = m0(H.bc.klass(), "SetHandColliderVisual", 2);
-    if (!H.mViz) H.vizWhy = "the game has no BallControl.SetHandColliderVisual(2) any more";
-    else if (!api.method_get_param || !api.type_get_name) H.vizWhy = "the game's runtime cannot tell me the parameter types of SetHandColliderVisual";
-    else {
-        std::string t[2];
-        for (unsigned i = 0; i < 2; ++i) {
-            void* pt = api.method_get_param(H.mViz, i);
-            char* tn = pt ? api.type_get_name(pt) : nullptr;
-            t[i] = tn ? tn : "?";
-            if (tn && api.il2cpp_free) api.il2cpp_free(tn);
-        }
-        H.vizTypes = "(" + t[0] + ", " + t[1] + ")";
-        if (t[0] == "UnityEngine.GameObject" && t[1] == "System.Single") H.vizKind = 1;
-        else if (t[0] == "UnityEngine.GameObject" && t[1] == "System.Boolean") H.vizKind = 2;
-        else H.vizWhy = "SetHandColliderVisual has parameters " + H.vizTypes + ", which I do not know how to fill";
-        if (H.vizKind != 0 && H.bcViz < 0) { H.vizKind = 0; H.vizWhy = "BallControl has no _fingerVizPrefab (the display's model), so the game's display cannot be asked"; }
-    }
-    if (!H.resizeOk && H.vizKind == 0)
-        return fail("neither the hitbox sizes can be changed (" + H.callList + ") nor the game's display be called (" + H.vizWhy + ")");
+    if (!H.resizeOk && H.nTw == 0)
+        return fail("neither the hitbox sizes can be changed (" + H.callList + ") nor does this game have any grab-reach value I know (" + twMissing + ")");
     H.ok = true;
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -272,10 +284,15 @@ bool AimLink::resolveHitboxLayout(std::string* why, bool* transient) {
         hbBcBuf_.assign(static_cast<size_t>(H.bc.size), 0);
         hbHandBuf_.assign(static_cast<size_t>(H.hand.size), 0);
     }
-    sayHitbox("hitbox: found where your hands keep their hitboxes: ball control manager (size %d) _leftBallControl@%d / _rightBallControl@%d -> %s (size %d) _hand@%d -> %s (size %d) _handColliders@%d%s | %s | the game's hitbox display: %s",
+    std::string twList;
+    for (int i = 0; i < H.nTw; ++i) twList += fmt("%s%s@%d(%s)", twList.empty() ? "" : ", ", H.tw[i].name, H.tw[i].off, H.tw[i].owner == 0 ? "Hand" : "BallControl");
+    sayHitbox("hitbox: found where your hands keep their hitboxes: ball control manager (size %d) _leftBallControl@%d / _rightBallControl@%d -> %s (size %d) _hand@%d -> %s (size %d) _handColliders@%d%s | %s",
               L_.bcm.size, H.cL, H.cR, H.bc.fullName.c_str(), H.bc.size, H.bcHand, H.hand.fullName.c_str(), H.hand.size, H.hColl, H.hAuth >= 0 ? fmt(" (+ _hasAuthority@%d for the report)", H.hAuth).c_str() : "",
-              H.callList.c_str(), H.vizKind != 0 ? ("SetHandColliderVisual" + H.vizTypes + " (it is called with " + (H.vizKind == 1 ? "1.0 / 0.0" : "true / false") + " and the game's own _fingerVizPrefab)").c_str() : ("not usable: " + H.vizWhy).c_str());
-    if (!H.resizeOk) sayHitbox("hitbox: WARNING: no kind of hitbox can be resized (%s) - only See hitbox can work", H.callList.c_str());
+              H.callList.c_str());
+    sayHitbox("hitbox: GRAB-REACH values found (made bigger together with the hitboxes): %s | not in this game: %s%s%s | Transform scale call: %s",
+              twList.empty() ? "none" : twList.c_str(), twMissing.empty() ? "none" : twMissing.c_str(), scaleNote.empty() ? "" : " | ", scaleNote.c_str(),
+              (H.mTGetLS && H.mTSetLS) ? "game call" : ((H.iTGetLS && H.iTSetLS) ? "engine call" : "not needed / NO"));
+    if (!H.resizeOk) sayHitbox("hitbox: WARNING: no kind of hitbox can be resized (%s) - only the grab-reach values can change", H.callList.c_str());
     return true;
 }
 
@@ -372,27 +389,181 @@ bool AimLink::hbSet(const HbCol& c, const float v[3]) {
     return ok;
 }
 
-// The game's own "show hand colliders" function for one hand (BallControl.SetHandColliderVisual(prefab, value)).
-bool AimLink::hbCallVisual(uintptr_t bc, bool show) {
-    if (H_.vizKind == 0 || !H_.mViz) return false;
-    if (!readObj(hbBcBuf_.data(), bc, hbBcBuf_.size()) || !liveObj(hbBcBuf_.data(), H_.bc.klassInv, H_.bc.unityObject)) return false;
-    const uintptr_t prefab = rdP(hbBcBuf_.data(), H_.bcViz);
-    if (!plausiblePtr(prefab)) {
-        g_.hbSeeWhy = "the game has not given your hand a display model (_fingerVizPrefab is empty)";
-        return false;
+// ---------------------------------------------------------------- game thread: the grab-reach values
+// A float lives inside the Hand / BallControl object itself (read and written as 4 bytes, checked by the system); a Transform is another engine object (its
+// local scale is read and set with the engine's own calls).
+bool AimLink::hbTwRead(int t, const HbTw& r, float v[3]) {
+    v[0] = v[1] = v[2] = 0;
+    const HitboxLayout::Tweak& T = H_.tw[t];
+    if (T.type == 0) {
+        unsigned char b[4];
+        if (!pipeGame_.copy(r.owner + static_cast<uintptr_t>(T.off), b, 4)) return false;
+        std::memcpy(&v[0], b, 4);
+        return std::isfinite(v[0]);
     }
-    float f = show ? 1.0f : 0.0f; unsigned char one = show ? 1 : 0;
-    void* args[2] = {reinterpret_cast<void*>(prefab), H_.vizKind == 1 ? static_cast<void*>(&f) : static_cast<void*>(&one)};
     const unsigned long long e0 = errors_.load();
-    bool threw; invoke(H_.mViz, bc, args, &threw);
+    Vec3 s{0, 0, 0};
+    bool ok = false;
+    if (H_.mTGetLS) ok = callVec3(H_.mTGetLS, r.obj, &s);
+    else if (H_.iTGetLS) { reinterpret_cast<void (*)(void*, Vec3*)>(H_.iTGetLS)(reinterpret_cast<void*>(r.obj), &s); ok = std::isfinite(s.x) && std::isfinite(s.y) && std::isfinite(s.z); }
     g_.excRun = 0;
-    hbVisualCalls_.fetch_add(1);
-    if (threw || errors_.load() != e0) {
-        if (++g_.hbSeeFails >= 3) { g_.hbSeeDead = true; g_.hbSeeWhy = "the game's display function reported errors three times"; }
-        return false;
+    hbNoteErr(errors_.load() != e0);
+    if (ok) { v[0] = s.x; v[1] = s.y; v[2] = s.z; }
+    return ok;
+}
+
+bool AimLink::hbTwWrite(int t, const HbTw& r, const float v[3]) {
+    const HitboxLayout::Tweak& T = H_.tw[t];
+    const int n = T.type == 0 ? 1 : 3;
+    for (int i = 0; i < n; ++i) if (!std::isfinite(v[i]) || v[i] <= 0.0f || v[i] > kMaxGrabValue) return false;
+    if (T.type == 0) {
+        unsigned char b[4], back[4];
+        std::memcpy(b, &v[0], 4);
+        if (!pipeGame_.put(r.owner + static_cast<uintptr_t>(T.off), b, 4)) return false;
+        return pipeGame_.copy(r.owner + static_cast<uintptr_t>(T.off), back, 4) && std::memcmp(b, back, 4) == 0;
     }
-    g_.hbSeeFails = 0; g_.hbSeeWhy.clear();
+    const unsigned long long e0 = errors_.load();
+    Vec3 s{v[0], v[1], v[2]};
+    bool ok = false;
+    if (H_.mTSetLS) ok = callSetVec3(H_.mTSetLS, r.obj, s);
+    else if (H_.iTSetLS) { reinterpret_cast<void (*)(void*, Vec3*)>(H_.iTSetLS)(reinterpret_cast<void*>(r.obj), &s); ok = true; }
+    g_.excRun = 0;
+    hbNoteErr(errors_.load() != e0);
+    return ok;
+}
+
+// Are the owner (Hand / BallControl) and, for a Transform, the Transform itself still the running objects we saw?
+bool AimLink::hbTwAlive(int t, const HbTw& r) {
+    const HitboxLayout::Tweak& T = H_.tw[t];
+    if (!r.owner) return false;
+    unsigned char* buf = T.owner == 0 ? hbHandBuf_.data() : hbBcBuf_.data();
+    const size_t sz = T.owner == 0 ? hbHandBuf_.size() : hbBcBuf_.size();
+    const tzscan::ClassInfo& ci = T.owner == 0 ? H_.hand : H_.bc;
+    if (!readObj(buf, r.owner, sz) || !liveObj(buf, ci.klassInv, ci.unityObject)) return false;
+    if (T.type == 1) {
+        unsigned char head[24];
+        if (!plausiblePtr(r.obj) || !pipeGame_.copy(r.obj, head, sizeof head)) return false;
+        if (rdQ(head, 0) != r.klass || rdQ(head, 16) == 0) return false;
+        uintptr_t cur;
+        if (!pipeGame_.copy(r.owner + static_cast<uintptr_t>(T.off), reinterpret_cast<unsigned char*>(&cur), 8) || cur != r.obj) return false;       // the field points somewhere else now
+    }
     return true;
+}
+
+bool AimLink::hbTwPutBack(int t, HbTw& r) {
+    if (!r.applied) return false;
+    r.applied = false;
+    const int n = H_.tw[t].type == 0 ? 1 : 3;
+    if (!hbTwAlive(t, r)) return false;
+    float cur[3];
+    if (!hbTwRead(t, r, cur) || !nearV(cur, r.last, n)) return false;                // the game changed it since: it is the game's now
+    if (!hbTwWrite(t, r, r.orig)) return false;
+    std::memcpy(r.last, r.orig, sizeof r.last);
+    hbTwRestored_.fetch_add(1);
+    return true;
+}
+
+void AimLink::hbTwReleaseAll(int* back) {
+    int n = 0;
+    for (int i = 0; i < 2; ++i) for (int t = 0; t < H_.nTw; ++t) {
+        if (hbTwPutBack(t, g_.hbTw[i][t])) ++n;
+        g_.hbTw[i][t] = HbTw();
+    }
+    g_.hbTwAppliedX10 = 0; g_.hbTwWriteFailRun = 0;
+    hbTwUsable_.store(0);
+    if (back) *back = n;
+}
+
+// Read, check and set the grab-reach values of both hands. `bc` / `hand` were found (and checked alive) a moment ago by hbFindHands; 0 = that hand is not there.
+void AimLink::hbTwTick(const uintptr_t bc[2], const uintptr_t hand[2], int x10, float mul, int* setNow, int* failedNow) {
+    *setNow = *failedNow = 0;
+    int usable = 0, resetN = 0, newOwnN = 0;
+    std::string example, first[2];
+    bool anyFirst = false;
+    for (int i = 0; i < 2; ++i) for (int t = 0; t < H_.nTw; ++t) {
+        HbTw& r = g_.hbTw[i][t];
+        const HitboxLayout::Tweak& T = H_.tw[t];
+        const bool isF = T.type == 0;
+        const int n = isF ? 1 : 3;
+        const uintptr_t owner = T.owner == 0 ? hand[i] : bc[i];
+        if (r.owner && r.owner != owner) { hbTwPutBack(t, r); r = HbTw(); }                  // the hand is gone or is another object: what we changed went with it (or is put back if it still lives)
+        if (!owner) continue;
+        if (!r.owner) r.owner = owner;
+        if (r.dead) continue;
+        if (!isF) {                                                                          // the Transform the field points to
+            uintptr_t p = 0;
+            if (!pipeGame_.copy(owner + static_cast<uintptr_t>(T.off), reinterpret_cast<unsigned char*>(&p), 8)) { hbTwReadFails_.fetch_add(1); continue; }
+            if (!plausiblePtr(p)) continue;                                                  // the field is empty right now: keep what we know (the game may fill it again)
+            if (p != r.obj) {                                                                // the game gave the hand ANOTHER grab volume: it starts from its own scale
+                if (r.obj) { hbTwPutBack(t, r); r.haveOrig = false; r.applied = false; r.fails = 0; }
+                r.obj = 0; r.klass = 0;
+                unsigned char head[24];
+                if (!pipeGame_.copy(p, head, sizeof head) || rdQ(head, 16) == 0 || rdQ(head, 0) == 0) continue;     // not a running object: nothing to scale (yet)
+                r.obj = p; r.klass = rdQ(head, 0);
+            }
+            if (!r.obj) continue;
+            unsigned char head[24];
+            if (!pipeGame_.copy(r.obj, head, sizeof head) || rdQ(head, 16) == 0) continue;      // the game destroyed it (the engine would throw): wait until the field points to another one
+        }
+        float cur[3];
+        if (!hbTwRead(t, r, cur)) {
+            hbTwReadFails_.fetch_add(1);
+            if (++r.fails >= 3) { r.dead = true; if (g_.hbTwNotes < 16) { ++g_.hbTwNotes; queueHitbox(fmt("hitbox: grab-reach value %s (%s hand) cannot be read - left alone", T.name, i == 0 ? "left" : "right")); } }
+            continue;
+        }
+        bool sane = true;
+        for (int k = 0; k < n; ++k) if (!(cur[k] > 0.0f) || cur[k] > kMaxGrabValue) sane = false;
+        if (!r.haveOrig) {
+            if (!sane) {                                                                     // 0 stays 0 whatever it is multiplied by
+                r.dead = true;
+                if (g_.hbTwNotes < 16) { ++g_.hbTwNotes; queueHitbox(fmt("hitbox: grab-reach value %s (%s hand) is %.3f - multiplying that changes nothing, so it is left alone", T.name, i == 0 ? "left" : "right", static_cast<double>(cur[0]))); }
+                continue;
+            }
+            std::memcpy(r.orig, cur, sizeof r.orig); std::memcpy(r.last, cur, sizeof r.last); r.haveOrig = true; r.fails = 0;
+            first[i] += isF ? fmt("%s%s %.3f", first[i].empty() ? "" : ", ", T.name, static_cast<double>(cur[0]))
+                            : fmt("%s%s scale (%.3f, %.3f, %.3f)", first[i].empty() ? "" : ", ", T.name, static_cast<double>(cur[0]), static_cast<double>(cur[1]), static_cast<double>(cur[2]));
+            anyFirst = true;
+        } else if (r.applied) {
+            if (!nearV(cur, r.last, n)) {                                                    // the game changed it after we set it
+                hbTwResets_.fetch_add(1); ++resetN;
+                bool newOwn = false;
+                for (int k = 0; k < n; ++k) if (!nearV(cur + k, r.last + k, 1) && !nearV(cur + k, r.orig + k, 1)) { r.orig[k] = cur[k]; newOwn = true; }      // a part the game changed to a NEW own value: scale from that one from now on (a part it did not touch stays ours)
+                if (newOwn) ++newOwnN;
+                r.applied = false;
+                if (example.empty()) example = fmt("%s (%s hand) is now %.3f, I had set %.3f", T.name, i == 0 ? "left" : "right", static_cast<double>(cur[0]), static_cast<double>(r.last[0]));
+            }
+        } else {
+            std::memcpy(r.orig, cur, sizeof r.orig); std::memcpy(r.last, cur, sizeof r.last);       // not changed by us: whatever the game has now is its own value
+        }
+        ++usable;
+        if (x10 == 0) continue;
+        float target[3] = {r.orig[0], r.orig[1], r.orig[2]};
+        for (int k = 0; k < n; ++k) target[k] = r.orig[k] * mul;
+        if (!r.applied && nearV(target, r.orig, n)) continue;                                 // 1.0x and nothing was changed: nothing to do
+        if (r.applied && nearV(target, r.last, n) && nearV(cur, target, n)) continue;
+        if (hbTwWrite(t, r, target)) {
+            std::memcpy(r.last, target, sizeof r.last);
+            r.applied = !nearV(target, r.orig, n);
+            ++*setNow; g_.hbTwWriteFailRun = 0;
+            if (r.applied) hbTwSet_.fetch_add(1); else hbTwRestored_.fetch_add(1);
+        } else {
+            ++*failedNow; hbTwWriteFails_.fetch_add(1);
+            if (++r.fails >= 3) {
+                r.dead = true;
+                if (g_.hbTwNotes < 16) { ++g_.hbTwNotes; queueHitbox(fmt("hitbox: grab-reach value %s (%s hand) could not be set 3 times - left alone", T.name, i == 0 ? "left" : "right")); }
+            }
+            if (++g_.hbTwWriteFailRun >= 12) { hbDie("the system refused 12 grab-reach changes in a row, so nothing is changed"); return; }
+        }
+    }
+    hbTwUsable_.store(usable);
+    if (anyFirst && g_.hbTwNotes < 16) {
+        ++g_.hbTwNotes;
+        queueHitbox(fmt("hitbox: the game's own grab-reach values - left hand: %s | right hand: %s", first[0].empty() ? "(none)" : first[0].c_str(), first[1].empty() ? "(none)" : first[1].c_str()));
+    }
+    if (resetN && g_.hbTwNotes < 16 && g_.hbResetNotes < 6) {
+        ++g_.hbTwNotes; ++g_.hbResetNotes;
+        queueHitbox(fmt("hitbox: the game changed %d of your grab-reach values since I set them (%d back to its own value, %d to a NEW own value) - e.g. %s - I set mine again", resetN, resetN - newOwnN, newOwnN, example.c_str()));
+    }
 }
 
 // Is this hitbox still a running engine object of the kind we think it is?
@@ -481,10 +652,10 @@ void scaled(int kind, const float* orig, float mul, float* out) {
 }  // namespace
 
 void AimLink::hitboxTick(double now) {
-    if (!hitboxReady_.load(std::memory_order_acquire) || hitboxDead_.load(std::memory_order_relaxed)) return;
+    if (!hitboxReady_.load(std::memory_order_acquire)) return;
+    if (hitboxDead_.load(std::memory_order_relaxed)) { if (g_.hbOn) hitboxStandDown("the hitbox part stopped"); return; }       // whatever was changed before it stopped is put back
     const int x10 = hitboxX10_.load(std::memory_order_relaxed);
-    const bool see = hitboxSee_.load(std::memory_order_relaxed);
-    if (x10 == 0 && !see) { if (g_.hbOn) hitboxStandDown("the switches went off"); return; }
+    if (x10 == 0) { if (g_.hbOn) hitboxStandDown("the switch went off"); return; }
     if (now < g_.hbNext) return;
     g_.hbNext = now + kPace;
     g_.hbOn = true;
@@ -496,11 +667,12 @@ void AimLink::hitboxTick(double now) {
     if (!hbFindHands(bc, hand, arr, auth)) {
         if (g_.hbBc[0] || g_.hbBc[1]) {                          // the hands we knew are gone (new scene / new avatar): what we changed went with them
             for (HbCol& c : g_.hbCols) hbPutBack(c);           // (a hitbox the game already destroyed is skipped)
-            g_.hbCols.clear(); g_.hbAppliedX10 = 0; g_.hbSeeFor[0] = g_.hbSeeFor[1] = 0; g_.hbSeeX10 = 0;
+            hbTwReleaseAll(nullptr);                           // (so are grab-reach values of objects that are gone)
+            g_.hbCols.clear(); g_.hbAppliedX10 = 0;
             g_.hbBc[0] = g_.hbBc[1] = g_.hbHand[0] = g_.hbHand[1] = g_.hbArr[0] = g_.hbArr[1] = 0;
             if (g_.hbNotes < kNoteLimit) { ++g_.hbNotes; queueHitbox("hitbox: your hands are gone (new scene or avatar?) - looking for them again"); }
         }
-        hbHands_.store(0); hbBoxCount_.store(0); hbUsable_.store(0);
+        hbHands_.store(0); hbBoxCount_.store(0); hbUsable_.store(0); hbTwUsable_.store(0);
         if (g_.hbInfoText != "looking for your hands ...") { g_.hbInfoText = "looking for your hands ..."; hbSetInfo(g_.hbInfoText); }
         return;
     }
@@ -534,8 +706,9 @@ void AimLink::hitboxTick(double now) {
             const int n = kindComps(c.kind);
             if (nearV(cur, c.last, n)) continue;                                   // still ours
             hbGameResets_.fetch_add(1); redo = true; ++resetN;
-            const bool backToOrig = nearV(cur, c.orig, n);
-            if (!backToOrig) { std::memcpy(c.orig, cur, sizeof c.orig); ++newOwnN; }   // the game gave this hitbox a NEW own size: that is the one to scale from now on
+            bool newOwn = false;
+            for (int k = 0; k < n; ++k) if (!nearV(cur + k, c.last + k, 1) && !nearV(cur + k, c.orig + k, 1)) { c.orig[k] = cur[k]; newOwn = true; }      // the game gave this part a NEW own size: that is the one to scale from now on (a part it did not touch stays ours)
+            if (newOwn) ++newOwnN;
             c.applied = false;
             if (example.empty()) example = fmt("'%s' is now %s, I had set %s", hbNameOf(c.addr).c_str(), sizeText(c.kind, cur).c_str(), sizeText(c.kind, c.last).c_str());
         }
@@ -581,74 +754,45 @@ void AimLink::hitboxTick(double now) {
                 queueHitbox(fmt("hitbox: set %d hitbox%s of your hands to %.1fx their own size%s", changedNow, changedNow == 1 ? "" : "es", static_cast<double>(mul), failedNow ? fmt(" (%d could not be set)", failedNow).c_str() : ""));
             }
         }
-    } else if (g_.hbAppliedX10 != 0) {
-        int back = 0;
-        for (HbCol& c : g_.hbCols) if (hbPutBack(c)) ++back;
-        g_.hbAppliedX10 = 0;
-        if (g_.hbNotes < kNoteLimit) { ++g_.hbNotes; queueHitbox(fmt("hitbox: Hitbox expander off - %d hitbox%s put back to the game's own size", back, back == 1 ? "" : "es")); }
     }
 
-    // 3. See hitbox: the game's own display
-    if (see && !g_.hbSeeDead && H_.vizKind != 0) {
-        bool anyOn = false;
-        for (int i = 0; i < 2; ++i) {
-            if (!bc[i]) continue;
-            if (g_.hbSeeFor[i] != bc[i]) {
-                if (hbCallVisual(bc[i], true)) {
-                    g_.hbSeeFor[i] = bc[i]; g_.hbSeeX10 = x10;
-                    if (g_.hbNotes < kNoteLimit) { ++g_.hbNotes; queueHitbox(fmt("hitbox: asked the game to show its hand collider display on the %s hand (SetHandColliderVisual%s with %s) - no error; WHAT it draws I cannot see from here: please tell me", i == 0 ? "left" : "right", H_.vizTypes.c_str(), H_.vizKind == 1 ? "1.0" : "true")); }
-                }
-            }
-            if (g_.hbSeeFor[i] == bc[i]) anyOn = true;
+    // 3. the grab-reach values (read and set every look: they are plain numbers, cheap to check)
+    {
+        int setNow = 0, failedNow = 0;
+        hbTwTick(bc, hand, x10, mul, &setNow, &failedNow);
+        if (hitboxDead_.load(std::memory_order_relaxed)) return;
+        g_.hbTwAppliedX10 = x10;
+        if (g_.hbTwNotes < 16 && (setNow || failedNow)) {
+            ++g_.hbTwNotes;
+            queueHitbox(fmt("hitbox: set %d grab-reach value%s of your hands to %.1fx their own value%s", setNow, setNow == 1 ? "" : "s", static_cast<double>(mul), failedNow ? fmt(" (%d could not be set)", failedNow).c_str() : ""));
         }
-        if (anyOn && x10 != g_.hbSeeX10 && now - g_.hbChangedAt >= kSeeSettle) {       // the size changed: show the display again (off, then on) so it can follow
-            for (int i = 0; i < 2; ++i) if (bc[i] && g_.hbSeeFor[i] == bc[i]) { hbCallVisual(bc[i], false); hbCallVisual(bc[i], true); }
-            g_.hbSeeX10 = x10;
-        }
-    } else if (!see) {
-        for (int i = 0; i < 2; ++i) {
-            if (!g_.hbSeeFor[i]) continue;
-            if (bc[i] == g_.hbSeeFor[i]) hbCallVisual(bc[i], false);
-            g_.hbSeeFor[i] = 0;
-        }
-        g_.hbSeeX10 = 0;
     }
 
     // 4. the menu's status text (only when it changed)
     std::string info;
     const int hands = (bc[0] ? 1 : 0) + (bc[1] ? 1 : 0);
-    const int total = hbBoxCount_.load(), usable = hbUsable_.load();
-    if (x10 != 0) {
-        if (total == 0) info = fmt("found %d hand%s, but they have no hitboxes yet - waiting", hands, hands == 1 ? "" : "s");
-        else if (!H_.resizeOk || usable == 0) info = fmt("your hands have %d hitbox%s but none of them can be resized (box %d, sphere %d, capsule %d, mesh %d, other %d)", total, total == 1 ? "" : "es", hbBoxes_.load(), hbSpheres_.load(), hbCapsules_.load(), hbMeshes_.load(), hbOthers_.load());
-        else if (x10 == 10) info = fmt("connected: %d hand%s, %d hitbox%s at the normal size (1.0x)", hands, hands == 1 ? "" : "s", usable, usable == 1 ? "" : "es");
-        else info = fmt("connected: %d hand%s, %d hitbox%s made %.1fx bigger", hands, hands == 1 ? "" : "s", usable, usable == 1 ? "" : "es", static_cast<double>(mul));
-    } else {
-        info = fmt("connected: %d hand%s", hands, hands == 1 ? "" : "s");
-    }
-    if (see) {
-        if (H_.vizKind == 0) info += " | See hitbox not available: " + H_.vizWhy;
-        else if (g_.hbSeeDead) info += " | See hitbox failed: " + g_.hbSeeWhy;
-        else if (g_.hbSeeFor[0] || g_.hbSeeFor[1]) info += " | See hitbox: the game's display is on";
-        else if (!g_.hbSeeWhy.empty()) info += " | See hitbox: " + g_.hbSeeWhy;
+    const int total = hbBoxCount_.load(), usable = hbUsable_.load(), grab = hbTwUsable_.load();
+    if (total == 0 && grab == 0) info = fmt("found %d hand%s, but they have no hitboxes yet - waiting", hands, hands == 1 ? "" : "s");
+    else if (usable == 0 && grab == 0) info = fmt("your hands have %d hitbox%s but none of them can be resized (box %d, sphere %d, capsule %d, mesh %d, other %d)", total, total == 1 ? "" : "es", hbBoxes_.load(), hbSpheres_.load(), hbCapsules_.load(), hbMeshes_.load(), hbOthers_.load());
+    else {
+        std::string what = fmt("%d hitbox%s", usable, usable == 1 ? "" : "es");
+        what += grab > 0 ? fmt(" + %d grab value%s", grab, grab == 1 ? "" : "s") : std::string(" (no grab values found)");
+        if (x10 == 10) info = fmt("connected: %d hand%s, %s at the normal size (1.0x)", hands, hands == 1 ? "" : "s", what.c_str());
+        else info = fmt("connected: %d hand%s, %s made %.1fx bigger", hands, hands == 1 ? "" : "s", what.c_str(), static_cast<double>(mul));
     }
     if (info != g_.hbInfoText) { g_.hbInfoText = info; hbSetInfo(info); }
 }
 
-// The switches went off (or the link did): put every hitbox we changed back to the game's own size and hide the display.
+// The switch went off (or the link did): put every hitbox and grab-reach value we changed back to the game's own.
 void AimLink::hitboxStandDown(const char* why) {
-    int back = 0, hidden = 0;
+    int back = 0, grabBack = 0;
     for (HbCol& c : g_.hbCols) if (hbPutBack(c)) ++back;
-    for (int i = 0; i < 2; ++i) {
-        if (!g_.hbSeeFor[i]) continue;
-        if (hbCallVisual(g_.hbSeeFor[i], false)) ++hidden;
-        g_.hbSeeFor[i] = 0;
-    }
-    queueHitbox(fmt("hitbox: switched off (%s) - %d hitbox%s put back to the game's own size, game display %s", why, back, back == 1 ? "" : "es", hidden ? "switched off" : "was not on"));
-    g_.hbCols.clear(); g_.hbAppliedX10 = 0; g_.hbSeeX10 = 0; g_.hbLastX10 = 0; g_.hbOn = false; g_.hbWriteFailRun = 0;
+    hbTwReleaseAll(&grabBack);
+    queueHitbox(fmt("hitbox: switched off (%s) - %d hitbox%s and %d grab-reach value%s put back to the game's own", why, back, back == 1 ? "" : "es", grabBack, grabBack == 1 ? "" : "s"));
+    g_.hbCols.clear(); g_.hbAppliedX10 = 0; g_.hbLastX10 = 0; g_.hbOn = false; g_.hbWriteFailRun = 0;
     g_.hbBc[0] = g_.hbBc[1] = g_.hbHand[0] = g_.hbHand[1] = g_.hbArr[0] = g_.hbArr[1] = 0;
     g_.hbInfoText.clear();
-    hbHands_.store(0); hbBoxCount_.store(0); hbUsable_.store(0);
+    hbHands_.store(0); hbBoxCount_.store(0); hbUsable_.store(0); hbTwUsable_.store(0);
     hbSetInfo("");
 }
 

@@ -671,7 +671,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D11: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot (switch, distance slider, Hold Y) and AIMBOT BANK mode (bank shots off the backboard - 2nd version: looks for the board's solid part in more places; not yet proven in the real game) + Troll page 'Shot points' (keeps the point value of YOUR ball at the slider's number; new, not yet proven in the real game) + ball-and-hoops scan, now also writing out the game's scoring classes + Troll page 'Hitbox expander' (makes the hitboxes of YOUR two hands bigger, 1x to 5x) and 'See hitbox' (asks the game to show its own hand collider display); both new, not yet proven in the real game)");
+    fact("Timmyzstuff facts (stage D11b: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot (switch, distance slider, Hold Y) and AIMBOT BANK mode (bank shots off the backboard - 2nd version: looks for the board's solid part in more places; not yet proven in the real game) + Troll page 'Shot points' (keeps the point value of YOUR ball at the slider's number; new, not yet proven in the real game) + ball-and-hoops scan, now also writing out the game's scoring classes + Troll page 'Hitbox expander' (makes the hitboxes AND the grab reach of YOUR two hands bigger, from normal size up to ten times bigger; D11b = the grab reach is new, the 'See hitbox' switch was removed); not yet proven in the real game)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -963,30 +963,29 @@ void* probeMain(void*) {
                 fact("t=%.0f %s", now, gAim.pointsSummary().c_str());
             }
         }
-        {   // ---- stage D11: the Troll page's "Hitbox expander" switch + slider and the "See hitbox" switch go to the game part; its state goes back to the menu.
+        {   // ---- stage D11b: the Troll page's "Hitbox expander" switch + slider go to the game part; its state goes back to the menu.
             tzoverlay::HitboxAsk ha = tzoverlay::hitboxAsk();
 #ifdef TZ_FAST_TEST
             if (const char* e = std::getenv("TZ_TEST_HITBOX")) { float m = 1.0f; std::sscanf(e, "%f", &m); if (now >= 3.0) { ha.on = m >= 1.0f; ha.mul = m; } }       // PC test only: "TZ_TEST_HITBOX=2.5" = Hitbox expander ON at 2.5x
-            if (const char* e = std::getenv("TZ_TEST_HITBOX_SEE")) { if (now >= 3.0) ha.see = e[0] == '1'; }                                                         // PC test only: "TZ_TEST_HITBOX_SEE=1" = See hitbox ON
 #endif
-            gAim.setHitbox(ha.on, ha.mul, ha.see);
-            const int hbAny = (ha.on || ha.see) ? 1 : 0;
+            gAim.setHitbox(ha.on, ha.mul);
+            const int hbAny = ha.on ? 1 : 0;
             const int hbUi = hbAny ? gAim.hitboxUiState() : 0;
             tzoverlay::setHitboxInfo(hbUi, hbAny ? gAim.hitboxHeadline().c_str() : "");
             // what the menu asks: written when the value has been the same for a second (a slider drag is not logged step by step)
             static int hbSeen = -1, hbLogged = -1, hbAskLogs = 0; static double hbSeenAt = 0;
-            const int hbKey = (ha.on ? static_cast<int>(std::lround(ha.mul * 10.0f)) : 0) * 2 + (ha.see ? 1 : 0);
+            const int hbKey = ha.on ? static_cast<int>(std::lround(ha.mul * 10.0f)) : 0;
             if (hbKey != hbSeen) { hbSeen = hbKey; hbSeenAt = now; }
             if (hbSeen != hbLogged && now - hbSeenAt >= 1.0 && hbAskLogs < 30) {
                 ++hbAskLogs; hbLogged = hbSeen;
                 char mt[24] = ""; if (ha.on) std::snprintf(mt, sizeof mt, " at %.1fx", static_cast<double>(ha.mul));
-                fact("hitbox: menu asks Hitbox expander=%s%s, See hitbox=%s  [stage D11: when ON, every hitbox of YOUR two hands is made that many times bigger; not proven in the real game yet - the link reports below what it found and did]",
-                     ha.on ? "ON" : "off", mt, ha.see ? "ON" : "off");
+                fact("hitbox: menu asks Hitbox expander=%s%s  [stage D11b: when ON, every hitbox AND every grab-reach number of YOUR two hands is made that many times bigger; not proven in the real game yet - the link reports below what it found and did]",
+                     ha.on ? "ON" : "off", mt);
             }
             // the hitbox part's own numbers: whenever its state or its counts change, and then every 20 seconds while a switch is on (never more than 40 lines)
             static int lastHbUi = 0, hbSumLogs = 0; static double nextHbSum = 0; static unsigned long long lastHbKey = 0;
             const tzaimlink::HitboxCounters hc = gAim.hitboxCounters();
-            const unsigned long long hbCountKey = hc.resized * 1000003ULL + hc.restored * 7919ULL + hc.visualCalls * 31ULL + static_cast<unsigned long long>(hc.hitboxes) + static_cast<unsigned long long>(hc.hands) * 101ULL;
+            const unsigned long long hbCountKey = hc.resized * 1000003ULL + hc.restored * 7919ULL + hc.grabSet * 31ULL + hc.grabRestored * 17ULL + hc.grabResets * 13ULL + static_cast<unsigned long long>(hc.grabValues) * 5ULL + static_cast<unsigned long long>(hc.hitboxes) + static_cast<unsigned long long>(hc.hands) * 101ULL;
             if ((hbUi != lastHbUi || hbCountKey != lastHbKey || (hbUi != 0 && now >= nextHbSum)) && hbSumLogs < 40) {
                 ++hbSumLogs; lastHbUi = hbUi; lastHbKey = hbCountKey; nextHbSum = now + 20.0;
                 fact("t=%.0f %s", now, gAim.hitboxSummary().c_str());
@@ -1043,7 +1042,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D11: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot with game link + shot points + hitbox expander)");
+    logf_("payload loaded (stage D11b: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot with game link + shot points + hitbox expander)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

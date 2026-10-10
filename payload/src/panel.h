@@ -75,8 +75,8 @@ std::string aimCapText(float capM);                                             
 const float kPointsMin = tzpoints::kStopMin, kPointsMax = tzpoints::kStopMax, kPointsStep = tzpoints::kStopStep;
 const float kPointsDefault = tzpoints::kStopDefault;
 std::string pointsStopText(float stop);                                            // "11" or "999"
-// Troll page (stage D11): "Hitbox expander" slider, 1.0x (your normal hand hitbox) ... 5.0x. 41 stops of 0.1.
-const float kHitboxMin = 1.0f, kHitboxMax = 5.0f, kHitboxStep = 0.1f;
+// Troll page (stage D11b): "Hitbox expander" slider, 1.0x (the normal size) ... 10.0x. 19 stops of 0.5.
+const float kHitboxMin = 1.0f, kHitboxMax = 10.0f, kHitboxStep = 0.5f;
 const float kHitboxDefault = 2.0f;
 std::string hitboxText(float mul);                                                 // "2.5x"
 
@@ -120,10 +120,9 @@ struct PanelState {
     std::string pointsHeadline;     // short text from the game part: what it is doing right now (empty = the menu picks a default text)
     std::string pointsLast;         // short text: what happened at your last basket (empty = none seen yet)
 
-    // ---- Troll page, "Hitbox expander" + "See hitbox" (stage D11). Both switches are NEVER saved (effects). The slider position IS saved. ----
-    bool hitboxOn = false;          // your own hand hitboxes are made bigger by the slider's factor
-    float hitboxMul = kHitboxDefault;   // 1.0 .. 5.0 (1.0 = the normal size)
-    bool hitboxSee = false;         // "See hitbox": the game's own hand-collider display is shown on your hands
+    // ---- Troll page, "Hitbox expander" (stage D11b). The switch is NEVER saved (effect). The slider position IS saved. ----
+    bool hitboxOn = false;          // your own hand hitboxes AND your grab reach are made bigger by the slider's factor
+    float hitboxMul = kHitboxDefault;   // 1.0 .. 10.0 (1.0 = the normal size)
     int hitboxLinkState = 0;        // 0 = off, 1 = connected to your hands, 2 = looking for them, 3 = failed
     std::string hitboxHeadline;     // short text from the game part: what it is doing right now (empty = the menu picks a default text)
 };
@@ -154,8 +153,7 @@ enum HitId {
     HIT_TOGGLE_POINTS = 51,         // Troll page: "Shot points" switch (stage D10)
     HIT_SLIDER_POINTS = 52,         // Troll page: "Shot points" slider (stops 1 .. 11, then 999)
     HIT_TOGGLE_HITBOX = 53,         // Troll page: "Hitbox expander" switch (stage D11)
-    HIT_SLIDER_HITBOX = 54,         // Troll page: "Hitbox expander" slider (1.0x .. 5.0x)
-    HIT_TOGGLE_HITBOXSEE = 55,      // Troll page: "See hitbox" switch (stage D11)
+    HIT_SLIDER_HITBOX = 54,         // Troll page: "Hitbox expander" slider (1.0x .. 10.0x)
     HIT_COLOR0 = 60,                // 60 .. 69 = the 10 colours
 };
 struct HitRect { int id; float x, y, w, h; };

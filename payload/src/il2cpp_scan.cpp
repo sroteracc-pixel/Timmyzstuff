@@ -123,7 +123,7 @@ public:
     // an ordinary line: dropped once the file is nearly full
     void line(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
         if (full()) return;
-        char b[1024];
+        char b[2048];
         va_list ap; va_start(ap, fmt); std::vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
         if (maxBytes_ && bytes_ + std::strlen(b) + 1 + reservedBytes_ > maxBytes_) return;
         put(b);
@@ -131,14 +131,14 @@ public:
     // an important line (headers, summaries, "stuck", "DONE"): still written when the ordinary lines have used up their room
     void key(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
         if (lines_ >= maxLines_ || (maxBytes_ && bytes_ >= maxBytes_)) return;
-        char b[1024];
+        char b[2048];
         va_list ap; va_start(ap, fmt); std::vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
         if (maxBytes_ && bytes_ + std::strlen(b) + 1 > maxBytes_) return;           // never go over the byte budget, not even by one line
         put(b);
     }
     // the closing line ("DONE" / "STUCK"): always written, even when the budget is used up (it may go over by a small, fixed margin)
     void last(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
-        char b[1024];
+        char b[2048];
         va_list ap; va_start(ap, fmt); std::vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
         put(b);
     }
@@ -747,19 +747,20 @@ const int kMaxShotLive = 15;           // classes looked for in memory
 // are noise (audio, tether ball, shaders, bots ...). These are the ones that matter for an aimbot: the ball, the game's OWN shot assist, the hoops and the
 // game / match state. Found by exact name (in the game's own code); a name that is not there is reported.
 struct ShotTarget { const char* name; int maxFields; int maxMethods; };        // 0 = the usual limit for important classes
+// Stage D11b: the grab. The earlier reports (D7 - D11) already wrote out the ball, the shot assist, the hoops, the scoring classes and the hand collider code, and the byte
+// budget of this report (190 KB) was used up before the methods of Autohand.Hand were reached. So the classes that decide the GRAB come first and are written out in full
+// (Basketball, BallControl, Autohand.Hand); everything the earlier files already have is cut down to a few fields and methods (the numbers are the caps).
 const ShotTarget kShotTargets[] = {
-    {"Basketball", 0, 0},                                                                            // the ball script (101 fields)
-    {"BasketballShotAssist", 0, 0}, {"ShotAssistParams", 0, 0}, {"PredictedShotResult", 0, 0}, {"BankShotCandidate", 0, 0}, {"RimTarget", 0, 0},     // the game's own aim help
-    {"ShotData", 0, 0}, {"BasketballAssist", 0, 0}, {"ThrowAssist", 0, 0},
-    {"BasketballGoal", 0, 0}, {"BasketballGoalManager", 0, 0}, {"HoopManager", 0, 0}, {"NetRimReference", 0, 0},                                   // the hoops
-    {"BasketballGameContext", 0, 60}, {"GameManager", 120, 120},                                     // lobby or official match?
-    {"BallControl", 0, 0}, {"BallControlManager", 0, 80}, {"BasketballProperties", 0, 0}, {"ShootGesture", 0, 0}, {"ShootGameBall", 0, 0},
-    {"BallPhysicsUtilities", 0, 0}, {"ReleasedBallCommand", 0, 0}, {"ShotManager", 0, 0}, {"ShotDetectionHelper", 0, 0}, {"SteveBallSync", 0, 0}, {"BallController", 0, 0},
-    // stage D10 ("Shot points"): the game's SCORING classes. The earlier files only list their names (ScoreManager has 17 fields and 16 methods, PlayerNetworked keeps the
-    // score that is shared with the other players, ScoreSync is that shared score itself). Written out in full so the next step can see how a basket becomes points.
-    {"ScoreManager", 0, 0}, {"PlayerScore", 0, 0}, {"ScoreSync", 0, 0}, {"ScoreSyncModel", 0, 0}, {"ScoreSyncHelper", 0, 0}, {"PlayerNetworked", 0, 0}, {"TeamScorePanelUI", 0, 0},
-    // stage D11 ("Hitbox expander"): the hand (Autohand.Hand: its _handColliders list and the "show hand colliders" function). BallControl and Basketball (CheckHandCollision) are above.
-    {"Hand", 0, 0},
+    {"Basketball", 0, 0},                                                                            // the ball script (101 fields): its sphere-grab trigger methods are written out in machine code below
+    {"BallControl", 0, 0}, {"Hand", 0, 0},                                                           // stage D11b: the hand's grab: BallControl.IsHandNearBasketball / InitGrabVolumes / ProcessHand ..., Autohand.Hand's grab methods
+    {"BasketballShotAssist", 8, 8}, {"ShotAssistParams", 8, 8}, {"PredictedShotResult", 8, 8}, {"BankShotCandidate", 8, 8}, {"RimTarget", 8, 8},     // the game's own aim help (known from the earlier files)
+    {"ShotData", 8, 8}, {"BasketballAssist", 8, 8}, {"ThrowAssist", 8, 8},
+    {"BasketballGoal", 8, 8}, {"BasketballGoalManager", 8, 8}, {"HoopManager", 8, 8}, {"NetRimReference", 8, 8},                                   // the hoops
+    {"BasketballGameContext", 8, 8}, {"GameManager", 8, 8},                                          // lobby or official match?
+    {"BallControlManager", 8, 8}, {"BasketballProperties", 8, 8}, {"ShootGesture", 8, 8}, {"ShootGameBall", 8, 8},
+    {"BallPhysicsUtilities", 8, 8}, {"ReleasedBallCommand", 8, 8}, {"ShotManager", 8, 8}, {"ShotDetectionHelper", 8, 8}, {"SteveBallSync", 8, 8}, {"BallController", 8, 8},
+    // the scoring classes (stage D10; "Shot points" is parked): the earlier files have them in full
+    {"ScoreManager", 8, 8}, {"PlayerScore", 8, 8}, {"ScoreSync", 8, 8}, {"ScoreSyncModel", 8, 8}, {"ScoreSyncHelper", 8, 8}, {"PlayerNetworked", 8, 8}, {"TeamScorePanelUI", 8, 8},
     {nullptr, 0, 0}};
 // The network library of the game (Normcore: "Normal.Realtime.dll"). Written out with limits (who owns an object, how to ask for ownership).
 const char* const kNetClasses[] = {"Normal.Realtime.RealtimeView", "Normal.Realtime.RealtimeTransform", nullptr};
@@ -767,6 +768,20 @@ const char* const kNetClasses[] = {"Normal.Realtime.RealtimeView", "Normal.Realt
 const char* const kShotLive[] = {"Basketball", "BasketballStateSync", "GameManager", "BasketballGameContext", "BasketballGoal", "BasketballShotAssist", "ShotAssistParams",
                                  "ThrowAssist", "BasketballAssist", "HoopManager", "BallControl", "BallControlManager",
                                  "ScoreManager", "PlayerNetworked", "BasketballProperties", nullptr};      // (stage D10: the last three show the live score numbers and a ball's point value)
+
+// stage D11b: is this one of the grab methods whose machine code is written out? (ShovelTools.BallControl and ShovelTools.Basketball: exact names from the earlier files; Autohand.Hand: by name part)
+bool grabMethodWanted(const std::string& cls, const char* mn) {
+    static const char* const kBall[] = {"IsHandNearBasketball", "InitGrabVolumes", "ProcessHand", "ValidateBasketballGrip", "IsGripped", "IsHoldingBasketball", "ProcessHandPositionBasketball",
+                                         "StabilizeInHand", "SetLockToHand", "GetClosestTargetPosition", "OnParameterGravityDistance", "OnGravityStrength", nullptr};
+    static const char* const kBasketball[] = {"SetInSphereGrab", "OnTriggerEnter", "OnTriggerExit", "OnGrabEvent", nullptr};
+    if (cls == "ShovelTools.BallControl") return inList(mn, kBall);
+    if (cls == "ShovelTools.Basketball") return inList(mn, kBasketball);
+    if (cls == "Autohand.Hand") {
+        if (startsWith(mn, "get_") || startsWith(mn, "set_") || startsWith(mn, "add_") || startsWith(mn, "remove_")) return false;
+        return std::strstr(mn, "Grab") || std::strstr(mn, "Reach") || std::strstr(mn, "Palm") || std::strstr(mn, "Closest") || std::strstr(mn, "Nearest") || std::strstr(mn, "Overlap");
+    }
+    return false;
+}
 
 // Classes that can never have a useful running copy: event delegates, enums, structs (they live inside other objects).
 bool shotUselessParent(const std::string& parent) { return parent == "MulticastDelegate" || parent == "Delegate" || parent == "Enum" || parent == "ValueType"; }
@@ -943,10 +958,8 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     std::vector<char> detailed(classes.size(), 0);
     int priorityCount = 0, otherCount = 0;
     unsigned noneCount = 0, ilCount = 0, otherLibCount = 0, outsideCount = 0;
-    int deepDumps = 0;                          // stage D10: code dumps of scoring methods written so far
-    const int kMaxDeepDumps = 28;
-    int hitboxDumps = 0;                        // stage D11: code dumps of the hand-collider methods written so far
-    const int kMaxHitboxDumps = 12;
+    int grabDumps = 0;                          // stage D11b: code dumps of the grab methods written so far
+    const int kMaxGrabDumps = 26;
     auto detail = [&](size_t idx, bool priority, int capF = 0, int capM = 0) {
         const ClassRef& c = classes[idx];
         const AsmRef& ar = asms[c.asmIndex];
@@ -988,17 +1001,16 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
                 }
             }
             out.line("scan:   method %s(%u) : %s %s%s%s", mn ? mn : "?", api.method_get_param_count(m), typeName(api, api.method_get_return_type(m)).c_str(), where, codeText, (mflags & 0x10) ? " static" : "");
-            // stage D10: in the ball-and-hoops report the first 320 bytes of the code of the SCORING methods (names with Score / PointValue / Points) are written out too.
-            // They are never run: read offline, the calls inside them (and the methods they call, whose rva is listed above) show how a basket becomes points.
-            const bool hitboxCode = shot && mn && (std::strstr(mn, "Collider") || std::strstr(mn, "HandCollision") || std::strstr(mn, "KnockLoose"));     // stage D11: how the hands' hitboxes are made / shown and how a touch becomes a steal
-            if (shot && kind == P_IL2CPP && mn && ((!hitboxCode && deepDumps < kMaxDeepDumps) || (hitboxCode && hitboxDumps < kMaxHitboxDumps)) &&
-                (hitboxCode || std::strstr(mn, "Score") || std::strstr(mn, "PointValue") || std::strstr(mn, "Points"))) {
-                unsigned char cb[320];
+            // stage D11b: in the ball-and-hoops report the first 640 bytes of the code of the GRAB methods are written out too (never run: read offline, the fields they load
+            // and the methods they call show which numbers decide whether a hand can grab the ball). Which methods: BallControl's grab functions and Basketball's sphere-grab
+            // trigger functions by exact name; Autohand.Hand's by name part (its method names are not known yet), without the trivial get_ / set_ / add_ / remove_ ones.
+            if (shot && kind == P_IL2CPP && mn && grabDumps < kMaxGrabDumps && grabMethodWanted(c.full, mn)) {
+                unsigned char cb[640];
                 if (pointerPipe().copy(static_cast<uintptr_t>(ptr), cb, sizeof cb)) {
                     std::string hex; hex.reserve(sizeof cb * 2);
                     for (size_t bi = 0; bi < sizeof cb; ++bi) { char two[4]; std::snprintf(two, sizeof two, "%02x", static_cast<unsigned>(cb[bi])); hex += two; }
-                    out.line("scan:   code320 %s.%s(%u) rva=%lx : %s", c.name.c_str(), mn, api.method_get_param_count(m), rva, hex.c_str());
-                    if (hitboxCode) ++hitboxDumps; else ++deepDumps;
+                    out.line("scan:   code640 %s.%s(%u) rva=%lx : %s", c.name.c_str(), mn, api.method_get_param_count(m), rva, hex.c_str());
+                    ++grabDumps;
                 }
             }
         }

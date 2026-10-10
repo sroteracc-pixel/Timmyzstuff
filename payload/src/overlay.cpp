@@ -399,7 +399,7 @@ void setPointsInfo(int state, const char* headline, const char* lastBasket) {
 
 HitboxAsk hitboxAsk() {
     std::lock_guard<std::mutex> g(gMutex);
-    return HitboxAsk{gState.hitboxOn, gState.hitboxMul, gState.hitboxSee};
+    return HitboxAsk{gState.hitboxOn, gState.hitboxMul};
 }
 void setHitboxInfo(int state, const char* headline) {
     const std::string h = headline ? headline : "";

@@ -110,14 +110,17 @@ int main(int, char** argv) {
   void (*pstate)(double*) = (void (*)(double*))dlsym(il, "fake_pts_state");      // stage D10: the pretend scoreboard and the ball's point value
   double p[8] = {0}; if (pstate) pstate(p);
   std::printf("PTS score=%.0f baskets=%.0f value=%.0f\n", p[0], p[1], p[2]);
-  {   // stage D11: how big the pretend hitboxes are at the end (size now / the game's own size), and what the pretend display did
+  {   // stage D11b: how big the pretend hitboxes and grab-reach values are at the end (value now / the game's own value), and whether the game's own display function was (wrongly) called
     void (*hcol)(int, double*) = (void (*)(int, double*))dlsym(il, "fake_hb_col");
     void (*hst)(double*) = (void (*)(double*))dlsym(il, "fake_hb_state");
-    double c0[8] = {0}, c5[8] = {0}, c10[8] = {0}, c4[8] = {0}, hs[12] = {0};
+    void (*htw)(int, double*) = (void (*)(int, double*))dlsym(il, "fake_hb_tw");
+    double c0[8] = {0}, c5[8] = {0}, c10[8] = {0}, c4[8] = {0}, hs[12] = {0}, w0[13] = {0}, w1[13] = {0}, w2[13] = {0};
     if (hcol) { hcol(0, c0); hcol(5, c5); hcol(10, c10); hcol(4, c4); }
     if (hst) hst(hs);
-    std::printf("HB mine_left=%.2f mine_right=%.2f other=%.2f mesh=%.2f sets=%.0f viz=%.0f,%.0f,%.0f vizcalls=%.0f\n", c0[4] > 0 ? c0[1] / c0[4] : -1, c5[4] > 0 ? c5[1] / c5[4] : -1, c10[4] > 0 ? c10[1] / c10[4] : -1,
-                c4[4] > 0 ? c4[1] / c4[4] : 1.0, hs[0], hs[3], hs[4], hs[5], hs[2]);
+    if (htw) { htw(0, w0); htw(1, w1); htw(2, w2); }
+    auto rt = [](const double* w, int now, int own) { return w[own] > 0 ? w[now] / w[own] : -1.0; };
+    std::printf("HB mine_left=%.2f mine_right=%.2f other=%.2f mesh=%.2f sets=%.0f vizcalls=%.0f grab=%.2f,%.2f,%.2f gscale=%.2f,%.2f,%.2f gdist=%.2f,%.2f,%.2f\n", c0[4] > 0 ? c0[1] / c0[4] : -1, c5[4] > 0 ? c5[1] / c5[4] : -1, c10[4] > 0 ? c10[1] / c10[4] : -1,
+                c4[4] > 0 ? c4[1] / c4[4] : 1.0, hs[0], hs[2], rt(w0, 0, 6), rt(w1, 0, 6), rt(w2, 0, 6), rt(w0, 3, 9), rt(w1, 3, 9), rt(w2, 3, 9), rt(w0, 2, 8), rt(w1, 2, 8), rt(w2, 2, 8));
   }
   return 0;
 }
@@ -144,8 +147,8 @@ run pts "" 2 4 TZ_TEST_POINTS=11                                             # s
 run ptsaim 50 2 4 TZ_TEST_POINTS=11                                          # Shot points ON at 11 AND the Direct Aimbot ON: the throw goes in and the pretend scoreboard counts 11
 run ptsbig 50 2 4 TZ_TEST_POINTS=999                                         # Shot points at the last stop (999)
 run hbx "" 2 4 TZ_TEST_HITBOX=3.0                                             # stage D11: Hitbox expander ON at 3.0x from 3 s on, the Aimbot never turns on
-run hbsee "" 2 4 TZ_TEST_HITBOX_SEE=1                                         # stage D11: See hitbox ON (the Hitbox expander stays off)
-run hball 50 2 4 TZ_TEST_HITBOX=2.5 TZ_TEST_HITBOX_SEE=1 TZ_TEST_POINTS=11    # stage D11: everything at once: Aimbot (Direct) + Shot points 11 + Hitbox expander 2.5x + See hitbox
+run hbmax "" 2 4 TZ_TEST_HITBOX=10.0                                          # stage D11b: Hitbox expander ON at the top of the slider (10.0x)
+run hball 50 2 4 TZ_TEST_HITBOX=2.5 TZ_TEST_POINTS=11                         # stage D11b: everything at once: Aimbot (Direct) + Shot points 11 + Hitbox expander 2.5x
 wait
 
 echo "== aimbot ON, Unlimited: the real payload aims the pretend ball"
@@ -216,7 +219,7 @@ echo "== stage D9: Aimbot Bank ON: the real payload makes a bank shot with the p
 O="$W/bank.out"; F="$W/bank/timmyzstuff_facts.txt"; cp -f "$F" /tmp/facts_aim_bank.txt
 check "the game still starts (65542)" 'grep -q "RESULT=65542" "$O"'
 check "the game always got the real controller answer (BAD=0)" 'grep -q "bad=0" "$O"'
-check "the facts header says stage D11" 'grep -q "^Timmyzstuff facts (stage D11" "$F"'
+check "the facts header says stage D11b" 'grep -q "^Timmyzstuff facts (stage D11b" "$F"'
 check "the facts say what the menu asks: BANK mode" 'grep -q "^aimbot: menu asks aimbot=ON (BANK), max shot distance=Unlimited, hold Y to aim=off  \[stage D9:" "$F"'
 check "the bank code found the game's backboard code" 'grep -q "aim: BANK: found the game.s backboard code" "$F"'
 check "the backboards were measured" 'grep -q "aim: BANK: measured the backboard of the goal with its ring at" "$F"'
@@ -271,29 +274,29 @@ check "the hitbox part found where the hands keep their hitboxes" 'grep -q "^hit
 check "it found both hands and 10 hitboxes (8 can be resized)" 'grep -q "^hitbox: your hands have 10 hitboxes (left hand 5, right hand 5): 8 can be resized" "$F"'
 check "it set 8 hitboxes to 3.0x" 'grep -q "^hitbox: set 8 hitboxes of your hands to 3.0x their own size" "$F"'
 check "at the end both of YOUR hands are 3.0 times the game size; the other player's hand and the mesh hitboxes are exactly the game size" 'grep -q "^HB mine_left=3.00 mine_right=3.00 other=1.00 mesh=1.00 " "$O"'
-check "the summary line says connected, 3.0x, hands 2, hitboxes 10" 'grep -q "hitbox: link connected | asked: expander 3.0x, see hitbox off | hands 2, hitboxes 10 (can be resized 8" "$F"'
-check "the display function was never called" 'grep -q " vizcalls=0$" "$O"'
+check "the summary line says connected, 3.0x, hands 2, hitboxes 10" 'grep -q "hitbox: link connected | asked: expander 3.0x | hands 2, hitboxes 10 (can be resized 8" "$F"'
+check "it set 8 grab-reach values (reach, palm radius, gravity distance, grab volume on both hands) to 3.0x" 'grep -q "^hitbox: set 8 grab-reach values of your hands to 3.0x their own value" "$F" && grep -q "^hitbox: GRAB-REACH values found" "$F"'
+check "at the end the grab reach, the grab volume and the gravity distance of YOUR hands are 3.0x, the other player's hand 1.0x" 'grep -q " grab=3.00,3.00,1.00 gscale=3.00,3.00,1.00 gdist=3.00,3.00,1.00$" "$O"'
+check "the game's own display function was never called" 'grep -q " vizcalls=0 " "$O"'
 check "the Aimbot did NOT wake up: no aim switch line, no speed set, no decision" '! grep -q "^aim: switch turned ON" "$F" && grep -q " setvel=0 " "$O" && ! grep -q "decision:" "$F"'
 check "Shot points did not wake up either" '! grep -q "points: switch turned ON" "$F"'
 check "the movement link was not woken" '! grep -q "^link: " "$F" && ! grep -q "^movement: " "$F"'
 check "no memory addresses (0x1234...) in the facts file (sizes like 3.0x are fine)" '! grep -q "0x[0-9a-f]" "$F"'
-echo "== stage D11: See hitbox ON alone: the game's display is asked for on your two hands only; no size is changed"
-O="$W/hbsee.out"; F="$W/hbsee/timmyzstuff_facts.txt"; cp -f "$F" /tmp/facts_hitbox_see.txt
+echo "== stage D11b: Hitbox expander ON at the top of the slider (10.0x)"
+O="$W/hbmax.out"; F="$W/hbmax/timmyzstuff_facts.txt"; cp -f "$F" /tmp/facts_hitbox_max.txt
 check "the game still starts (65542) and got the real answers (BAD=0)" 'grep -q "RESULT=65542" "$O" && grep -q "bad=0" "$O"'
-check "the facts say See hitbox was turned ON" 'grep -q "^hitbox: See hitbox turned ON" "$F"'
-check "the display was shown on the left and the right hand, not on the other player's (viz=1,1,0)" 'grep -q " viz=1,1,0 vizcalls=2$" "$O"'
-check "no hitbox size was changed (everything 1.00, no set calls)" 'grep -q "^HB mine_left=1.00 mine_right=1.00 other=1.00 mesh=1.00 sets=0 " "$O"'
-check "the facts file says it asked the game for the display and cannot see what it draws" 'grep -q "^hitbox: asked the game to show its hand collider display on the left hand" "$F" && grep -q "I cannot see from here" "$F"'
-echo "== stage D11: everything at once: Aimbot (Direct) + Shot points 11 + Hitbox expander 2.5x + See hitbox"
+check "the facts say Hitbox expander ON at 10.0x" 'grep -q "^hitbox: Hitbox expander turned ON at 10.0x" "$F"'
+check "hitboxes and grab-reach values of YOUR hands are exactly 10 times the game's own; the other hand untouched" 'grep -q "^HB mine_left=10.00 mine_right=10.00 other=1.00 mesh=1.00 " "$O" && grep -q " grab=10.00,10.00,1.00 gscale=10.00,10.00,1.00 gdist=10.00,10.00,1.00$" "$O"'
+echo "== stage D11b: everything at once: Aimbot (Direct) + Shot points 11 + Hitbox expander 2.5x"
 O="$W/hball.out"; F="$W/hball/timmyzstuff_facts.txt"; cp -f "$F" /tmp/facts_hitbox_all.txt
 check "the game still starts (65542) and got the real answers (BAD=0)" 'grep -q "RESULT=65542" "$O" && grep -q "bad=0" "$O"'
 check "the throw was aimed once and went in" 'grep -q " setvel=1 " "$O" && grep -q " made=1 " "$O"'
 check "the pretend scoreboard counted 11 points" 'grep -q "^PTS score=11 baskets=1 value=11" "$O"'
 check "the hitboxes ended at 2.5x (mine), the other hand and the meshes untouched" 'grep -q "^HB mine_left=2.50 mine_right=2.50 other=1.00 mesh=1.00 " "$O"'
-check "the display is on for both hands" 'grep -q " viz=1,1,0 " "$O"'
+check "the grab-reach values ended at 2.5x on your hands too" 'grep -q " grab=2.50,2.50,1.00 gscale=2.50,2.50,1.00 gdist=2.50,2.50,1.00$" "$O"'
 check "the facts file has the lines of all three parts" 'grep -q "^hitbox: set 8 hitboxes of your hands to 2.5x" "$F" && grep -q "^points: BASKET on ball" "$F" && grep -q "decision: AIM" "$F"'
 echo "== the other runs never touched the points or the hitboxes"
-for n in on bank pts; do check "run '$n': no hitbox activity and the pretend hitboxes are exactly the game's size" '! grep -q "hitbox: Hitbox expander turned ON\|hitbox: See hitbox turned ON\|hitbox: set [0-9]" "$W/$n/timmyzstuff_facts.txt" && grep -q "^HB mine_left=1.00 mine_right=1.00 other=1.00 mesh=1.00 sets=0 " "$W/$n.out"'; done
+for n in on bank pts; do check "run '$n': no hitbox activity and the pretend hitboxes are exactly the game's size" '! grep -q "hitbox: Hitbox expander turned ON\|hitbox: set [0-9]" "$W/$n/timmyzstuff_facts.txt" && grep -q "^HB mine_left=1.00 mine_right=1.00 other=1.00 mesh=1.00 sets=0 vizcalls=0 grab=1.00,1.00,1.00 gscale=1.00,1.00,1.00 gdist=1.00,1.00,1.00$" "$W/$n.out"'; done
 echo "== the other runs never touched the points"
 check "Aimbot only: the scoreboard counted the game's own 3 (shot aimed) and there is no points activity" 'grep -q "^PTS score=3 baskets=1 value=3" "$W/on.out" || grep -q "^PTS score=0 baskets=0 value=3" "$W/on.out"; ! grep -q "points: switch turned ON" "$W/on/timmyzstuff_facts.txt"'
 check "Bank only: no points activity" '! grep -q "points: switch turned ON" "$W/bank/timmyzstuff_facts.txt"'

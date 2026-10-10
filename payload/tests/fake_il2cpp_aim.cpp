@@ -3,6 +3,7 @@
 // ShovelTools.GameManager); the engine functions have the real names and argument counts (UnityEngine.Rigidbody get_velocity / set_velocity / get_position ...).
 // The pretend ball is a real little physics simulation (Unity's step order: gravity, then drag, then move), so the test can check where a shot REALLY ends up.
 // Nothing here proves anything about the real game. It only proves our code does what it should against a game that behaves as I read it.
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -28,7 +29,9 @@ enum { M_NONE = 0, M_RB_GETVEL, M_RB_SETVEL, M_RB_GETPOS, M_RB_GETDRAG, M_RB_GET
        // stage D9b (finding the board's collider like the real game needs)
        M_TR_PARENT, M_CO_COMPS1, M_CO_COMPS2, M_PH_OVSPHERE2, M_PH_OVSPHERE3, M_PH_OVSPHERE4, M_PH_OVBOX2, M_PH_OVBOX5, M_OBJ_FIND1, M_OBJ_FIND2, M_OBJ_NAME, M_COL_TRIGGER, M_COL_ENABLED,
        // stage D11 (Hitbox expander): the engine's box / sphere / capsule collider sizes and the game's own "show hand colliders" function
-       M_BOX_GET, M_BOX_SET, M_SPH_SET, M_CAP_RGET, M_CAP_RSET, M_CAP_HGET, M_CAP_HSET, M_BC_VIZ };
+       M_BOX_GET, M_BOX_SET, M_SPH_SET, M_CAP_RGET, M_CAP_RSET, M_CAP_HGET, M_CAP_HSET, M_BC_VIZ,
+       // stage D11b: Transform.get_localScale / set_localScale (the hand's grab volume)
+       M_TF_GETLS, M_TF_SETLS };
 
 Klass kEnumState{"EGameState", "ShovelTools.GameManager", nullptr, {}, {}, 4, true, true, 4};
 Klass kOther{"OtherThing", "Game", nullptr, {}, {}, 0, false, false, 32};
@@ -105,8 +108,9 @@ void buildFields() {       // called for every new scenario, so a scenario that 
                     {"_backboardSize", &tVec3, 100, 0}, {"_backboardOffset", &tVec3, 112, 0}};
     kGman.fields = {{"_goals", &tGoalList, 24, 0}, {"_instance", &tGman, 0, 0x10}};
     kBcm.fields.push_back({"_rightBallControl", &tBallControl, 48, 0});
-    kBallControl.fields = {{"_hand", &tHand, 48, 0}, {"_palmCollider", &tGameObject, 112, 0}, {"_fingerVizPrefab", &tGameObject, 160, 0}};
-    kHand.fields = {{"left", &tBool, 80, 0}, {"palmRadius", &tFloat, 96, 0}, {"_handColliders", &tColliderArr, 144, 0}, {"_hasAuthority", &tBool, 512, 0}};
+    kBallControl.fields = {{"_hand", &tHand, 48, 0}, {"_palmCollider", &tGameObject, 112, 0}, {"_fingerVizPrefab", &tGameObject, 160, 0},
+                          {"_grabVolume", &tTransform, 152, 0}, {"_gravityDistance", &tFloat, 168, 0}};
+    kHand.fields = {{"left", &tBool, 80, 0}, {"reachDistance", &tFloat, 92, 0}, {"palmRadius", &tFloat, 96, 0}, {"_handColliders", &tColliderArr, 144, 0}, {"_hasAuthority", &tBool, 512, 0}};
     kCombine.fields = {{"value__", &tInt, 0, 0}, {"Average", &tCombineE, 0, 0x56}, {"Multiply", &tCombineE, 0, 0x56}, {"Minimum", &tCombineE, 0, 0x56}, {"Maximum", &tCombineE, 0, 0x56}};
     kCcd.fields = {{"value__", &tInt, 0, 0}, {"Discrete", &tCcdE, 0, 0x56}, {"Continuous", &tCcdE, 0, 0x56}, {"ContinuousDynamic", &tCcdE, 0, 0x56}, {"ContinuousSpeculative", &tCcdE, 0, 0x56}};
 }
@@ -178,7 +182,8 @@ void buildMethods() {          // (also rebuilt for every scenario: a scenario t
     { Method* g = mk("get_size", 0, &tVec3, M_BOX_GET); Method* st = mk("set_size", 1, &tVoid, M_BOX_SET); st->ptypes = {&tVec3}; kBoxC.methods = {g, st}; }
     { Method* a = mk("get_radius", 0, &tFloat, M_CAP_RGET); Method* b = mk("set_radius", 1, &tVoid, M_CAP_RSET); b->ptypes = {&tFloat};
       Method* c = mk("get_height", 0, &tFloat, M_CAP_HGET); Method* d = mk("set_height", 1, &tVoid, M_CAP_HSET); d->ptypes = {&tFloat}; kCapsuleC.methods = {a, b, c, d}; }
-    { Method* v = mk("SetHandColliderVisual", 2, &tVoid, M_BC_VIZ); v->ptypes = {&tGameObject, &tFloat}; kBallControl.methods = {v}; }
+    { Method* v = mk("SetHandColliderVisual", 2, &tVoid, M_BC_VIZ); v->ptypes = {&tGameObject, &tFloat}; kBallControl.methods = {v}; }       // (still in the game; the link must never call it any more)
+    { Method* g = mk("get_localScale", 0, &tVec3, M_TF_GETLS); Method* st = mk("set_localScale", 1, &tVoid, M_TF_SETLS); st->ptypes = {&tVec3}; kTransform.methods.push_back(g); kTransform.methods.push_back(st); }
 }
 
 // ---------------------------------------------------------------- the pretend world
@@ -261,6 +266,12 @@ struct Hbx {
     std::map<unsigned char*, HbCol> cols;
     long sets = 0, gets = 0, vizCalls = 0; int viz[3] = {0, 0, 0}, vizOn[3] = {0, 0, 0}, vizOff[3] = {0, 0, 0};
     bool setThrows = false, getThrows = false, vizThrows = false, vizBool = false, icalls = false;
+    // stage D11b: the grab-reach values. A hand has reachDistance / palmRadius (floats in the Hand), a ball control has _gravityDistance (float) and _grabVolume (a Transform with a local scale).
+    unsigned char* tf[3] = {nullptr, nullptr, nullptr};            // the grab volume of each ball control
+    std::map<unsigned char*, std::array<double, 3>> scale;         // the local scale of every pretend Transform of the hands
+    double own[3][6] = {{0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0}};     // the game's OWN values per hand: reach, palm radius, gravity distance, scale x y z
+    bool tfSetThrows = false, tfGetThrows = false;
+    long tfSets = 0, tfGets = 0;
 };
 Hbx Hx;
 unsigned char* mkRaw(size_t size);                                  // defined further down
@@ -290,6 +301,13 @@ void buildHand(int h) {
     Hx.prefab[h] = makeObject(&kGameObject, 24);
     Hx.bc[h] = makeObject(&kBallControl, 232);
     putPtr(Hx.bc[h], 48, Hx.hand[h]); putPtr(Hx.bc[h], 160, Hx.prefab[h]);
+    // stage D11b: the grab-reach values (the sizes are 3x for the other player's hand, like its hitboxes)
+    Hx.own[h][0] = 0.20 * scale; Hx.own[h][1] = 0.05 * scale; Hx.own[h][2] = 0.07 * scale; Hx.own[h][3] = Hx.own[h][4] = Hx.own[h][5] = 0.10 * scale;
+    setF(Hx.hand[h], 92, static_cast<float>(Hx.own[h][0])); setF(Hx.hand[h], 96, static_cast<float>(Hx.own[h][1]));
+    setF(Hx.bc[h], 168, static_cast<float>(Hx.own[h][2]));
+    Hx.tf[h] = makeObject(&kTransform, 32);
+    Hx.scale[Hx.tf[h]] = {Hx.own[h][3], Hx.own[h][4], Hx.own[h][5]};
+    putPtr(Hx.bc[h], 152, Hx.tf[h]);
 }
 void buildHands() {
     Hx = Hbx();
@@ -719,10 +737,18 @@ EXPORT void fake_hb_set(const char* key, double a, double b) {
     (void)b;
     if (k == "set_throws") Hx.setThrows = a != 0;
     else if (k == "get_throws") Hx.getThrows = a != 0;
-    else if (k == "viz_throws") Hx.vizThrows = a != 0;
+    else if (k == "tf_set_throws") Hx.tfSetThrows = a != 0;
+    else if (k == "tf_get_throws") Hx.tfGetThrows = a != 0;
+    else if (k == "tw_game_reset") { for (int h = 0; h < 2; ++h) { setF(Hx.hand[h], 92, static_cast<float>(Hx.own[h][0])); setF(Hx.hand[h], 96, static_cast<float>(Hx.own[h][1])); setF(Hx.bc[h], 168, static_cast<float>(Hx.own[h][2]));
+                                       Hx.scale[Hx.tf[h]] = {Hx.own[h][3], Hx.own[h][4], Hx.own[h][5]}; } }                      // the game puts all your grab-reach values back to its own ones
+    else if (k == "tw_game_new") { for (int h = 0; h < 2; ++h) { for (int j = 0; j < 6; ++j) Hx.own[h][j] *= a; setF(Hx.hand[h], 92, static_cast<float>(Hx.own[h][0])); setF(Hx.hand[h], 96, static_cast<float>(Hx.own[h][1])); setF(Hx.bc[h], 168, static_cast<float>(Hx.own[h][2]));
+                                       Hx.scale[Hx.tf[h]] = {Hx.own[h][3], Hx.own[h][4], Hx.own[h][5]}; } }                      // ... to NEW own values
+    else if (k == "tf_destroy") { const uint64_t z = 0; std::memcpy(Hx.tf[static_cast<int>(a)] + 16, &z, 8); }
+    else if (k == "tf_null") putPtr(Hx.bc[static_cast<int>(a)], 152, nullptr);
+    else if (k == "tf_back") putPtr(Hx.bc[static_cast<int>(a)], 152, Hx.tf[static_cast<int>(a)]);
+    else if (k == "tf_swap") { const int h = static_cast<int>(a); Hx.tf[h] = makeObject(&kTransform, 32); Hx.scale[Hx.tf[h]] = {Hx.own[h][3], Hx.own[h][4], Hx.own[h][5]}; putPtr(Hx.bc[h], 152, Hx.tf[h]); }       // the game gives the hand a NEW grab volume
+    else if (k == "tw_zero") { setF(Hx.hand[static_cast<int>(a)], 92, 0.0f); Hx.own[static_cast<int>(a)][0] = 0; }          // a value that is 0 (multiplying changes nothing)
     else if (k == "icalls") Hx.icalls = a != 0;
-    else if (k == "viz_bool") { Hx.vizBool = true; kBallControl.methods[0]->ptypes = {&tGameObject, &tBool}; }
-    else if (k == "viz_weird") { kBallControl.methods[0]->ptypes = {&tInt, &tInt}; }
     else if (k == "game_reset") { for (int i = 0; i < 10; ++i) { HbCol& c = Hx.cols[Hx.order[static_cast<size_t>(i)]]; for (int j = 0; j < 3; ++j) c.v[j] = c.orig[j]; } }          // the game puts all your hitboxes back to their own size
     else if (k == "game_new_size") { for (int i = 0; i < 10; ++i) { HbCol& c = Hx.cols[Hx.order[static_cast<size_t>(i)]]; for (int j = 0; j < 3; ++j) { c.orig[j] *= a; c.v[j] = c.orig[j]; } } }    // ... to a NEW own size
     else if (k == "destroy_col") { const uint64_t z = 0; std::memcpy(Hx.order[static_cast<size_t>(a)] + 16, &z, 8); }
@@ -735,7 +761,7 @@ EXPORT void fake_hb_set(const char* key, double a, double b) {
     else if (k == "authority") { Hx.hand[0][512] = Hx.hand[1][512] = a != 0; }
     else if (k == "prefab_null") { putPtr(Hx.bc[0], 160, nullptr); putPtr(Hx.bc[1], 160, nullptr); }
     else if (k == "rebuild") {          // the game makes new hands (new avatar): new objects with their own default sizes; the old ones are destroyed
-        for (int h = 0; h < 2; ++h) { const uint64_t z = 0; std::memcpy(Hx.bc[h] + 16, &z, 8); std::memcpy(Hx.hand[h] + 16, &z, 8); for (int i = 0; i < 5; ++i) std::memcpy(Hx.order[static_cast<size_t>(5 * h + i)] + 16, &z, 8); }
+        for (int h = 0; h < 2; ++h) { const uint64_t z = 0; std::memcpy(Hx.bc[h] + 16, &z, 8); std::memcpy(Hx.hand[h] + 16, &z, 8); std::memcpy(Hx.tf[h] + 16, &z, 8); for (int i = 0; i < 5; ++i) std::memcpy(Hx.order[static_cast<size_t>(5 * h + i)] + 16, &z, 8); }
         std::vector<unsigned char*> keep(Hx.order.begin() + 10, Hx.order.end());
         unsigned char* oldBc2 = Hx.bc[2]; unsigned char* oldHand2 = Hx.hand[2]; unsigned char* oldArr2 = Hx.arr[2]; unsigned char* oldPref2 = Hx.prefab[2];
         std::vector<unsigned char*> oldOrder = Hx.order;
@@ -750,6 +776,26 @@ EXPORT void fake_hb_state(double* out) {
     out[0] = static_cast<double>(Hx.sets); out[1] = static_cast<double>(Hx.gets); out[2] = static_cast<double>(Hx.vizCalls);
     out[3] = Hx.viz[0]; out[4] = Hx.viz[1]; out[5] = Hx.viz[2]; out[6] = Hx.vizOn[0]; out[7] = Hx.vizOn[1]; out[8] = Hx.vizOff[0]; out[9] = Hx.vizOff[1];
 }
+// the grab-reach values of one hand: 0 reachDistance, 1 palmRadius, 2 _gravityDistance, 3-5 grab volume local scale now; 6-11 the same, the game's own; 12 grab volume alive
+EXPORT void fake_hb_tw(int h, double* out) {
+    for (int j = 0; j < 13; ++j) out[j] = 0;
+    if (h < 0 || h > 2) return;
+    out[0] = getF(Hx.hand[h], 92); out[1] = getF(Hx.hand[h], 96); out[2] = getF(Hx.bc[h], 168);
+    unsigned char* t = nullptr; std::memcpy(&t, Hx.bc[h] + 152, 8);
+    auto it = Hx.scale.find(Hx.tf[h]);
+    if (it != Hx.scale.end()) { out[3] = it->second[0]; out[4] = it->second[1]; out[5] = it->second[2]; }
+    for (int j = 0; j < 6; ++j) out[6 + j] = Hx.own[h][j];
+    uint64_t ca; std::memcpy(&ca, Hx.tf[h] + 16, 8); out[12] = ca ? 1 : 0;
+    (void)t;
+}
+// the GAME itself writes one grab-reach value (which: 0 reachDistance, 1 palmRadius, 2 _gravityDistance, 3-5 scale x y z) and takes it as its new own value
+EXPORT void fake_hb_twset(int h, int which, double v, int asOwn) {
+    if (h < 0 || h > 2 || which < 0 || which > 5) return;
+    if (which == 0) setF(Hx.hand[h], 92, static_cast<float>(v)); else if (which == 1) setF(Hx.hand[h], 96, static_cast<float>(v)); else if (which == 2) setF(Hx.bc[h], 168, static_cast<float>(v));
+    else Hx.scale[Hx.tf[h]][static_cast<size_t>(which - 3)] = v;
+    if (asOwn) Hx.own[h][which] = v;
+}
+EXPORT void fake_hb_tfcounts(double* out) { out[0] = static_cast<double>(Hx.tfGets); out[1] = static_cast<double>(Hx.tfSets); }
 // one hitbox: 0 kind, 1-3 size now, 4-6 the game's own size, 7 alive
 EXPORT void fake_hb_col(int i, double* out) {
     for (int j = 0; j < 8; ++j) out[j] = 0;
@@ -773,7 +819,7 @@ EXPORT double fake_hb_reach(int hand) {
 EXPORT void* fake_hb_object(int which, int hand) { return which == 0 ? Hx.bc[hand] : (which == 1 ? Hx.hand[hand] : (which == 2 ? Hx.arr[hand] : Hx.order[static_cast<size_t>(hand)])); }
 // hide ONE engine / game method of the hitbox classes (a game that was updated or stripped)
 EXPORT void fake_hb_hide(const char* klass, const char* method) {
-    Klass* all[] = {&kBoxC, &kSphere, &kCapsuleC, &kBallControl};
+    Klass* all[] = {&kBoxC, &kSphere, &kCapsuleC, &kBallControl, &kTransform};
     for (Klass* k : all) { if (k->name != klass) continue; for (size_t i = 0; i < k->methods.size();) { if (k->methods[i]->name == method) k->methods.erase(k->methods.begin() + static_cast<long>(i)); else ++i; } }
 }
 // change a class of the pretend game: action 0 = remove the field, 1 = give the field the wrong type (an int), 2 = remove the whole class from the game
@@ -835,6 +881,8 @@ static void icCapRSet(void* self, float v) { ++Hx.sets; if (HbCol* c = hbOf(self
 static float icCapHGet(void* self) { ++Hx.gets; HbCol* c = hbOf(self, 3); return c ? static_cast<float>(c->v[1]) : 0.0f; }
 static void icCapHSet(void* self, float v) { ++Hx.sets; if (HbCol* c = hbOf(self, 3)) c->v[1] = v; }
 static void icBoxGet(void* self, float* out) { ++Hx.gets; if (HbCol* c = hbOf(self, 1)) for (int i = 0; i < 3; ++i) out[i] = static_cast<float>(c->v[i]); }
+static void icTfGet(void* self, float* out) { ++Hx.tfGets; auto it = Hx.scale.find(static_cast<unsigned char*>(self)); if (it != Hx.scale.end()) for (int i = 0; i < 3; ++i) out[i] = static_cast<float>(it->second[static_cast<size_t>(i)]); }
+static void icTfSet(void* self, const float* in) { ++Hx.tfSets; auto it = Hx.scale.find(static_cast<unsigned char*>(self)); if (it != Hx.scale.end()) for (int i = 0; i < 3; ++i) it->second[static_cast<size_t>(i)] = in[i]; }
 static void icBoxSet(void* self, const float* in) { ++Hx.sets; if (HbCol* c = hbOf(self, 1)) for (int i = 0; i < 3; ++i) c->v[i] = in[i]; }
 EXPORT void* il2cpp_resolve_icall(const char* name) {
     if (!Hx.icalls || !name) return nullptr;
@@ -847,6 +895,8 @@ EXPORT void* il2cpp_resolve_icall(const char* name) {
     if (n == "UnityEngine.CapsuleCollider::set_height") return reinterpret_cast<void*>(&icCapHSet);
     if (n == "UnityEngine.BoxCollider::get_size_Injected(UnityEngine.Vector3&)") return reinterpret_cast<void*>(&icBoxGet);
     if (n == "UnityEngine.BoxCollider::set_size_Injected(UnityEngine.Vector3&)") return reinterpret_cast<void*>(&icBoxSet);
+    if (n == "UnityEngine.Transform::get_localScale_Injected(UnityEngine.Vector3&)") return reinterpret_cast<void*>(&icTfGet);
+    if (n == "UnityEngine.Transform::set_localScale_Injected(UnityEngine.Vector3&)") return reinterpret_cast<void*>(&icTfSet);
     return nullptr;
 }
 
@@ -1028,6 +1078,15 @@ EXPORT void* il2cpp_runtime_invoke(void* method, void* obj, void** params, void*
         ++Hx.sets; if (Hx.setThrows || !params) return bad();
         if (m->id == M_BOX_SET) { const float* f = static_cast<const float*>(params[0]); for (int i = 0; i < 3; ++i) c.v[i] = f[i]; }
         else { const float f = *static_cast<const float*>(params[0]); if (m->id == M_CAP_HSET) c.v[1] = f; else c.v[0] = f; }
+        return nullptr;
+    }
+    case M_TF_GETLS: case M_TF_SETLS: {
+        unsigned char* o = static_cast<unsigned char*>(obj);
+        auto it = Hx.scale.find(o); if (it == Hx.scale.end()) return bad();
+        uint64_t ca; std::memcpy(&ca, o + 16, 8); if (!ca) return bad();               // a destroyed engine object: the engine throws
+        if (m->id == M_TF_GETLS) { ++Hx.tfGets; if (Hx.tfGetThrows) return bad(); return boxVec(it->second[0], it->second[1], it->second[2]); }
+        ++Hx.tfSets; if (Hx.tfSetThrows || !params) return bad();
+        const float* f = static_cast<const float*>(params[0]); for (int i = 0; i < 3; ++i) it->second[static_cast<size_t>(i)] = f[i];
         return nullptr;
     }
     case M_BC_VIZ: {

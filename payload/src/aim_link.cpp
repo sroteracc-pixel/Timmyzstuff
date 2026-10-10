@@ -261,7 +261,7 @@ void AimLink::loop() {
                 std::lock_guard<std::mutex> lock(mu_);
                 if (layoutReady_.load() && !failed_ && mode_.load() == 2 && !bankReady_.load() && now >= nextBankLayoutAt_) doBank = true;
                 if (layoutReady_.load() && !failed_ && points_.load() != 0 && !pointsReady_.load() && !pointsDead_ && now >= nextPointsAt_) doPoints = true;
-                if (layoutReady_.load() && !failed_ && (hitboxX10_.load() != 0 || hitboxSee_.load()) && !hitboxReady_.load() && !hitboxDead_.load() && now >= nextHitboxAt_) doHitbox = true;
+                if (layoutReady_.load() && !failed_ && hitboxX10_.load() != 0 && !hitboxReady_.load() && !hitboxDead_.load() && now >= nextHitboxAt_) doHitbox = true;
             }
             if (doHitbox) {
                 std::string why; bool transient = false;
@@ -671,7 +671,7 @@ void AimLink::onGameThread() {
         pointsStandDown();
     }
 
-    // stage D11 ("Hitbox expander" + "See hitbox"): your hands' hitboxes. (Calls a few engine functions, at most ten times a second, only when something changed.)
+    // stage D11b ("Hitbox expander" + grab reach): your hands' hitboxes and the numbers that decide how far a hand can grab. (Calls a few engine functions, at most ten times a second, only when something changed.)
     hitboxTick(now);
 }
 
