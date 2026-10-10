@@ -73,6 +73,11 @@ AimAsk aimAsk();
 struct PointsAsk { bool on; float stop; };
 PointsAsk pointsAsk();
 void setPointsInfo(int state, const char* headline, const char* lastBasket);     // state: 0 off, 1 connected, 2 looking for your ball, 3 failed
+// stage D11 (Troll page, "Hitbox expander" + "See hitbox"): what the page asks for right now, and the status line going back to the page.
+// `mul` is the slider value 1.0 .. 5.0 (1.0 = normal size). `see` is the See hitbox switch.
+struct HitboxAsk { bool on; float mul; bool see; };
+HitboxAsk hitboxAsk();
+void setHitboxInfo(int state, const char* headline);     // state: 0 off, 1 connected, 2 looking for your hands, 3 failed
 
 // True while the menu is open, and for a moment after it closes. The input doorway uses this to hide
 // button presses from the game so that clicking the menu does not also play the game.

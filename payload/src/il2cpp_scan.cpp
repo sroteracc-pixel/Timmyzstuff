@@ -758,6 +758,8 @@ const ShotTarget kShotTargets[] = {
     // stage D10 ("Shot points"): the game's SCORING classes. The earlier files only list their names (ScoreManager has 17 fields and 16 methods, PlayerNetworked keeps the
     // score that is shared with the other players, ScoreSync is that shared score itself). Written out in full so the next step can see how a basket becomes points.
     {"ScoreManager", 0, 0}, {"PlayerScore", 0, 0}, {"ScoreSync", 0, 0}, {"ScoreSyncModel", 0, 0}, {"ScoreSyncHelper", 0, 0}, {"PlayerNetworked", 0, 0}, {"TeamScorePanelUI", 0, 0},
+    // stage D11 ("Hitbox expander"): the hand (Autohand.Hand: its _handColliders list and the "show hand colliders" function). BallControl and Basketball (CheckHandCollision) are above.
+    {"Hand", 0, 0},
     {nullptr, 0, 0}};
 // The network library of the game (Normcore: "Normal.Realtime.dll"). Written out with limits (who owns an object, how to ask for ownership).
 const char* const kNetClasses[] = {"Normal.Realtime.RealtimeView", "Normal.Realtime.RealtimeTransform", nullptr};
@@ -943,6 +945,8 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     unsigned noneCount = 0, ilCount = 0, otherLibCount = 0, outsideCount = 0;
     int deepDumps = 0;                          // stage D10: code dumps of scoring methods written so far
     const int kMaxDeepDumps = 28;
+    int hitboxDumps = 0;                        // stage D11: code dumps of the hand-collider methods written so far
+    const int kMaxHitboxDumps = 12;
     auto detail = [&](size_t idx, bool priority, int capF = 0, int capM = 0) {
         const ClassRef& c = classes[idx];
         const AsmRef& ar = asms[c.asmIndex];
@@ -986,14 +990,15 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
             out.line("scan:   method %s(%u) : %s %s%s%s", mn ? mn : "?", api.method_get_param_count(m), typeName(api, api.method_get_return_type(m)).c_str(), where, codeText, (mflags & 0x10) ? " static" : "");
             // stage D10: in the ball-and-hoops report the first 320 bytes of the code of the SCORING methods (names with Score / PointValue / Points) are written out too.
             // They are never run: read offline, the calls inside them (and the methods they call, whose rva is listed above) show how a basket becomes points.
-            if (shot && kind == P_IL2CPP && mn && deepDumps < kMaxDeepDumps &&
-                (std::strstr(mn, "Score") || std::strstr(mn, "PointValue") || std::strstr(mn, "Points"))) {
+            const bool hitboxCode = shot && mn && (std::strstr(mn, "Collider") || std::strstr(mn, "HandCollision") || std::strstr(mn, "KnockLoose"));     // stage D11: how the hands' hitboxes are made / shown and how a touch becomes a steal
+            if (shot && kind == P_IL2CPP && mn && ((!hitboxCode && deepDumps < kMaxDeepDumps) || (hitboxCode && hitboxDumps < kMaxHitboxDumps)) &&
+                (hitboxCode || std::strstr(mn, "Score") || std::strstr(mn, "PointValue") || std::strstr(mn, "Points"))) {
                 unsigned char cb[320];
                 if (pointerPipe().copy(static_cast<uintptr_t>(ptr), cb, sizeof cb)) {
                     std::string hex; hex.reserve(sizeof cb * 2);
                     for (size_t bi = 0; bi < sizeof cb; ++bi) { char two[4]; std::snprintf(two, sizeof two, "%02x", static_cast<unsigned>(cb[bi])); hex += two; }
                     out.line("scan:   code320 %s.%s(%u) rva=%lx : %s", c.name.c_str(), mn, api.method_get_param_count(m), rva, hex.c_str());
-                    ++deepDumps;
+                    if (hitboxCode) ++hitboxDumps; else ++deepDumps;
                 }
             }
         }

@@ -397,6 +397,18 @@ void setPointsInfo(int state, const char* headline, const char* lastBasket) {
     }
 }
 
+HitboxAsk hitboxAsk() {
+    std::lock_guard<std::mutex> g(gMutex);
+    return HitboxAsk{gState.hitboxOn, gState.hitboxMul, gState.hitboxSee};
+}
+void setHitboxInfo(int state, const char* headline) {
+    const std::string h = headline ? headline : "";
+    std::lock_guard<std::mutex> g(gMutex);
+    if (gState.hitboxLinkState != state || gState.hitboxHeadline != h) {
+        gState.hitboxLinkState = state; gState.hitboxHeadline = h; gDirty = true;
+    }
+}
+
 bool inputBlocked() { return gShow.load(std::memory_order_acquire) || nowMs() < gMaskUntilMs.load(std::memory_order_relaxed); }
 int filterControllerState(int rc, void* out) {
     const bool block = out && rc >= 0 && inputBlocked();

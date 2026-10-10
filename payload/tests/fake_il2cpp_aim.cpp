@@ -26,7 +26,9 @@ enum { M_NONE = 0, M_RB_GETVEL, M_RB_SETVEL, M_RB_GETPOS, M_RB_GETDRAG, M_RB_GET
        M_TR_POS, M_TR_SCALE, M_TR_CHILDCOUNT, M_TR_GETCHILD, M_CO_TRANSFORM, M_CO_GETCOMP_STR, M_CO_GETCOMP, M_CO_GETKIDS, M_CO_GETPARENT, M_COL_BOUNDS, M_COL_MATERIAL, M_SPH_RADIUS,
        M_MAT_BOUNCE, M_MAT_DYN, M_MAT_STAT, M_MAT_BCOMB, M_MAT_FCOMB, M_RB_ANGVEL, M_RB_ANGDRAG, M_RB_MASS, M_RB_INERTIA, M_RB_CCD, M_PH_BOUNCETHR, M_GOAL_RIM, M_GOAL_BOARD, M_GMAN_INSTANCE2,
        // stage D9b (finding the board's collider like the real game needs)
-       M_TR_PARENT, M_CO_COMPS1, M_CO_COMPS2, M_PH_OVSPHERE2, M_PH_OVSPHERE3, M_PH_OVSPHERE4, M_PH_OVBOX2, M_PH_OVBOX5, M_OBJ_FIND1, M_OBJ_FIND2, M_OBJ_NAME, M_COL_TRIGGER, M_COL_ENABLED };
+       M_TR_PARENT, M_CO_COMPS1, M_CO_COMPS2, M_PH_OVSPHERE2, M_PH_OVSPHERE3, M_PH_OVSPHERE4, M_PH_OVBOX2, M_PH_OVBOX5, M_OBJ_FIND1, M_OBJ_FIND2, M_OBJ_NAME, M_COL_TRIGGER, M_COL_ENABLED,
+       // stage D11 (Hitbox expander): the engine's box / sphere / capsule collider sizes and the game's own "show hand colliders" function
+       M_BOX_GET, M_BOX_SET, M_SPH_SET, M_CAP_RGET, M_CAP_RSET, M_CAP_HGET, M_CAP_HSET, M_BC_VIZ };
 
 Klass kEnumState{"EGameState", "ShovelTools.GameManager", nullptr, {}, {}, 4, true, true, 4};
 Klass kOther{"OtherThing", "Game", nullptr, {}, {}, 0, false, false, 32};
@@ -59,12 +61,21 @@ Klass kEnumVert{"LocomotionVerticalState", "", nullptr, {}, {}, 4, true, true, 4
 Type tBall{"ShovelTools.Basketball", &kBall}, tBcm{"ShovelTools.BallControlManager", &kBcm}, tLoco{"ShovelTools.PlayerLocomotion", &kLoco},
      tVert{"ShovelTools.PlayerLocomotion.LocomotionVerticalState", &kEnumVert};
 
+// stage D11 (Hitbox expander): the game's BallControl and Autohand.Hand and the engine's other collider kinds. Names, types and positions are copied from the real facts files.
+Klass kGameObject{"GameObject", "UnityEngine", &kObjectU, {}, {}, 0, false, false, 24};
+Klass kBoxC{"BoxCollider", "UnityEngine", &kCollider, {}, {}, 0, false, false, 32};
+Klass kCapsuleC{"CapsuleCollider", "UnityEngine", &kCollider, {}, {}, 0, false, false, 32};
+Klass kMeshC{"MeshCollider", "UnityEngine", &kCollider, {}, {}, 0, false, false, 32};
+Klass kBallControl{"BallControl", "ShovelTools", &kBehaviour, {}, {}, 0, false, false, 232};
+Klass kHand{"Hand", "Autohand", &kBehaviour, {}, {}, 0, false, false, 880};
+Type tGameObject{"UnityEngine.GameObject", &kGameObject}, tBallControl{"ShovelTools.BallControl", &kBallControl}, tHand{"Autohand.Hand", &kHand}, tColliderArr{"UnityEngine.Collider[]", &kOther};
+
 char gCode[0x1000];
 Method* mk(const char* n, unsigned p, Type* r, int id, uint32_t fl = 0) { return new Method{reinterpret_cast<uint64_t>(gCode) + 0x100 + static_cast<uint64_t>(id) * 16, n, p, r, fl, id, {}}; }
 
-Image iGame{"Assembly-CSharp", {&kBall, &kBcm, &kGm, &kLoco, &kEnumVert, &kProps, &kGoal, &kGman}, {}};
-Image iPhys{"UnityEngine.PhysicsModule", {&kRigidbody, &kPhysics, &kCollider, &kSphere, &kPhysMat, &kCombine, &kCcd}, {}};
-Image iCore{"UnityEngine.CoreModule", {&kObjectU, &kComponent, &kTime, &kTransform}, {}};
+Image iGame{"Assembly-CSharp", {&kBall, &kBcm, &kGm, &kLoco, &kEnumVert, &kProps, &kGoal, &kGman, &kBallControl, &kHand}, {}};
+Image iPhys{"UnityEngine.PhysicsModule", {&kRigidbody, &kPhysics, &kCollider, &kSphere, &kPhysMat, &kCombine, &kCcd, &kBoxC, &kCapsuleC, &kMeshC}, {}};
+Image iCore{"UnityEngine.CoreModule", {&kObjectU, &kComponent, &kTime, &kTransform, &kGameObject}, {}};
 Image iMscorlib{"mscorlib", {}, {}};
 void* gAssemblies[4] = {&iMscorlib, &iGame, &iPhys, &iCore};
 int gDomain = 1;
@@ -77,7 +88,7 @@ void buildFields() {       // called for every new scenario, so a scenario that 
          {"_northHoop01Position", &tVec3, 204, 0}, {"_southHoop01Position", &tVec3, 216, 0}, {"_northHoop02Position", &tVec3, 228, 0}, {"_southHoop02Position", &tVec3, 240, 0},
          {"_hoopRadius", &tFloat, 304, 0}, {"_currentBallPosition", &tVec3, 316, 0}, {"_dragValuesWereCleared", &tBool, 348, 0}, {"_originalDrag", &tFloat, 352, 0},
          {"_unheldTime", &tFloat, 388, 0}, {"_basketballState", &tInt, 396, 0}, {"_NEGATIVE_VELOCITY_Y", &tFloat, 0, 0x10}};
-    kBcm.fields = {{"_leftBallControl", &tOther, 40, 0}, {"_isAI", &tBool, 290, 0}, {"_basketballRigidbody", &tRB, 152, 0}, {"_basketball", &tBall, 168, 0},
+    kBcm.fields = {{"_leftBallControl", &tBallControl, 40, 0}, {"_isAI", &tBool, 290, 0}, {"_basketballRigidbody", &tRB, 152, 0}, {"_basketball", &tBall, 168, 0},
          {"_releasedLeftTimer", &tFloat, 200, 0}, {"_releasedRightTimer", &tFloat, 204, 0}, {"lastReleaseTime", &tFloat, 384, 0}, {"_lastRawThrowVelocity", &tVec3, 388, 0},
          {"_playerLocomotion", &tLoco, 144, 0}};      // (last in the list, so the tests that remove fields by number keep working)
     kLoco.fields = {{"_isLeftJumpPressed", &tBool, 240, 0}, {"_isRightJumpPressed", &tBool, 241, 0}, {"_locomotionState", &tInt, 812, 0}, {"_locomotionVerticalState", &tVert, 828, 0}};
@@ -93,6 +104,9 @@ void buildFields() {       // called for every new scenario, so a scenario that 
                     {"_backboardNormal", &tVec3, 56, 0}, {"_bankGridRows", &tInt, 68, 0}, {"_bankGridCols", &tInt, 72, 0}, {"_bankShotBoundsSize", &tVec3, 76, 0}, {"_bankShotBoundsOffset", &tVec3, 88, 0},
                     {"_backboardSize", &tVec3, 100, 0}, {"_backboardOffset", &tVec3, 112, 0}};
     kGman.fields = {{"_goals", &tGoalList, 24, 0}, {"_instance", &tGman, 0, 0x10}};
+    kBcm.fields.push_back({"_rightBallControl", &tBallControl, 48, 0});
+    kBallControl.fields = {{"_hand", &tHand, 48, 0}, {"_palmCollider", &tGameObject, 112, 0}, {"_fingerVizPrefab", &tGameObject, 160, 0}};
+    kHand.fields = {{"left", &tBool, 80, 0}, {"palmRadius", &tFloat, 96, 0}, {"_handColliders", &tColliderArr, 144, 0}, {"_hasAuthority", &tBool, 512, 0}};
     kCombine.fields = {{"value__", &tInt, 0, 0}, {"Average", &tCombineE, 0, 0x56}, {"Multiply", &tCombineE, 0, 0x56}, {"Minimum", &tCombineE, 0, 0x56}, {"Maximum", &tCombineE, 0, 0x56}};
     kCcd.fields = {{"value__", &tInt, 0, 0}, {"Discrete", &tCcdE, 0, 0x56}, {"Continuous", &tCcdE, 0, 0x56}, {"ContinuousDynamic", &tCcdE, 0, 0x56}, {"ContinuousSpeculative", &tCcdE, 0, 0x56}};
 }
@@ -109,6 +123,7 @@ void init() {
     kGoal.name = "BasketballGoal"; kGoal.ns = "ShovelTools"; kGoal.parent = &kBehaviour; kGoal.instanceSize = 128;
     kGman.name = "BasketballGoalManager"; kGman.ns = "ShovelTools"; kGman.parent = &kBehaviour; kGman.instanceSize = 40;
     kComponent.parent = &kObjectU;
+    kBallControl.parent = &kBehaviour; kHand.parent = &kBehaviour;
     buildFields();
     buildMethods();
 }
@@ -158,6 +173,12 @@ void buildMethods() {          // (also rebuilt for every scenario: a scenario t
         kObjectU.methods = {mk("get_name", 0, &tString, M_OBJ_NAME), f2, f1};
     }
     kCollider.methods.push_back(mk("get_isTrigger", 0, &tBool, M_COL_TRIGGER)); kCollider.methods.push_back(mk("get_enabled", 0, &tBool, M_COL_ENABLED));
+    // stage D11: the engine's hitbox sizes (set_radius only exists on the sphere from now on; the ball's own sphere still uses get_radius only)
+    { Method* sr = mk("set_radius", 1, &tVoid, M_SPH_SET); sr->ptypes = {&tFloat}; kSphere.methods.push_back(sr); }
+    { Method* g = mk("get_size", 0, &tVec3, M_BOX_GET); Method* st = mk("set_size", 1, &tVoid, M_BOX_SET); st->ptypes = {&tVec3}; kBoxC.methods = {g, st}; }
+    { Method* a = mk("get_radius", 0, &tFloat, M_CAP_RGET); Method* b = mk("set_radius", 1, &tVoid, M_CAP_RSET); b->ptypes = {&tFloat};
+      Method* c = mk("get_height", 0, &tFloat, M_CAP_HGET); Method* d = mk("set_height", 1, &tVoid, M_CAP_HSET); d->ptypes = {&tFloat}; kCapsuleC.methods = {a, b, c, d}; }
+    { Method* v = mk("SetHandColliderVisual", 2, &tVoid, M_BC_VIZ); v->ptypes = {&tGameObject, &tFloat}; kBallControl.methods = {v}; }
 }
 
 // ---------------------------------------------------------------- the pretend world
@@ -229,6 +250,52 @@ struct Pts {
 Pts Ps;
 int getPropsValue(unsigned char* props) { int v = 0; if (props) std::memcpy(&v, props + 164, 4); return v; }
 void setPropsValue(unsigned char* props, int v) { if (props) std::memcpy(props + 164, &v, 4); }
+
+// ---------------------------------------------------------------- stage D11: the pretend hands and their hitboxes
+// Two hands of YOURS (reached from your ball control manager: _leftBallControl / _rightBallControl -> _hand -> _handColliders) and one hand of ANOTHER player (never linked from your
+// ball control manager). Each hand has 5 hitboxes: a box, a sphere, two capsules and a mesh collider (a kind whose size cannot be changed). Index 0-4 left, 5-9 right, 10-14 the other player's.
+struct HbCol { int kind = 0; double v[3] = {0, 0, 0}, orig[3] = {0, 0, 0}; };
+struct Hbx {
+    unsigned char *bc[3] = {nullptr, nullptr, nullptr}, *hand[3] = {nullptr, nullptr, nullptr}, *arr[3] = {nullptr, nullptr, nullptr}, *prefab[3] = {nullptr, nullptr, nullptr};
+    std::vector<unsigned char*> order;
+    std::map<unsigned char*, HbCol> cols;
+    long sets = 0, gets = 0, vizCalls = 0; int viz[3] = {0, 0, 0}, vizOn[3] = {0, 0, 0}, vizOff[3] = {0, 0, 0};
+    bool setThrows = false, getThrows = false, vizThrows = false, vizBool = false, icalls = false;
+};
+Hbx Hx;
+unsigned char* mkRaw(size_t size);                                  // defined further down
+void putPtr(unsigned char* o, int off, const void* p);              // defined further down
+unsigned char* mkHbArray(const std::vector<unsigned char*>& v) {
+    unsigned char* a = mkRaw(40 + 8 * v.size());
+    const uint64_t n = v.size(); std::memcpy(a + 24, &n, 8);
+    for (size_t i = 0; i < v.size(); ++i) putPtr(a, 32 + 8 * static_cast<int>(i), v[i]);
+    return a;
+}
+// (re)builds one hand: 0 = your left, 1 = your right, 2 = another player's
+void buildHand(int h) {
+    const double scale = h == 2 ? 3.0 : 1.0;
+    std::vector<unsigned char*> list;
+    struct Spec { int kind; double v[3]; };
+    const Spec specs[5] = {{1, {0.08, 0.02, 0.10}}, {2, {0.05, 0, 0}}, {3, {0.012, 0.06, 0}}, {3, {0.010, 0.05, 0}}, {4, {0, 0, 0}}};
+    for (const Spec& sp : specs) {
+        Klass* k = sp.kind == 1 ? &kBoxC : (sp.kind == 2 ? &kSphere : (sp.kind == 3 ? &kCapsuleC : &kMeshC));
+        unsigned char* o = makeObject(k, 32);
+        HbCol c; c.kind = sp.kind;
+        for (int i = 0; i < 3; ++i) c.orig[i] = c.v[i] = sp.v[i] * scale;
+        Hx.cols[o] = c; Hx.order.push_back(o); list.push_back(o);
+    }
+    Hx.arr[h] = mkHbArray(list);
+    Hx.hand[h] = makeObject(&kHand, 880);
+    putPtr(Hx.hand[h], 144, Hx.arr[h]); Hx.hand[h][512] = h == 2 ? 0 : 1; Hx.hand[h][80] = h == 0 ? 1 : 0;
+    Hx.prefab[h] = makeObject(&kGameObject, 24);
+    Hx.bc[h] = makeObject(&kBallControl, 232);
+    putPtr(Hx.bc[h], 48, Hx.hand[h]); putPtr(Hx.bc[h], 160, Hx.prefab[h]);
+}
+void buildHands() {
+    Hx = Hbx();
+    for (int h = 0; h < 3; ++h) buildHand(h);
+    putPtr(W.bcm, 40, Hx.bc[0]); putPtr(W.bcm, 48, Hx.bc[1]);
+}
 
 double ballRadius() {
     auto c = Bk.cols.find(Bk.ballCol);
@@ -453,6 +520,7 @@ EXPORT void fake_aim_create(int withHoops) {
     if (Ps.roProps) { munmap(Ps.roProps, 4096); }
     Ps = Pts();
     buildBank(0);
+    buildHands();                       // stage D11
 }
 EXPORT void* fake_aim_object(int which) { return which == 0 ? W.gm : (which == 1 ? W.bcm : (which == 2 ? W.ball : W.rb)); }
 EXPORT void fake_aim_set(const char* key, double a, double b, double c) {
@@ -645,6 +713,82 @@ EXPORT void fake_pts_make_other() {
 EXPORT void fake_pts_switch_ball(int toSecond) { putPtr(W.bcm, 168, toSecond ? Ps.ball2 : W.ball); }
 EXPORT void* fake_pts_object(int which) { return which == 0 ? Bk.props : (which == 1 ? Ps.ball2 : (which == 2 ? Ps.props2 : Ps.roProps)); }
 
+// ---- stage D11: knobs and readings of the pretend hands
+EXPORT void fake_hb_set(const char* key, double a, double b) {
+    const std::string k = key;
+    (void)b;
+    if (k == "set_throws") Hx.setThrows = a != 0;
+    else if (k == "get_throws") Hx.getThrows = a != 0;
+    else if (k == "viz_throws") Hx.vizThrows = a != 0;
+    else if (k == "icalls") Hx.icalls = a != 0;
+    else if (k == "viz_bool") { Hx.vizBool = true; kBallControl.methods[0]->ptypes = {&tGameObject, &tBool}; }
+    else if (k == "viz_weird") { kBallControl.methods[0]->ptypes = {&tInt, &tInt}; }
+    else if (k == "game_reset") { for (int i = 0; i < 10; ++i) { HbCol& c = Hx.cols[Hx.order[static_cast<size_t>(i)]]; for (int j = 0; j < 3; ++j) c.v[j] = c.orig[j]; } }          // the game puts all your hitboxes back to their own size
+    else if (k == "game_new_size") { for (int i = 0; i < 10; ++i) { HbCol& c = Hx.cols[Hx.order[static_cast<size_t>(i)]]; for (int j = 0; j < 3; ++j) { c.orig[j] *= a; c.v[j] = c.orig[j]; } } }    // ... to a NEW own size
+    else if (k == "destroy_col") { const uint64_t z = 0; std::memcpy(Hx.order[static_cast<size_t>(a)] + 16, &z, 8); }
+    else if (k == "destroy_hand") { const uint64_t z = 0; std::memcpy(Hx.hand[static_cast<int>(a)] + 16, &z, 8); }
+    else if (k == "destroy_bc") { const uint64_t z = 0; std::memcpy(Hx.bc[static_cast<int>(a)] + 16, &z, 8); }
+    else if (k == "arr_null") putPtr(Hx.hand[static_cast<int>(a)], 144, nullptr);
+    else if (k == "arr_back") putPtr(Hx.hand[static_cast<int>(a)], 144, Hx.arr[static_cast<int>(a)]);
+    else if (k == "unlink") putPtr(W.bcm, a == 0 ? 40 : 48, nullptr);
+    else if (k == "relink") putPtr(W.bcm, a == 0 ? 40 : 48, Hx.bc[static_cast<int>(a)]);
+    else if (k == "authority") { Hx.hand[0][512] = Hx.hand[1][512] = a != 0; }
+    else if (k == "prefab_null") { putPtr(Hx.bc[0], 160, nullptr); putPtr(Hx.bc[1], 160, nullptr); }
+    else if (k == "rebuild") {          // the game makes new hands (new avatar): new objects with their own default sizes; the old ones are destroyed
+        for (int h = 0; h < 2; ++h) { const uint64_t z = 0; std::memcpy(Hx.bc[h] + 16, &z, 8); std::memcpy(Hx.hand[h] + 16, &z, 8); for (int i = 0; i < 5; ++i) std::memcpy(Hx.order[static_cast<size_t>(5 * h + i)] + 16, &z, 8); }
+        std::vector<unsigned char*> keep(Hx.order.begin() + 10, Hx.order.end());
+        unsigned char* oldBc2 = Hx.bc[2]; unsigned char* oldHand2 = Hx.hand[2]; unsigned char* oldArr2 = Hx.arr[2]; unsigned char* oldPref2 = Hx.prefab[2];
+        std::vector<unsigned char*> oldOrder = Hx.order;
+        Hx.order.clear(); buildHand(0); buildHand(1);
+        std::vector<unsigned char*> fresh = Hx.order;
+        Hx.order = fresh; for (unsigned char* o : keep) Hx.order.push_back(o);
+        Hx.bc[2] = oldBc2; Hx.hand[2] = oldHand2; Hx.arr[2] = oldArr2; Hx.prefab[2] = oldPref2;
+        putPtr(W.bcm, 40, Hx.bc[0]); putPtr(W.bcm, 48, Hx.bc[1]);
+    }
+}
+EXPORT void fake_hb_state(double* out) {
+    out[0] = static_cast<double>(Hx.sets); out[1] = static_cast<double>(Hx.gets); out[2] = static_cast<double>(Hx.vizCalls);
+    out[3] = Hx.viz[0]; out[4] = Hx.viz[1]; out[5] = Hx.viz[2]; out[6] = Hx.vizOn[0]; out[7] = Hx.vizOn[1]; out[8] = Hx.vizOff[0]; out[9] = Hx.vizOff[1];
+}
+// one hitbox: 0 kind, 1-3 size now, 4-6 the game's own size, 7 alive
+EXPORT void fake_hb_col(int i, double* out) {
+    for (int j = 0; j < 8; ++j) out[j] = 0;
+    if (i < 0 || i >= static_cast<int>(Hx.order.size())) return;
+    unsigned char* o = Hx.order[static_cast<size_t>(i)];
+    const HbCol& c = Hx.cols[o];
+    out[0] = c.kind; for (int j = 0; j < 3; ++j) { out[1 + j] = c.v[j]; out[4 + j] = c.orig[j]; }
+    uint64_t ca; std::memcpy(&ca, o + 16, 8); out[7] = ca ? 1 : 0;
+}
+// how far the hitboxes of one hand reach: the biggest of (box: half the longest side, sphere: radius, capsule: radius or half the height)
+EXPORT double fake_hb_reach(int hand) {
+    double best = 0;
+    for (int i = 0; i < 5; ++i) {
+        const HbCol& c = Hx.cols[Hx.order[static_cast<size_t>(5 * hand + i)]];
+        double r = 0;
+        if (c.kind == 1) r = 0.5 * std::max(c.v[0], std::max(c.v[1], c.v[2])); else if (c.kind == 2) r = c.v[0]; else if (c.kind == 3) r = std::max(c.v[0], 0.5 * c.v[1]);
+        best = std::max(best, r);
+    }
+    return best;
+}
+EXPORT void* fake_hb_object(int which, int hand) { return which == 0 ? Hx.bc[hand] : (which == 1 ? Hx.hand[hand] : (which == 2 ? Hx.arr[hand] : Hx.order[static_cast<size_t>(hand)])); }
+// hide ONE engine / game method of the hitbox classes (a game that was updated or stripped)
+EXPORT void fake_hb_hide(const char* klass, const char* method) {
+    Klass* all[] = {&kBoxC, &kSphere, &kCapsuleC, &kBallControl};
+    for (Klass* k : all) { if (k->name != klass) continue; for (size_t i = 0; i < k->methods.size();) { if (k->methods[i]->name == method) k->methods.erase(k->methods.begin() + static_cast<long>(i)); else ++i; } }
+}
+// change a class of the pretend game: action 0 = remove the field, 1 = give the field the wrong type (an int), 2 = remove the whole class from the game
+EXPORT void fake_hb_field(const char* klass, const char* field, int action) {
+    Klass* all[] = {&kBcm, &kBallControl, &kHand, &kBoxC, &kSphere, &kCapsuleC};
+    for (Klass* k : all) {
+        if (k->name != klass) continue;
+        if (action == 2) { for (Image* im : {&iGame, &iPhys, &iCore}) for (size_t i = 0; i < im->classes.size();) { if (im->classes[i] == k) im->classes.erase(im->classes.begin() + static_cast<long>(i)); else ++i; } return; }
+        for (size_t i = 0; i < k->fields.size(); ++i) if (k->fields[i].name == field) {
+            if (action == 0) k->fields.erase(k->fields.begin() + static_cast<long>(i)); else k->fields[i].type = &tInt;
+            return;
+        }
+    }
+}
+
 // ---- the runtime functions the link uses
 EXPORT void* il2cpp_domain_get() { init(); return &gDomain; }
 EXPORT void** il2cpp_domain_get_assemblies(void*, size_t* n) { *n = 4; return gAssemblies; }
@@ -682,7 +826,29 @@ EXPORT bool il2cpp_class_is_valuetype(void* k) { return static_cast<Klass*>(k)->
 EXPORT bool il2cpp_class_is_enum(void* k) { return static_cast<Klass*>(k)->isEnum; }
 EXPORT int il2cpp_class_value_size(void* k, unsigned* align) { if (align) *align = 4; return static_cast<Klass*>(k)->valueSize; }
 EXPORT void* il2cpp_thread_current() { return &gDomain; }
-EXPORT void* il2cpp_resolve_icall(const char*) { return nullptr; }
+// stage D11: the engine's own internal calls for the hitbox sizes (only when the test switches them on; otherwise "not found", like before)
+static HbCol* hbOf(void* self, int kind) { auto it = Hx.cols.find(static_cast<unsigned char*>(self)); if (it == Hx.cols.end() || it->second.kind != kind) return nullptr; uint64_t ca; std::memcpy(&ca, static_cast<unsigned char*>(self) + 16, 8); return ca ? &it->second : nullptr; }
+static float icSphGet(void* self) { ++Hx.gets; HbCol* c = hbOf(self, 2); return c ? static_cast<float>(c->v[0]) : 0.0f; }
+static void icSphSet(void* self, float v) { ++Hx.sets; if (HbCol* c = hbOf(self, 2)) c->v[0] = v; }
+static float icCapRGet(void* self) { ++Hx.gets; HbCol* c = hbOf(self, 3); return c ? static_cast<float>(c->v[0]) : 0.0f; }
+static void icCapRSet(void* self, float v) { ++Hx.sets; if (HbCol* c = hbOf(self, 3)) c->v[0] = v; }
+static float icCapHGet(void* self) { ++Hx.gets; HbCol* c = hbOf(self, 3); return c ? static_cast<float>(c->v[1]) : 0.0f; }
+static void icCapHSet(void* self, float v) { ++Hx.sets; if (HbCol* c = hbOf(self, 3)) c->v[1] = v; }
+static void icBoxGet(void* self, float* out) { ++Hx.gets; if (HbCol* c = hbOf(self, 1)) for (int i = 0; i < 3; ++i) out[i] = static_cast<float>(c->v[i]); }
+static void icBoxSet(void* self, const float* in) { ++Hx.sets; if (HbCol* c = hbOf(self, 1)) for (int i = 0; i < 3; ++i) c->v[i] = in[i]; }
+EXPORT void* il2cpp_resolve_icall(const char* name) {
+    if (!Hx.icalls || !name) return nullptr;
+    const std::string n = name;
+    if (n == "UnityEngine.SphereCollider::get_radius") return reinterpret_cast<void*>(&icSphGet);
+    if (n == "UnityEngine.SphereCollider::set_radius") return reinterpret_cast<void*>(&icSphSet);
+    if (n == "UnityEngine.CapsuleCollider::get_radius") return reinterpret_cast<void*>(&icCapRGet);
+    if (n == "UnityEngine.CapsuleCollider::set_radius") return reinterpret_cast<void*>(&icCapRSet);
+    if (n == "UnityEngine.CapsuleCollider::get_height") return reinterpret_cast<void*>(&icCapHGet);
+    if (n == "UnityEngine.CapsuleCollider::set_height") return reinterpret_cast<void*>(&icCapHSet);
+    if (n == "UnityEngine.BoxCollider::get_size_Injected(UnityEngine.Vector3&)") return reinterpret_cast<void*>(&icBoxGet);
+    if (n == "UnityEngine.BoxCollider::set_size_Injected(UnityEngine.Vector3&)") return reinterpret_cast<void*>(&icBoxSet);
+    return nullptr;
+}
 
 EXPORT void* il2cpp_class_get_method_from_name(void* k, const char* name, int argc) {     // like the real runtime: this class first, then its parents
     for (Klass* c = static_cast<Klass*>(k); c; c = c->parent)
@@ -781,7 +947,8 @@ EXPORT void* il2cpp_runtime_invoke(void* method, void* obj, void** params, void*
         return b;
     }
     case M_COL_MATERIAL: { auto it = Bk.cols.find(static_cast<unsigned char*>(obj)); if (it == Bk.cols.end()) return bad(); return it->second.mat; }
-    case M_SPH_RADIUS: { auto it = Bk.cols.find(static_cast<unsigned char*>(obj)); if (it == Bk.cols.end() || !it->second.sphere) return bad(); unsigned char* b = box(); setF(b, 16, static_cast<float>(it->second.radius)); return b; }
+    case M_SPH_RADIUS: { auto hh = Hx.cols.find(static_cast<unsigned char*>(obj)); if (hh != Hx.cols.end()) { ++Hx.gets; if (Hx.getThrows || hh->second.kind != 2) return bad(); uint64_t ca; std::memcpy(&ca, static_cast<unsigned char*>(obj) + 16, 8); if (!ca) return bad(); unsigned char* b = box(); setF(b, 16, static_cast<float>(hh->second.v[0])); return b; }
+        auto it = Bk.cols.find(static_cast<unsigned char*>(obj)); if (it == Bk.cols.end() || !it->second.sphere) return bad(); unsigned char* b = box(); setF(b, 16, static_cast<float>(it->second.radius)); return b; }
     case M_MAT_BOUNCE: case M_MAT_DYN: case M_MAT_STAT: case M_MAT_BCOMB: case M_MAT_FCOMB: {
         auto it = Bk.mats.find(static_cast<unsigned char*>(obj)); if (it == Bk.mats.end()) return bad();
         unsigned char* b = box(); const Mat& mm = it->second;
@@ -843,6 +1010,33 @@ EXPORT void* il2cpp_runtime_invoke(void* method, void* obj, void** params, void*
         const int len = static_cast<int>(nm.size()); std::memcpy(str + 16, &len, 4);
         for (size_t i = 0; i < nm.size(); ++i) { str[20 + 2 * i] = static_cast<unsigned char>(nm[i]); str[21 + 2 * i] = 0; }
         return str;
+    }
+    // ---- stage D11: hitbox sizes and the game's own "show hand colliders" function
+    case M_BOX_GET: case M_BOX_SET: case M_SPH_SET: case M_CAP_RGET: case M_CAP_RSET: case M_CAP_HGET: case M_CAP_HSET: {
+        unsigned char* o = static_cast<unsigned char*>(obj);
+        auto it = Hx.cols.find(o); if (it == Hx.cols.end()) return bad();
+        uint64_t ca; std::memcpy(&ca, o + 16, 8); if (!ca) return bad();               // a destroyed engine object: the engine throws
+        HbCol& c = it->second;
+        const bool isGet = m->id == M_BOX_GET || m->id == M_CAP_RGET || m->id == M_CAP_HGET;
+        const int want = (m->id == M_BOX_GET || m->id == M_BOX_SET) ? 1 : ((m->id == M_SPH_SET) ? 2 : 3);
+        if (c.kind != want) return bad();
+        if (isGet) {
+            ++Hx.gets; if (Hx.getThrows) return bad();
+            if (m->id == M_BOX_GET) return boxVec(c.v[0], c.v[1], c.v[2]);
+            unsigned char* b = box(); setF(b, 16, static_cast<float>(m->id == M_CAP_HGET ? c.v[1] : c.v[0])); return b;
+        }
+        ++Hx.sets; if (Hx.setThrows || !params) return bad();
+        if (m->id == M_BOX_SET) { const float* f = static_cast<const float*>(params[0]); for (int i = 0; i < 3; ++i) c.v[i] = f[i]; }
+        else { const float f = *static_cast<const float*>(params[0]); if (m->id == M_CAP_HSET) c.v[1] = f; else c.v[0] = f; }
+        return nullptr;
+    }
+    case M_BC_VIZ: {
+        int idx = -1; for (int h = 0; h < 3; ++h) if (obj == Hx.bc[h]) idx = h;
+        if (idx < 0 || Hx.vizThrows || !params) return bad();
+        if (params[0] == nullptr) return bad();                                          // no model: the game would fail inside
+        const bool on = Hx.vizBool ? (*static_cast<const unsigned char*>(params[1]) != 0) : (*static_cast<const float*>(params[1]) > 0.5f);
+        ++Hx.vizCalls; Hx.viz[idx] = on ? 1 : 0; if (on) ++Hx.vizOn[idx]; else ++Hx.vizOff[idx];
+        return nullptr;
     }
     case M_COL_TRIGGER: case M_COL_ENABLED: {
         auto it = Bk.cols.find(static_cast<unsigned char*>(obj)); if (it == Bk.cols.end()) return bad();

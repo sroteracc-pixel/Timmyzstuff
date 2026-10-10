@@ -210,6 +210,24 @@ __attribute__((visibility("default"))) void fake_add_score_class(int on) {      
     for (size_t i = 0; i < iShot.classes.size(); ++i) if (iShot.classes[i] == &kScoreMgr) { iShot.classes.erase(iShot.classes.begin() + static_cast<long>(i)); break; }
     if (on) iShot.classes.push_back(&kScoreMgr);
 }
+// stage D11: hand and steal methods join the pretend ball (Basketball) and the pretend hand (Autohand.Hand). extra < 0 takes them all away again; extra >= 0 adds the three ball methods,
+// two hand methods with "Collider" in the name, one without (Grab), and `extra` more hand methods with "Collider" in the name (to test the limit on the number of code dumps)
+__attribute__((visibility("default"))) void fake_add_hand_code(int extra) {
+    init();
+    kBasketball.methods.resize(2);
+    kHandA.methods.clear();
+    for (Image* im : {&iAuto, &iShot}) for (size_t i = 0; i < im->classes.size();) { if (im->classes[i] == &kHandA) im->classes.erase(im->classes.begin() + static_cast<long>(i)); else ++i; }
+    if (extra < 0) { iAuto.classes.push_back(&kHandA); return; }               // (back where the other tests expect it)
+    iShot.classes.push_back(&kHandA);                                          // in the REAL game Autohand.Hand lives in the game's own assembly (Assembly-CSharp.dll)
+    kBasketball.methods.push_back(mk("CheckHandCollision", 1, &tVoid, 0x3b00));
+    kBasketball.methods.push_back(mk("TryKnockLooseFromBotHold", 3, &tInt, 0x3b40));
+    kBasketball.methods.push_back(mk("PlayKnockLooseHaptics", 1, &tVoid, 0x3b80));
+    kHandA.methods.push_back(mk("SetColliderRadius", 1, &tVoid, 0x3bc0));
+    kHandA.methods.push_back(mk("GetColliders", 0, &tOther, 0x3c00));
+    kHandA.methods.push_back(mk("Grab", 0, &tVoid, 0x3c40));
+    for (int i = 0; i < extra && i < 6; ++i) kHandA.methods.push_back(mk(("ExtraCollider" + std::to_string(i)).c_str(), 0, &tVoid, 0x3c80 + 0x40 * static_cast<uint64_t>(i)));
+    for (int i = 0; i < extra - 6 && i < 20; ++i) kHandA.methods.push_back(mk(("MoreCollider" + std::to_string(i)).c_str(), 0, &tVoid, 0x3c00 + 0x20 * static_cast<uint64_t>(i)));
+}
 __attribute__((visibility("default"))) void fake_set_shot_world(int on) {
     gShotWorld = on != 0;
     if (gShotWorld) { void* a[8] = {&iCore, &iGame, &iPhoton, &iShot, &iAuto, &iPhys, &iCoreEng, &iNet}; std::memcpy(gAssembliesShot, a, sizeof a); }

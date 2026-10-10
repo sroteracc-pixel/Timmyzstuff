@@ -64,7 +64,7 @@ void AimLink::setPoints(int points) {
     if (points < 0) points = 0;
     if (points > 999) points = 999;
     const int was = points_.exchange(points);
-    const bool linkOn = mode_.load() != 0 || points != 0;           // the link as a whole runs for the Aimbot OR for the points
+    const bool linkOn = linkWanted();                                // the link as a whole runs for the Aimbot, the points OR the hitbox part
     const bool linkWas = on_.exchange(linkOn);
     if (linkOn && !linkWas) initOn();
     if (points != 0 && was == 0) {

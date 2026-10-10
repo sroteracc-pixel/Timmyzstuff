@@ -55,6 +55,7 @@ bool sliderRange(int id, float* lo, float* hi, float* step) {
     case HIT_SLIDER_LOWGRAV: case HIT_SLIDER_HIGHGRAV: *lo = kGravMin; *hi = kGravMax; *step = kGravStep; return true;
     case HIT_SLIDER_AIMCAP: *lo = kAimMin; *hi = kAimMax; *step = kAimStep; return true;
     case HIT_SLIDER_POINTS: *lo = kPointsMin; *hi = kPointsMax; *step = kPointsStep; return true;
+    case HIT_SLIDER_HITBOX: *lo = kHitboxMin; *hi = kHitboxMax; *step = kHitboxStep; return true;
     default: return false;
     }
 }
@@ -70,6 +71,7 @@ float& sliderValue(PanelState& s, int id) {
     case HIT_SLIDER_HIGHGRAV: return s.highGravPct;
     case HIT_SLIDER_AIMCAP: return s.aimCapM;
     case HIT_SLIDER_POINTS: return s.pointsStop;
+    case HIT_SLIDER_HITBOX: return s.hitboxMul;
     default: return dummy;
     }
 }
@@ -89,6 +91,15 @@ std::string aimCapText(float capM) {
 }
 
 std::string pointsStopText(float stop) { return tzpoints::pointsText(tzpoints::pointsForStop(stop)); }
+
+std::string hitboxText(float mul) {
+    float m = mul;
+    if (!(m >= kHitboxMin)) m = kHitboxMin;          // also catches NaN
+    if (m > kHitboxMax) m = kHitboxMax;
+    char b[16];
+    std::snprintf(b, sizeof b, "%.1fx", m);
+    return b;
+}
 
 // ---------------------------------------------------------------------------------- Canvas
 Canvas::Canvas(int w, int h) : w_(w), h_(h), px_(static_cast<size_t>(w) * h * 4, 0) {}
@@ -659,6 +670,62 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
         }
     } else if (s.tab == kTabTroll) {
         float y = cy0 + 66;
+        // ---- stage D11: "Hitbox expander" card: switch + slider (1.0x ... 5.0x) + one status line
+        {
+            const float ry = y, rh = 126;
+            const bool on = s.hitboxOn, hvT = s.hover == HIT_TOGGLE_HITBOX;
+            c.fillRoundRect(rx, ry, rw, rh, 16, card);
+            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, on ? withA(accentHi, 0.7f) : cardEdge);
+            c.text(kFontLabel, rx + 22, ry + 32, "Hitbox expander", on ? white : rgba(222, 222, 234));
+            c.text(kFontTiny, rx + 22 + c.textWidth(kFontLabel, "Hitbox expander") + 16, ry + 31, "bigger hands: easier steals and blocks", dimGrey);
+            const float tw = 66, th = 32, tx = rx + rw - tw - 22, ty0 = ry + 14;
+            c.fillRoundRect(tx, ty0, tw, th, th / 2, on ? accent : rgba(58, 58, 74));
+            c.strokeRoundRect(tx, ty0, tw, th, th / 2, hvT ? 2.2f : 1.4f, on ? accentHi : (hvT ? withA(accentHi, 0.9f) : rgba(84, 84, 104)));
+            c.fillCircle(on ? tx + tw - th / 2 : tx + th / 2, ty0 + th / 2, th / 2 - 4, rgba(250, 250, 255));
+            if (hits) hits->push_back({HIT_TOGGLE_HITBOX, tx - 14, ry + 4, tw + 28, 52});
+            c.text(kFontSmall, rx + 22, ry + 62, "Hand hitbox size", grey);
+            c.text(kFontTiny, rx + 22 + c.textWidth(kFontSmall, "Hand hitbox size") + 14, ry + 61, "1.0x = normal ... 5.0x", dimGrey);
+            const std::string label = hitboxText(s.hitboxMul);
+            float lo, hi, step; sliderRange(HIT_SLIDER_HITBOX, &lo, &hi, &step);
+            const float sx0 = rx + 26, sx1 = rx + rw - 110, sy = ry + 82;
+            const float t = clamp01((s.hitboxMul - lo) / (hi - lo)), kx = sx0 + (sx1 - sx0) * t;
+            const bool hot = s.dragSlider == HIT_SLIDER_HITBOX || s.hover == HIT_SLIDER_HITBOX;
+            c.fillRoundRect(sx0, sy - 5, sx1 - sx0, 10, 5, rgba(14, 14, 20));
+            c.strokeRoundRect(sx0, sy - 5, sx1 - sx0, 10, 5, 1.2f, rgba(52, 52, 68));
+            if (kx - sx0 > 1) c.fillRoundRectGradient(sx0, sy - 5, std::max(10.0f, kx - sx0), 10, 5, on ? accentHi : rgba(110, 110, 130), on ? accent : rgba(84, 84, 104));
+            for (int i = 0; i < 5; ++i) c.fillCircle(sx0 + (sx1 - sx0) * static_cast<float>(i) / 4.0f, sy + 14, 2.2f, std::fabs(s.hitboxMul - (1.0f + static_cast<float>(i))) < 0.05f ? (on ? accentHi : grey) : rgba(70, 70, 88));     // one dot under 1x, 2x, 3x, 4x, 5x
+            if (hot) c.glowRoundRect(kx - 10, sy - 10, 20, 20, 10, 10, withA(accentHi, 0.7f));
+            c.fillCircle(kx, sy, hot ? 13.5f : 11.5f, rgba(250, 250, 255));
+            c.strokeCircle(kx, sy, hot ? 13.5f : 11.5f, 3, on ? (hot ? accentHi : accent) : rgba(120, 120, 140));
+            c.text(kFontLabel, rx + rw - 22 - c.textWidth(kFontLabel, label), sy + 8, label, on ? accentHi : grey);
+            if (hits) hits->push_back({HIT_SLIDER_HITBOX, sx0 - 16, ry + 64, sx1 - sx0 + 32, 34});
+            // status line (one dot + one short text). It follows the hitbox link: Expander and See hitbox share it.
+            const int ls = s.hitboxLinkState;      // 0 off, 1 connected, 2 looking for your hands, 3 failed
+            const Color dot = ls == 1 ? rgba(80, 220, 130) : (ls == 3 ? rgba(240, 90, 90) : (ls == 2 ? rgba(240, 170, 60) : rgba(150, 150, 170)));
+            c.fillCircle(rx + 28, ry + 108, 5, dot);
+            const std::string head = !s.hitboxHeadline.empty() ? s.hitboxHeadline :
+                ls == 1 ? "Connected to your hands." :
+                ls == 2 ? "Looking for your hands in the game... a few seconds." :
+                ls == 3 ? "Could not connect. Press Get facts and send me the file." :
+                "Turn Hitbox expander or See hitbox on and the menu connects to the game.";
+            c.text(kFontTiny, rx + 42, ry + 113, fitText(c, kFontTiny, head, rw - 66), ls == 3 ? rgba(255, 190, 80) : grey);
+            y += rh + 8;
+        }
+        // ---- stage D11: "See hitbox" switch (shows the game's own hand-collider display on your hands)
+        {
+            const float ry = y, rh = 60;
+            const bool on = s.hitboxSee, hvT = s.hover == HIT_TOGGLE_HITBOXSEE;
+            c.fillRoundRect(rx, ry, rw, rh, 16, card);
+            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, on ? withA(accentHi, 0.7f) : cardEdge);
+            c.text(kFontLabel, rx + 22, ry + 30, "See hitbox", on ? white : rgba(222, 222, 234));
+            c.text(kFontTiny, rx + 22, ry + 50, on ? "the game's own hand hitbox display is on (your hands)" : "shows where your hands can touch the ball", dimGrey);
+            const float tw = 66, th = 32, tx = rx + rw - tw - 22, ty0 = ry + (rh - th) / 2;
+            c.fillRoundRect(tx, ty0, tw, th, th / 2, on ? accent : rgba(58, 58, 74));
+            c.strokeRoundRect(tx, ty0, tw, th, th / 2, hvT ? 2.2f : 1.4f, on ? accentHi : (hvT ? withA(accentHi, 0.9f) : rgba(84, 84, 104)));
+            c.fillCircle(on ? tx + tw - th / 2 : tx + th / 2, ty0 + th / 2, th / 2 - 4, rgba(250, 250, 255));
+            if (hits) hits->push_back({HIT_TOGGLE_HITBOXSEE, tx - 14, ry + 4, tw + 28, rh - 8});
+            y += rh + 8;
+        }
         // ---- stage D10: "Shot points" card: switch + slider (stops 1 ... 11, then 999)
         {
             const float ry = y, rh = 112;
@@ -690,24 +757,24 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
             if (hits) hits->push_back({HIT_SLIDER_POINTS, sx0 - 16, ry + 66, sx1 - sx0 + 32, 34});
             y += rh + 8;
         }
-        // ---- stage D10: the game link card (state, what it is doing, what happened at your last basket)
+        // ---- stage D10: the points link card (state, what it is doing, what happened at your last basket). Smaller than before, to make room for the hitbox cards.
         {
-            const float ry = y, rh = 112;
+            const float ry = y, rh = 100;
             c.fillRoundRect(rx, ry, rw, rh, 16, card);
             c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, cardEdge);
             const int ls = s.pointsLinkState;      // 0 off, 1 connected, 2 looking for your ball, 3 failed
             const Color dot = ls == 1 ? rgba(80, 220, 130) : (ls == 3 ? rgba(240, 90, 90) : (ls == 2 ? rgba(240, 170, 60) : rgba(150, 150, 170)));
-            c.fillCircle(rx + 28, ry + 26, 7, dot);
-            c.text(kFontLabel, rx + 46, ry + 32, ls == 1 ? "Points link: connected" : (ls == 2 ? "Points link: looking..." : (ls == 3 ? "Points link: failed" : "Points link: off")), white);
+            c.fillCircle(rx + 28, ry + 24, 7, dot);
+            c.text(kFontLabel, rx + 46, ry + 30, ls == 1 ? "Points link: connected" : (ls == 2 ? "Points link: looking..." : (ls == 3 ? "Points link: failed" : "Points link: off")), white);
             const float textW = rw - 44;
             const std::string head = !s.pointsHeadline.empty() ? s.pointsHeadline :
                 ls == 1 ? "Connected. Shoot a ball and watch the score." :
                 ls == 2 ? "Looking for your ball in the game... a few seconds." :
                 ls == 3 ? "Could not connect. Press Get facts and send me the file." :
                 "Turn the Shot points switch on and the menu connects to the game.";
-            c.text(kFontTiny, rx + 22, ry + 60, fitText(c, kFontTiny, head, textW), ls == 3 ? rgba(255, 190, 80) : grey);
-            c.text(kFontSmall, rx + 22, ry + 84, fitText(c, kFontSmall, s.pointsLast.empty() ? std::string("No basket seen yet.") : s.pointsLast, textW), s.pointsLast.empty() ? dimGrey : rgba(222, 222, 234));
-            c.text(kFontTiny, rx + 22, ry + 105, "Only the ball you are using is changed. Other players' balls are left alone.", dimGrey);
+            c.text(kFontTiny, rx + 22, ry + 54, fitText(c, kFontTiny, head, textW), ls == 3 ? rgba(255, 190, 80) : grey);
+            c.text(kFontSmall, rx + 22, ry + 76, fitText(c, kFontSmall, s.pointsLast.empty() ? std::string("No basket seen yet.") : s.pointsLast, textW), s.pointsLast.empty() ? dimGrey : rgba(222, 222, 234));
+            c.text(kFontTiny, rx + 22, ry + 93, "Only the ball you are using is changed. Other players' balls are left alone.", dimGrey);
         }
     } else {
         const float ry = cy0 + 78, rh = 120;
@@ -749,9 +816,9 @@ void drawCursor(Canvas& c, float x, float y, const PanelState& s, bool pressed) 
 
 // ---------------------------------------------------------------------------------- saved settings
 std::string settingsToText(const PanelState& s) {
-    char b[480];
-    std::snprintf(b, sizeof b, "sound=%d\ncolor=%d\nscale=%.2f\ntransparency=%.2f\ndistance=%.2f\nspeed=%.1f\njump=%.1f\nlowgravity=%.0f\nhighgravity=%.0f\naimdistance=%.0f\naimy=%d\npointsstop=%.0f\n",
-                  s.sound ? 1 : 0, s.colorIndex, s.scale, s.transparency, s.distance, s.speedMul, s.jumpMul, s.lowGravPct, s.highGravPct, s.aimCapM, s.aimHoldY ? 1 : 0, s.pointsStop);
+    char b[560];
+    std::snprintf(b, sizeof b, "sound=%d\ncolor=%d\nscale=%.2f\ntransparency=%.2f\ndistance=%.2f\nspeed=%.1f\njump=%.1f\nlowgravity=%.0f\nhighgravity=%.0f\naimdistance=%.0f\naimy=%d\npointsstop=%.0f\nhitboxscale=%.1f\n",
+                  s.sound ? 1 : 0, s.colorIndex, s.scale, s.transparency, s.distance, s.speedMul, s.jumpMul, s.lowGravPct, s.highGravPct, s.aimCapM, s.aimHoldY ? 1 : 0, s.pointsStop, s.hitboxMul);
     return b;
 }
 bool settingsFromText(const std::string& text, PanelState& s) {
@@ -767,9 +834,9 @@ bool settingsFromText(const std::string& text, PanelState& s) {
         else if (key == "color") { const long v = std::strtol(val.c_str(), &e, 10); if (e != val.c_str() && v >= 0 && v < kColorCount) { s.colorIndex = static_cast<int>(v); any = true; } }
         else if (key == "scale") { const float f = std::strtof(val.c_str(), &e); if (e != val.c_str() && f >= kScaleMin - 1e-4f && f <= kScaleMax + 1e-4f) { s.scale = snapSlider(HIT_SLIDER_SIZE, f); any = true; } }
         else if (key == "transparency") { const float f = std::strtof(val.c_str(), &e); if (e != val.c_str() && f >= 0.0f && f <= 1.0f) { s.transparency = snapSlider(HIT_SLIDER_ALPHA, f); any = true; } }   // an older, higher saved value is pulled down to the new maximum
-        else if (key == "speed" || key == "jump" || key == "lowgravity" || key == "highgravity" || key == "aimdistance" || key == "pointsstop") {
+        else if (key == "speed" || key == "jump" || key == "lowgravity" || key == "highgravity" || key == "aimdistance" || key == "pointsstop" || key == "hitboxscale") {
             const int id = key == "speed" ? HIT_SLIDER_SPEED : key == "jump" ? HIT_SLIDER_JUMP : key == "lowgravity" ? HIT_SLIDER_LOWGRAV : key == "highgravity" ? HIT_SLIDER_HIGHGRAV :
-                           key == "pointsstop" ? HIT_SLIDER_POINTS : HIT_SLIDER_AIMCAP;
+                           key == "pointsstop" ? HIT_SLIDER_POINTS : key == "hitboxscale" ? HIT_SLIDER_HITBOX : HIT_SLIDER_AIMCAP;
             float lo, hi, step; sliderRange(id, &lo, &hi, &step);
             const float f = std::strtof(val.c_str(), &e);
             if (e != val.c_str() && f >= lo - 1e-3f && f <= hi + 1e-3f) { sliderValue(s, id) = snapSlider(id, f); any = true; }

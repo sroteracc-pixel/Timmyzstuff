@@ -551,6 +551,97 @@ int main() {
             Canvas ca(kWidth, kHeight), cb(kWidth, kHeight); drawPanel(ca, a2, nullptr); drawPanel(cb, b2, nullptr);
             CHECK("the link card shows the texts from the game part (the picture changes)", std::memcmp(ca.data(), cb.data(), static_cast<size_t>(kWidth) * kHeight * 4) != 0); }
     }
+    std::printf("== Troll page (Hitbox expander + See hitbox, stage D11)\n");
+    {   PanelState m; Interaction mi; openMenu(mi, m);
+        PanelState fresh;
+        click(mi, m, HIT_TAB0 + 10);
+        const std::vector<HitRect> h = hitsFor(m);
+        CHECK("the Troll page has the Hitbox expander switch, its slider and the See hitbox switch", find(h, HIT_TOGGLE_HITBOX).id != 0 && find(h, HIT_SLIDER_HITBOX).id != 0 && find(h, HIT_TOGGLE_HITBOXSEE).id != 0);
+        CHECK("the Shot points controls are still there too", find(h, HIT_TOGGLE_POINTS).id != 0 && find(h, HIT_SLIDER_POINTS).id != 0);
+        CHECK("the new controls are not on the other pages", [&] { PanelState t; t.tab = kTabBasketball; const auto b = hitsFor(t); return find(b, HIT_TOGGLE_HITBOX).id == 0 && find(b, HIT_SLIDER_HITBOX).id == 0 && find(b, HIT_TOGGLE_HITBOXSEE).id == 0; }());
+        CHECK("both switches start OFF, the slider starts at 2.0x, the link shows 'off'", !fresh.hitboxOn && !fresh.hitboxSee && fresh.hitboxMul == 2.0f && fresh.hitboxLinkState == 0 && fresh.hitboxHeadline.empty());
+        const bool sizeSame = hitsFor(m).size() == h.size();
+        click(mi, m, HIT_TOGGLE_HITBOX);
+        CHECK("clicking the Hitbox expander switch turns it ON (and only it)", m.hitboxOn && !m.hitboxSee && !m.pointsOn && !m.aimOn && !m.speedOn && m.gravityMode == 0 && sizeSame);
+        { PanelState t = m; Interaction ti; openMenu(ti, t); t.tab = kTabTroll; const HitRect r = find(hitsFor(t), HIT_TOGGLE_HITBOX); const float cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+          step(ti, t, cx, cy, 0.0f); const Outcome o = step(ti, t, cx, cy, 0.9f);
+          CHECK("... the click asks for a redraw but not for a save (effects are never saved)", o.redraw && !o.saveNeeded); }
+        click(mi, m, HIT_TOGGLE_HITBOXSEE);
+        CHECK("clicking See hitbox turns it ON; the Hitbox expander stays ON", m.hitboxSee && m.hitboxOn);
+        click(mi, m, HIT_TOGGLE_HITBOX);
+        CHECK("clicking the Hitbox expander again turns it OFF; See hitbox stays ON (they are separate)", !m.hitboxOn && m.hitboxSee);
+        click(mi, m, HIT_TOGGLE_HITBOXSEE);
+        CHECK("clicking See hitbox again turns it OFF", !m.hitboxSee && !m.hitboxOn);
+        click(mi, m, HIT_TOGGLE_HITBOX);                           // ON again for the slider test
+
+        // the slider: 1.0x ... 5.0x in steps of 0.1
+        const std::vector<HitRect> bh = hitsFor(m);
+        auto stepH = [&](float xx, float yy, float trig) { HandAim a[2]; a[1].valid = true; a[1].onPlane = true; a[1].x = xx; a[1].y = yy; a[1].trigger = trig; a[0].valid = false; a[0].trigger = 0; return mi.update(m, bh, a); };
+        const HitRect sr = find(bh, HIT_SLIDER_HITBOX);
+        const float y0 = sr.y + sr.h / 2, x0 = sr.x + 16, x1 = sr.x + sr.w - 16;
+        bool inRange = true, onGrid = true; float minSeen = 99, maxSeen = 0; std::set<int> values; bool textOk = true;
+        stepH(x0, y0, 0.0f); stepH(x0, y0, 0.9f);
+        for (int i = 0; i <= 800; ++i) {
+            const float xx = x0 + (x1 - x0) * i / 800.0f; stepH(xx, y0, 0.9f); const float v = m.hitboxMul;
+            if (v < 1.0f - 1e-4f || v > 5.0f + 1e-4f) inRange = false;
+            if (std::fabs(v * 10.0f - std::round(v * 10.0f)) > 1e-3f) onGrid = false;
+            if (v < minSeen) minSeen = v;
+            if (v > maxSeen) maxSeen = v;
+            values.insert((int)std::lround(v * 10.0f));
+            char want[16]; std::snprintf(want, sizeof want, "%.1fx", (double)v); if (hitboxText(v) != want) textOk = false;
+        }
+        const Outcome dragEnd = stepH(x1, y0, 0.0f);
+        CHECK("letting go of the slider asks for a save (its position is a setting)", dragEnd.saveNeeded);
+        CHECK("dragging from the far left to the far right only ever gives sizes from 1.0x to 5.0x", inRange && near(minSeen, 1.0f, 1e-4f) && near(maxSeen, 5.0f, 1e-4f));
+        CHECK("... always in steps of 0.1", onGrid);
+        CHECK("... it passes through all 41 stops (1.0, 1.1, ... 5.0)", values.size() == 41);
+        CHECK("... the text is the size with one decimal and an x", textOk);
+        CHECK("... ends on 5.0x at the far right", near(m.hitboxMul, 5.0f, 1e-4f) && hitboxText(m.hitboxMul) == "5.0x");
+        stepH(x0, y0, 0.0f); stepH(x0, y0, 0.9f); stepH(x0 - 40, y0, 0.9f); stepH(x0 - 40, y0, 0.0f);
+        CHECK("dragging past the far left stays at 1.0x (the normal size, never smaller)", near(m.hitboxMul, 1.0f, 1e-4f) && hitboxText(m.hitboxMul) == "1.0x");
+        stepH(x1, y0, 0.0f); stepH(x1, y0, 0.9f); stepH(x1 + 60, y0, 0.9f); stepH(x1 + 60, y0, 0.0f);
+        CHECK("dragging past the far right stays at 5.0x", near(m.hitboxMul, 5.0f, 1e-4f));
+        { const float tx = x0 + (x1 - x0) * 0.25f; stepH(tx, y0, 0.0f); stepH(tx, y0, 0.9f); stepH(tx, y0, 0.0f);
+          CHECK("a quarter of the way is exactly 2.0x", near(m.hitboxMul, 2.0f, 1e-4f)); }
+        { const float tx = x0 + (x1 - x0) * 0.5f; stepH(tx, y0, 0.0f); stepH(tx, y0, 0.9f); stepH(tx, y0, 0.0f);
+          CHECK("half way is exactly 3.0x", near(m.hitboxMul, 3.0f, 1e-4f)); }
+        CHECK("moving the slider did not touch the switches", m.hitboxOn && !m.hitboxSee);
+        CHECK("the slider changes no other setting", !m.aimOn && !m.speedOn && m.gravityMode == 0 && m.aimCapM == 50.0f && m.pointsStop == 11.0f && near(m.speedMul, 1.1f, 1e-4f));
+        {   PanelState a2, b2; a2.tab = b2.tab = kTabTroll; a2.hitboxMul = 2.0f; b2.hitboxMul = 5.0f;
+            Canvas ca(kWidth, kHeight), cb(kWidth, kHeight); drawPanel(ca, a2, nullptr); drawPanel(cb, b2, nullptr);
+            const HitRect r = find(hitsFor(a2), HIT_SLIDER_HITBOX);
+            bool differs = false;
+            for (int yy = (int)r.y; yy < (int)(r.y + r.h) + 12 && !differs; ++yy)
+                for (int xx = (int)(r.x + r.w + 20); xx < (int)(r.x + r.w + 150) && !differs; ++xx)
+                    if (std::memcmp(ca.data() + (yy * kWidth + xx) * 4, cb.data() + (yy * kWidth + xx) * 4, 4) != 0) differs = true;
+            CHECK("the number next to the slider changes with the value (2.0x vs 5.0x)", differs); }
+        {   PanelState a2, b2; a2.tab = b2.tab = kTabTroll; b2.hitboxSee = true;
+            Canvas ca(kWidth, kHeight), cb(kWidth, kHeight); drawPanel(ca, a2, nullptr); drawPanel(cb, b2, nullptr);
+            CHECK("the See hitbox switch looks different when it is on", std::memcmp(ca.data(), cb.data(), static_cast<size_t>(kWidth) * kHeight * 4) != 0); }
+        {   PanelState a2, b2; a2.tab = b2.tab = kTabTroll; a2.hitboxOn = b2.hitboxOn = true; b2.hitboxLinkState = 1; b2.hitboxHeadline = "connected: 2 hands, 8 hitboxes made 2.0x bigger";
+            Canvas ca(kWidth, kHeight), cb(kWidth, kHeight); drawPanel(ca, a2, nullptr); drawPanel(cb, b2, nullptr);
+            CHECK("the hitbox status line shows the text from the game part (the picture changes)", std::memcmp(ca.data(), cb.data(), static_cast<size_t>(kWidth) * kHeight * 4) != 0); }
+        {   PanelState a2, b2; a2.tab = b2.tab = kTabTroll; a2.hitboxOn = b2.hitboxOn = true; a2.hitboxLinkState = 2; b2.hitboxLinkState = 3; b2.hitboxHeadline = "FAILED: the field _handColliders is missing in Autohand.Hand (the game was updated?)";
+            Canvas ca(kWidth, kHeight), cb(kWidth, kHeight); drawPanel(ca, a2, nullptr); drawPanel(cb, b2, nullptr);
+            CHECK("'looking' and 'failed' look different", std::memcmp(ca.data(), cb.data(), static_cast<size_t>(kWidth) * kHeight * 4) != 0); }
+        CHECK("hitboxText pulls odd numbers in: 0.2 -> 1.0x, 9 -> 5.0x, 2.46 -> 2.5x, NaN -> 1.0x", hitboxText(0.2f) == "1.0x" && hitboxText(9.0f) == "5.0x" && hitboxText(2.46f) == "2.5x" && hitboxText(std::nanf("")) == "1.0x");
+    }
+    {   PanelState a; a.hitboxMul = 3.5f; a.hitboxOn = true; a.hitboxSee = true; a.pointsStop = 7;
+        const std::string txt = settingsToText(a);
+        PanelState b; const bool ok = settingsFromText(txt, b);
+        CHECK("the Hitbox expander slider position is saved and comes back exactly (3.5x)", ok && near(b.hitboxMul, 3.5f, 1e-4f) && txt.find("hitboxscale=3.5\n") != std::string::npos);
+        CHECK("neither switch is ever saved: both start OFF next time", !b.hitboxOn && !b.hitboxSee && txt.find("hitboxon") == std::string::npos && txt.find("hitboxsee") == std::string::npos);
+        CHECK("the Shot points slider is saved next to it and unchanged", near(b.pointsStop, 7.0f, 1e-4f) && txt.find("pointsstop=7\n") != std::string::npos);
+        PanelState e1, e2; settingsFromText("hitboxscale=1.0\n", e1); settingsFromText("hitboxscale=5.0\n", e2);
+        CHECK("the exact ends 1.0 and 5.0 are accepted", near(e1.hitboxMul, 1.0f, 1e-4f) && near(e2.hitboxMul, 5.0f, 1e-4f));
+        PanelState g; settingsFromText("hitboxscale=0.5\nhitboxscale=5.5\nhitboxscale=abc\nhitboxscale=-2\nhitboxscale=99\n", g);
+        CHECK("out-of-range or garbage sizes are ignored (stays 2.0x)", near(g.hitboxMul, 2.0f, 1e-4f));
+        PanelState o3; settingsFromText("hitboxscale=2.46\n", o3);
+        CHECK("a hand-edited 2.46 is snapped to a whole step (2.5x)", near(o3.hitboxMul, 2.5f, 1e-4f));
+        PanelState old; const bool okOld = settingsFromText("sound=0\ncolor=2\naimdistance=20\npointsstop=4\n", old);
+        CHECK("an older settings file without the line leaves the slider at 2.0x and both switches off", okOld && near(old.hitboxMul, 2.0f, 1e-4f) && !old.hitboxOn && !old.hitboxSee && old.aimCapM == 20.0f && old.pointsStop == 4.0f);
+        CHECK("the other saved lines are unchanged by the new one", [&] { PanelState x; x.aimCapM = 23; x.pointsStop = 4; x.hitboxMul = 4.2f; PanelState y; settingsFromText(settingsToText(x), y); return y.aimCapM == 23.0f && y.pointsStop == 4.0f && near(y.hitboxMul, 4.2f, 1e-4f); }());
+    }
     {   PanelState a; a.pointsStop = 7; a.pointsOn = true;
         const std::string txt = settingsToText(a);
         PanelState b; const bool ok = settingsFromText(txt, b);

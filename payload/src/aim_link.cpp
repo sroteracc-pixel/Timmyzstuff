@@ -77,6 +77,7 @@ void AimLink::flush() {
     { std::lock_guard<std::mutex> lock(outMu_); v.swap(out_); }
     for (const std::string& s : v) {
         if (s.compare(0, 7, "points:") == 0) sayPoints("%s", s.c_str());        // stage D10: the points lines have their own budget
+        else if (s.compare(0, 7, "hitbox:") == 0) sayHitbox("%s", s.c_str());   // stage D11: so do the hitbox lines
         else say("%s", s.c_str());
     }
 }
@@ -136,7 +137,7 @@ void AimLink::setAsk(int mode, float capM, bool holdY) {
     capM_.store(capM);
     const bool yWas = holdY_.exchange(holdY);
     const int modeWas = mode_.exchange(mode);
-    const bool linkOn = mode != 0 || points_.load() != 0;          // stage D10: the "Shot points" part also needs the link
+    const bool linkOn = linkWanted();                              // stage D10 / D11: the "Shot points" and hitbox parts also need the link
     const bool linkWas = on_.exchange(linkOn);
     const char* name = mode == 2 ? "BANK" : "Direct";
     if (linkOn && !linkWas) initOn();
@@ -255,11 +256,23 @@ void AimLink::loop() {
                 if (!layoutReady_.load() && !failed_ && now >= nextLayoutAt_) doLayout = true;
                 else if (layoutReady_.load() && !failed_ && needBcm_.load() && fastFailed_.load() && !bound_.load() && now >= nextSearchAt_ && now - lastSearchEnd_ >= cfg_.minSearchGapSeconds) doSrch = true;
             }
-            bool doBank = false, doPoints = false;
+            bool doBank = false, doPoints = false, doHitbox = false;
             {
                 std::lock_guard<std::mutex> lock(mu_);
                 if (layoutReady_.load() && !failed_ && mode_.load() == 2 && !bankReady_.load() && now >= nextBankLayoutAt_) doBank = true;
                 if (layoutReady_.load() && !failed_ && points_.load() != 0 && !pointsReady_.load() && !pointsDead_ && now >= nextPointsAt_) doPoints = true;
+                if (layoutReady_.load() && !failed_ && (hitboxX10_.load() != 0 || hitboxSee_.load()) && !hitboxReady_.load() && !hitboxDead_.load() && now >= nextHitboxAt_) doHitbox = true;
+            }
+            if (doHitbox) {
+                std::string why; bool transient = false;
+                if (resolveHitboxLayout(&why, &transient)) { hitboxReady_.store(true, std::memory_order_release); std::lock_guard<std::mutex> lock(mu_); hitboxFailWhy_.clear(); }
+                else {
+                    ++hitboxTries_;
+                    if (transient) {
+                        { std::lock_guard<std::mutex> lock(mu_); hitboxFailWhy_ = why; nextHitboxAt_ = nowSec() + cfg_.retrySoonSeconds + std::min(12.0, hitboxTries_ * 2.0); }
+                        if (hitboxTries_ == 1 || hitboxTries_ % 10 == 0) queueHitbox("hitbox: not ready yet (" + why + ") - trying again in a few seconds");
+                    } else { hbDie(why); queueHitbox("hitbox: cannot be used: " + why); }
+                }
             }
             if (doPoints) {
                 std::string why; bool transient = false;
@@ -595,9 +608,11 @@ bool AimLink::ensureBcm(double now) {
 // ---- the main tick
 void AimLink::onGameThread() {
     if (!started_) return;
+    struct Guard { bool& f; explicit Guard(bool& x) : f(x) { f = true; } ~Guard() { f = false; } };
     if (!on_.load(std::memory_order_relaxed)) {
         if (g_.phase != IDLE && !g_.inTick) abandon("the switch was turned off");
         if (!g_.ptsBalls.empty() && !g_.inTick && layoutReady_.load(std::memory_order_acquire) && gameThreadOk()) pointsStandDown();      // stage D10: the points switch went off too
+        if (g_.hbOn && !g_.inTick && layoutReady_.load(std::memory_order_acquire) && gameThreadOk()) { Guard guard(g_.inTick); hitboxStandDown("every switch is off"); }       // stage D11: put the hitboxes back
         g_.haveTimers = false;
         return;
     }
@@ -607,7 +622,7 @@ void AimLink::onGameThread() {
     if (!gameThreadOk()) return;
     if (resetExc_.exchange(false)) g_.excRun = 0;
     if (engineDead_.load()) return;
-    struct Guard { bool& f; explicit Guard(bool& x) : f(x) { f = true; } ~Guard() { f = false; } } guard(g_.inTick);
+    Guard guard(g_.inTick);
     ticks_.fetch_add(1, std::memory_order_relaxed);
     const double now = tnow();
 
@@ -655,6 +670,9 @@ void AimLink::onGameThread() {
     } else if (!g_.ptsBalls.empty()) {
         pointsStandDown();
     }
+
+    // stage D11 ("Hitbox expander" + "See hitbox"): your hands' hitboxes. (Calls a few engine functions, at most ten times a second, only when something changed.)
+    hitboxTick(now);
 }
 
 void AimLink::startShot(double now, int hand, uintptr_t ballPtr) {

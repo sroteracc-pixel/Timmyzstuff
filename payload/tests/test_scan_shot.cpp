@@ -155,6 +155,37 @@ int main(int, char** argv) {
         }
     }
 
+    std::printf("== stage D11: the hand classes and the code of the steal / hitbox methods\n");
+    {
+        auto addScore_ = reinterpret_cast<void (*)(int)>(dlsym(lib, "fake_add_score_class"));
+        auto addHand = reinterpret_cast<void (*)(int)>(dlsym(lib, "fake_add_hand_code"));
+        check("the pretend game can have hand methods", addHand != nullptr);
+        if (addHand) {
+            addHand(0); gLines.clear();
+            const Summary sh = run(api, opt, logFn);
+            check("run says ok", sh.ok && sh.error.empty());
+            check("the Hand class is written out in full (its field, and the Basketball class has the steal methods)", has("scan: CLASS Autohand.Hand : MonoBehaviour") && has("field holdingObj") && has("method CheckHandCollision(1) : System.Void rva=") && has("method TryKnockLooseFromBotHold(3)"));
+            check("the code of the steal / hitbox methods is written out: CheckHandCollision, TryKnockLooseFromBotHold, PlayKnockLooseHaptics, SetColliderRadius, GetColliders (5 lines), not Grab or Shoot or OnRelease",
+                  countOf("scan:   code320 ") == 5 && has("code320 Basketball.CheckHandCollision(1) rva=") && has("code320 Basketball.TryKnockLooseFromBotHold(3) rva=") && has("code320 Basketball.PlayKnockLooseHaptics(1) rva=") &&
+                  has("code320 Hand.SetColliderRadius(1) rva=") && has("code320 Hand.GetColliders(0) rva=") && !has("code320 Hand.Grab") && !has("code320 Basketball.Shoot") && !has("code320 Basketball.OnRelease"));
+            std::string line;
+            for (const std::string& l : gLines) if (l.find("scan:   code320 Basketball.CheckHandCollision(1) rva=") != std::string::npos) line = l;
+            const size_t colon = line.find(" : ");
+            check("the dump has exactly 320 bytes (640 hex characters)", colon != std::string::npos && line.size() - colon - 3 == 640);
+            check("nothing was CALLED in the game", [&] { int* invokes = static_cast<int*>(dlsym(lib, "fake_invoke_count")); return invokes && *invokes == 0; }());
+            addHand(20); gLines.clear();
+            const Summary sm = run(api, opt, logFn);
+            check("with many more Collider methods the code dumps stop at 12 (the facts file stays small)", sm.ok && countOf("scan:   code320 ") == 12);
+            addScore_(1); gLines.clear();
+            const Summary sb = run(api, opt, logFn);
+            check("scoring dumps and hitbox dumps have their own limits: 3 scoring + 12 hitbox", sb.ok && countOf("scan:   code320 ScoreManager.") == 3 && countOf("scan:   code320 ") == 15);
+            addScore_(0);
+            addHand(-1); gLines.clear();
+            const Summary s0 = run(api, opt, logFn);
+            check("without those methods there are no code dumps and the scan is as before", s0.ok && countOf("scan:   code320") == 0 && s0.matchedClasses == 8);
+        }
+    }
+
     std::printf("== the pause before the live search\n");
     {
         gLines.clear();
