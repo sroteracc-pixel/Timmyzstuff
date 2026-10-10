@@ -144,6 +144,11 @@ private:
         void *mGoalRim = nullptr, *mGoalBoard = nullptr, *mGmanInstance = nullptr;
         void *mTPos = nullptr, *mTScale = nullptr, *mTChildCount = nullptr, *mTGetChild = nullptr, *mCTransform = nullptr;
         void *mGetComp = nullptr, *mGetCompKids = nullptr, *mGetCompParent = nullptr;
+        // stage D9b: more ways to find the backboard's collider (the real game keeps it OUTSIDE the goal's own little group of objects)
+        void *mTParent = nullptr, *mObjName = nullptr, *mCIsTrigger = nullptr, *mCEnabled = nullptr;
+        struct Overload { void* m = nullptr; std::vector<std::string> types; };      // an engine function and the type names of all its parameters
+        Overload ovCompsKids, ovOverlapSphere, ovOverlapBox, ovFindAll;               // Component.GetComponentsInChildren(Type[,bool]), Physics.OverlapSphere / OverlapBox, Object.FindObjectsOfType(Type)
+        std::string engineList;                                                        // the engine's search calls that exist (for the facts file)
         void *mCBounds = nullptr, *mCMaterial = nullptr, *mSRadius = nullptr;
         void *mMBounce = nullptr, *mMDyn = nullptr, *mMStat = nullptr, *mMBounceCombine = nullptr, *mMFrictionCombine = nullptr;
         void *mRAngVel = nullptr, *mRAngDrag = nullptr, *mRMass = nullptr, *mRInertia = nullptr, *mRCcd = nullptr, *mPBounceThr = nullptr;
@@ -238,6 +243,10 @@ private:
     bool callInt(void* method, uintptr_t self, int* out);
     uintptr_t callObjArg(void* method, uintptr_t self, void* arg0);                // one argument: a game object itself, or a pointer to an int
     bool callBounds(void* method, uintptr_t self, tzaim::Vec3* centre, tzaim::Vec3* extents);
+    uintptr_t callOverload(const BankLayout::Overload& o, uintptr_t self, const tzaim::Vec3* v0, const tzaim::Vec3* v1, float f, void* ref, bool boolFill);   // fills the arguments by their type names
+    bool readObjArray(uintptr_t arr, size_t cap, std::vector<uintptr_t>* out, size_t* total);                     // a managed array of objects
+    std::string bankNameOf(uintptr_t obj);                                                                         // the engine's name of an object ("" when it cannot be read)
+    std::string bankClassOf(uintptr_t obj) const;                                                                  // the class name of an object
 
     // ---- stage D9 (Bank mode), aim_bank.cpp
     bool resolveBankLayout(std::string* why, bool* transient);                    // link thread
@@ -246,6 +255,7 @@ private:
     bool bankListGoals(std::vector<uintptr_t>* out, std::string* why);
     bool bankGoalFor(const tzaim::Vec3& hoop, uintptr_t* goal, tzaim::Vec3* ring, std::string* why);
     bool bankBoardFor(uintptr_t goal, const tzaim::Vec3& ring, BoardInfo** out, std::string* why);
+    bool bankBoardBuild(uintptr_t goal, const tzaim::Vec3& ring, BoardInfo** out, std::string* why);              // the real work behind bankBoardFor (which remembers failures)
     uintptr_t bankFindCollider(uintptr_t goal, uintptr_t boardT, const tzaim::Vec3& expectCentre, const tzaim::Vec3& size, bool* strict, tzaim::Vec3* cOut, tzaim::Vec3* eOut, std::string* how);
     bool bankMaterial(uintptr_t collider, float* bounce, float* dyn, float* stat, int* bounceCombine, int* frictionCombine, std::string* note);
     void bankWatchStep(Shot& s, int stepNow, const tzaim::Vec3& pos);
@@ -288,6 +298,9 @@ private:
         bool engineChecked = false;
         int bindNotes = 0, releaseNotes = 0;
         std::vector<BoardInfo> boards;             // stage D9: backboards measured so far
+        struct BoardFail { uintptr_t goal = 0; double next = 0; int tries = 0; std::string why; };
+        bool heavyOk = true;                       // stage D9b: the slow search through the whole scene is allowed on this attempt (the 1st and the 3rd only)
+        std::vector<BoardFail> boardFails;         // stage D9b: a backboard that could not be measured is tried again later, not on every shot
         double nextBankPrep = 0; int bankPrepNotes = 0, bankShotNotes = 0;
     } g_;
     std::vector<unsigned char> bcmBuf_, ballBuf_, gmBuf_, locoBuf_;

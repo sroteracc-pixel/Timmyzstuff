@@ -670,7 +670,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D9: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot (switch, distance slider, Hold Y) and the new AIMBOT BANK mode (bank shots off the backboard - FIRST VERSION, not yet proven in the real game) + ball-and-hoops scan)");
+    fact("Timmyzstuff facts (stage D9b: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot (switch, distance slider, Hold Y) and the new AIMBOT BANK mode (bank shots off the backboard - 2nd version: looks for the board's solid part in more places; not yet proven in the real game) + ball-and-hoops scan)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -985,7 +985,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D9: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot with game link)");
+    logf_("payload loaded (stage D9b: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot with game link)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

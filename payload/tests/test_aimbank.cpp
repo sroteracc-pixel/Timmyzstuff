@@ -105,6 +105,7 @@ static void throwFrom(double fx, double fy, double fz, double tx, double tz, dou
 
 static void (*fake_bank_set)(const char*, double, double, double) = nullptr;
 static void (*fake_bank_hide)(const char*) = nullptr;
+static void (*fake_bank_hide_params)(const char*, int) = nullptr;
 static void (*fake_bank_state)(double*) = nullptr;
 static void (*fake_bank_field_fn)(const char*, const char*, int) = nullptr;
 static void fake_bank_field(const char* k, const char* f, int a) { fake_bank_field_fn(k, f, a); }
@@ -162,9 +163,10 @@ int main(int, char** argv) {
     fake_fdt = reinterpret_cast<double (*)()>(dlsym(gLib, "fake_aim_fdt"));
     fake_bank_set = reinterpret_cast<void (*)(const char*, double, double, double)>(dlsym(gLib, "fake_bank_set"));
     fake_bank_hide = reinterpret_cast<void (*)(const char*)>(dlsym(gLib, "fake_bank_hide"));
+    fake_bank_hide_params = reinterpret_cast<void (*)(const char*, int)>(dlsym(gLib, "fake_bank_hide_params"));
     fake_bank_state = reinterpret_cast<void (*)(double*)>(dlsym(gLib, "fake_bank_state"));
     fake_bank_field_fn = reinterpret_cast<void (*)(const char*, const char*, int)>(dlsym(gLib, "fake_bank_field"));
-    if (!fake_bank_set || !fake_bank_hide || !fake_bank_state) { std::printf("the pretend runtime has no backboards\n"); return 2; }
+    if (!fake_bank_set || !fake_bank_hide || !fake_bank_hide_params || !fake_bank_state) { std::printf("the pretend runtime has no backboards\n"); return 2; }
     const bool verbose = std::getenv("AIMTEST_VERBOSE") != nullptr;
 
     std::printf("== modes: only one at a time\n");
@@ -215,7 +217,7 @@ int main(int, char** argv) {
         CHECK("... the engine's bounce threshold, spin, spin drag and spin factor", in.find("bounce threshold 2.00 m/s") != std::string::npos && in.find("spin drag 0.050, spin factor 0.400") != std::string::npos);
         CHECK("... the collision mode, the ring and the board (face centre, direction, size)", in.find("collision mode: Discrete") != std::string::npos && in.find("ring (0.000, 3.100, 12.660)") != std::string::npos &&
               in.find("Face centre (0.000, 3.450, 13.040), faces (0.000, 0.000, -1.000), half size 0.915 x 0.535, thickness 0.050") != std::string::npos);
-        CHECK("... where the board's numbers came from, and the game's own data next to them", in.find("collider on the backboard object (shape and place match the board)") != std::string::npos && in.find("_backboardSize (1.830, 1.070, 0.050)") != std::string::npos && in.find("pointing TOWARDS the court") != std::string::npos);
+        CHECK("... where the board's numbers came from, and the game's own data next to them", in.find("found via backboard object (its box has the board's size and place)") != std::string::npos && in.find("_backboardSize (1.830, 1.070, 0.050)") != std::string::npos && in.find("pointing TOWARDS the court") != std::string::npos);
         CHECK("... the cross-check against the ball's own runtime settings", countNotes("bank cross-check: the ball's own runtime settings say bounciness 0.800, static friction 0.500, dynamic friction 0.500") == 1);
         const std::string dec = findNote("decision: BANK SHOT");
         CHECK("the decision line says what it will do: where on the board, how hard, how solid", dec.find("touches the board") != std::string::npos && dec.find("then enters the ring at") != std::string::npos && dec.find("bounce held in") != std::string::npos && dec.find("= kept") != std::string::npos);
@@ -304,8 +306,8 @@ int main(int, char** argv) {
             {"sidespin (20 rad/s about y)", [] { fake_bank_set("release_spin", 0, 20, 0); }, "spin (0.0", 0.80, 3},
             {"strong spin drag (0.5)", [] { fake_bank_set("ang_drag", 0.5, 0, 0); fake_bank_set("release_spin", -25, 0, 0); }, "spin drag 0.500", 0.80, 3},
             {"bounce threshold 3 m/s", [] { fake_bank_set("bounce_threshold", 3.0, 0, 0); }, "bounce threshold 3.00 m/s", 0.80, 2},
-            {"the board's collider sits on a child object of the backboard object", [] { fake_bank_set("rebuild", 1, 0, 0); }, "collider on the backboard object", 0.80, 3},
-            {"the board's collider sits on a different object of the goal (found by walking the goal's objects)", [] { fake_bank_set("rebuild", 2, 0, 0); }, "collider found while walking the goal's objects", 0.80, 3},
+            {"the board's collider sits on a child object of the backboard object", [] { fake_bank_set("rebuild", 1, 0, 0); }, "found via backboard object", 0.80, 3},
+            {"the board's collider sits on a different object of the goal (found by walking the goal's objects)", [] { fake_bank_set("rebuild", 2, 0, 0); }, "found via goal object", 0.80, 3},
             {"the game's board direction points away from the court (flipped sign)", [] { fake_bank_set("flip_normal", 0, 0, 0); }, "pointing AWAY from the court", 0.80, 3},
             {"the game's backboard data is 0.3 m off from the collider (the collider wins)", [] { fake_bank_set("board_data_dy", 0.3, 0, 0); }, "from the collider box", 0.80, 3},
             {"no material on the board (the engine's default: bounce 0, friction 0.6)", [] { fake_bank_set("board_no_material", 0, 0, 0); }, "no material set (the engine's default material", 0.40, 0},
@@ -341,14 +343,101 @@ int main(int, char** argv) {
         }
     }
 
+    std::printf("== the board's collider is found like in YOUR game: outside the goal's own small group of objects (the real facts file: 3-4 objects, none with a collider)\n");
+    {
+        // The real game (from your facts file): GetComponent(Type) exists, GetComponentInChildren / InParent do NOT, Physics.get_bounceThreshold does NOT.
+        auto yourGame = [] { fake_bank_hide("GetComponentInChildren"); fake_bank_hide("GetComponentInParent"); fake_bank_hide("get_bounceThreshold"); };
+        struct Real { const char* name; std::function<void()> setup; const char* via; const char* engineNote; };
+        const Real vs[] = {
+            {"layout of the real game: board on a sibling under the hoop's parent (parent + GetComponentsInChildren exist)", [&] { fake_bank_set("rebuild", 3, 0, 0); yourGame(); }, "found via parent 1 above the goal 'Hoop_", "Transform.get_parent yes"},
+            {"... and no GetComponentsInChildren (the objects are walked one by one)", [&] { fake_bank_set("rebuild", 3, 0, 0); yourGame(); fake_bank_hide("GetComponentsInChildren"); }, "found via parent 1 above the goal 'Hoop_", "GetComponentsInChildren NO"},
+            {"... and no Transform.get_parent: the physics engine is asked what is at the board's place", [&] { fake_bank_set("rebuild", 3, 0, 0); yourGame(); fake_bank_hide("get_parent"); }, "found via physics query at the board's place", "Transform.get_parent NO"},
+            {"the collider is far away under the court's root: only a physics query finds it", [&] { fake_bank_set("rebuild", 4, 0, 0); yourGame(); }, "found via physics query at the board's place", "Physics.OverlapSphere yes"},
+            {"... Physics.OverlapSphere has only its 3-parameter form", [&] { fake_bank_set("rebuild", 4, 0, 0); yourGame(); fake_bank_hide_params("OverlapSphere", 2); fake_bank_hide_params("OverlapSphere", 4); }, "found via physics query at the board's place", "Physics.OverlapSphere yes"},
+            {"... Physics.OverlapSphere has only its 4-parameter form", [&] { fake_bank_set("rebuild", 4, 0, 0); yourGame(); fake_bank_hide_params("OverlapSphere", 2); fake_bank_hide_params("OverlapSphere", 3); }, "found via physics query at the board's place", "Physics.OverlapSphere yes"},
+            {"... no OverlapSphere at all: OverlapBox is used", [&] { fake_bank_set("rebuild", 4, 0, 0); yourGame(); fake_bank_hide("OverlapSphere"); }, "found via physics query at the board's place", "Physics.OverlapSphere NO"},
+            {"... OverlapBox only in its 5-parameter form", [&] { fake_bank_set("rebuild", 4, 0, 0); yourGame(); fake_bank_hide("OverlapSphere"); fake_bank_hide_params("OverlapBox", 2); }, "found via physics query at the board's place", "Physics.OverlapBox yes"},
+            {"... no Overlap calls at all: every collider of the scene is searched", [&] { fake_bank_set("rebuild", 4, 0, 0); yourGame(); fake_bank_hide("OverlapSphere"); fake_bank_hide("OverlapBox"); }, "found via search of the whole scene", "Object.FindObjectsOfType yes"},
+            {"... and only FindObjectsOfType(Type, bool)", [&] { fake_bank_set("rebuild", 4, 0, 0); yourGame(); fake_bank_hide("OverlapSphere"); fake_bank_hide("OverlapBox"); fake_bank_hide_params("FindObjectsOfType", 1); }, "found via search of the whole scene", "Object.FindObjectsOfType yes"},
+            {"the engine has no get_name / get_isTrigger / get_enabled (only used for the report and a safety check)", [&] { fake_bank_set("rebuild", 3, 0, 0); yourGame(); fake_bank_hide("get_name"); fake_bank_hide("get_isTrigger"); fake_bank_hide("get_enabled"); }, "found via parent 1 above the goal", "Object.get_name NO"},
+            {"the board's box is thicker than the game's board numbers (0.3 m thick, same front face)", [&] { fake_bank_set("rebuild", 3, 0, 0); yourGame(); fake_bank_set("thick_board", 0.15, 0, 0); }, "found via parent 1 above the goal", "Transform.get_parent yes"},
+        };
+        for (const Real& v : vs) {
+            Rig r;
+            v.setup();
+            r.start(); r.link->setAsk(2, 50, false);
+            r.connect(); r.run(1.5);
+            const std::string engineLine = findNote("ways to look for the backboard");       // (written once at the start; a shot clears the notes)
+            const double spots[4][3] = {{0, 6, kNorthZ}, {-5, 9, kNorthZ}, {5, 3, kNorthZ}, {2, -6, -kNorthZ}};         // three spots at the north hoop, one at the south hoop
+            int good = 0, bad = 0, banks = 0; bool viaOk = false;
+            for (const auto& sp : spots) {
+                const Outcome o = shootOnce(r, sp[0], sp[1], sp[2]);
+                if (goodBank(o)) ++good;
+                if (o.banked) ++banks;
+                if (!goodBank(o) && !leftAloneAsUnavailable(o, r)) ++bad;
+                if (o.banked && findNote("bank inputs").find(v.via) != std::string::npos) viaOk = true;
+                if (verbose || (!goodBank(o) && !o.unavailable)) std::printf("       %s at (%.0f, %.0f): %s\n", v.name, sp[0], sp[1], kinds(o));
+            }
+            char nm[400];
+            std::snprintf(nm, sizeof nm, "%s: every shot is a bank shot that scored or a clean 'Bank unavailable'", v.name);
+            CHECK(nm, bad == 0);
+            std::snprintf(nm, sizeof nm, "%s: at least 3 of 4 spots (both hoops) had a bank shot, and all scored", v.name);
+            CHECK(nm, good >= 3 && good == banks);
+            std::snprintf(nm, sizeof nm, "%s: the facts file says where the collider was found ('%s')", v.name, v.via);
+            CHECK(nm, viaOk);
+            std::snprintf(nm, sizeof nm, "%s: the facts file lists which search calls the game has ('%s')", v.name, v.engineNote);
+            CHECK(nm, engineLine.find(v.engineNote) != std::string::npos);
+            r.link->stop();
+        }
+    }
+
+    std::printf("== a GetComponent that does not work as I call it is noticed (the physics query finds a collider, then GetComponent finds nothing on it)\n");
+    {
+        Rig r;
+        fake_bank_set("rebuild", 4, 0, 0); fake_bank_set("getcomp_broken", 1, 0, 0);
+        fake_bank_hide("GetComponentInChildren"); fake_bank_hide("GetComponentInParent"); fake_bank_hide("GetComponentsInChildren");
+        r.start(); r.link->setAsk(2, 50, false);
+        r.connect(); r.run(1.5);
+        const Outcome o = shootOnce(r, 0, 6.0);
+        CHECK("the board is still found (by the physics query) and the shot is a bank shot that scores", goodBank(o));
+        CHECK("the facts file says the GetComponent check gave nothing and that search cannot be trusted", findNote("bank inputs").find("gave NOTHING - the GetComponent search above cannot be trusted") != std::string::npos);
+        r.link->stop();
+    }
+
+    std::printf("== nothing of the search works: the story is written down and the throw is left alone\n");
+    {
+        Rig r;
+        fake_bank_set("rebuild", 4, 0, 0);
+        fake_bank_hide("GetComponentInChildren"); fake_bank_hide("GetComponentInParent");
+        fake_bank_hide("OverlapSphere"); fake_bank_hide("OverlapBox"); fake_bank_hide("FindObjectsOfType");
+        r.start(); r.link->setAsk(2, 50, false);
+        r.connect(); r.run(1.5);
+        const std::string engineLine = findNote("ways to look for the backboard");
+        const Outcome o = shootOnce(r, 0, 6.0);
+        CHECK("collider far away and no way to ask for it: 'Bank unavailable', throw left alone, no direct shot", o.unavailable && !o.banked && !o.direct && !o.setCalled);
+        const std::string m = r.link->lastShotText();
+        CHECK("the menu line says what could not be done ('I cannot measure the backboard (could not find the backboard's collider)')", m.find("Bank unavailable - I cannot measure the backboard (could not find the backboard's collider)") != std::string::npos);
+        const std::string d = findNote("decision: LEFT ALONE - Bank unavailable");
+        CHECK("the facts file lists what was searched (the goal's objects, the parents) and how many colliders were seen", d.find("no collider near the board's place") != std::string::npos && d.find("parent 1 above the goal 'Hoop_") != std::string::npos && d.find("colliders seen") != std::string::npos);
+        CHECK("the facts file says Transform.get_parent exists and which search calls are missing", engineLine.find("Transform.get_parent yes") != std::string::npos && engineLine.find("Physics.OverlapSphere NO") != std::string::npos && engineLine.find("Physics offers:") != std::string::npos);
+        // not searched again on every shot: a second shot right away gets the remembered answer, a shot after the pause searches again
+        auto fakeInvokes = [&]() { double a[16] = {0}; fake_state(a); return static_cast<long>(a[6]); };
+        const long calls0 = fakeInvokes();
+        const Outcome o2 = shootOnce(r, 0, 6.0);
+        const long calls1 = fakeInvokes();
+        CHECK("a second shot soon after: the same clean answer", o2.unavailable && !o2.banked && !o2.direct);
+        CHECK("... and the search is not repeated (few engine calls)", calls1 - calls0 < 400);
+        r.link->stop();
+    }
+
     std::printf("== things the game may not give us: every one says 'Bank unavailable: <why>' and leaves the throw alone\n");
     {
         struct Broken { const char* name; std::function<void()> setup; const char* reason; const char* detail; bool atStart; };
         const Broken bs[] = {
-            {"no collider on the backboard", [] { fake_bank_set("no_board_collider", 0, 0, 0); }, "I cannot measure the backboard", "no collider of the board's size near it", false},
+            {"no collider on the backboard", [] { fake_bank_set("no_board_collider", 0, 0, 0); }, "I cannot measure the backboard", "no collider near the board's place", false},
             {"the board's collider is destroyed", [] { fake_bank_set("destroy_board_collider", 0, 0, 0); }, "I cannot measure the backboard", "no collider", false},
             {"the board's collider is far too big (2x)", [] { fake_bank_set("wrong_size_collider", 2.0, 0, 0); }, "", "", false},
-            {"the game's board data is 0.6 m away from the real collider", [] { fake_bank_set("board_data_dy", 0.6, 0, 0); }, "I cannot measure the backboard", "no collider of the board's size near it", false},
+            {"the game's board data is 0.6 m away from the real collider", [] { fake_bank_set("board_data_dy", 0.6, 0, 0); }, "I cannot measure the backboard", "not believable", false},
             {"the game's board size is nonsense (0.1 x 0.1 x 0.01)", [] { fake_bank_set("board_size_data", 0.1, 0.1, 0.01); }, "I cannot measure the backboard", "not believable", false},
             {"the board's material object is gone", [] { fake_bank_set("board_material_gone", 0, 0, 0); }, "I cannot read the backboard's bounce", "its material object is gone", false},
             {"the ball's collider is not linked", [] { fake_bank_set("ball_collider_null", 0, 0, 0); }, "I cannot read the ball's size", "not linked or gone", false},
@@ -370,7 +459,7 @@ int main(int, char** argv) {
             {"the engine has no Collider.get_bounds", [] { fake_bank_hide("get_bounds"); }, "", "Collider.get_bounds", true},
             {"the engine has no Collider.get_sharedMaterial", [] { fake_bank_hide("get_sharedMaterial"); }, "", "Collider.get_sharedMaterial", true},
             {"the engine has no SphereCollider.get_radius", [] { fake_bank_hide("get_radius"); }, "", "SphereCollider.get_radius", true},
-            {"the engine has none of the three GetComponent calls", [] { fake_bank_hide("GetComponent"); fake_bank_hide("GetComponentInChildren"); fake_bank_hide("GetComponentInParent"); }, "", "Component.GetComponent(Type)", true},
+            {"the engine has no way at all to find a collider (no GetComponent, GetComponentsInChildren, Overlap, FindObjectsOfType)", [] { fake_bank_hide("GetComponent"); fake_bank_hide("GetComponentInChildren"); fake_bank_hide("GetComponentInParent"); fake_bank_hide("GetComponentsInChildren"); fake_bank_hide("OverlapSphere"); fake_bank_hide("OverlapBox"); fake_bank_hide("FindObjectsOfType"); }, "", "Component.GetComponent(Type)", true},
             {"the engine has no PhysicMaterial.get_bounceCombine", [] { fake_bank_hide("get_bounceCombine"); }, "", "PhysicMaterial.get_bounceCombine", true},
             {"the engine's PhysicMaterialCombine list cannot be read", [] { fake_bank_field("PhysicMaterialCombine", "", 2); }, "", "PhysicMaterialCombine", true},
         };

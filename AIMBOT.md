@@ -1,4 +1,20 @@
-# Aimbot + Aimbot Bank (stage D9)
+# Aimbot + Aimbot Bank (stage D9b)
+
+**Stage D9b - what changed after your first test (the "I cannot measure the backboard" message).**
+You sent the facts file. It said: `could not find the backboard's collider: no collider of the board's size near it (4 objects tested, 0 with a collider)`.
+That means: the mod needs the backboard's **solid part** (the engine's "collider") to read how bouncy the board is, and it looked for it only on the hoop's own small group of objects (3-4 objects).
+In your real game the solid part is somewhere else. My pretend game had put it inside that group, so my tests could not show this. (The numbers for the board itself - size 1.825 x 1.25 m, about 0.4 m behind the ring - were fine.)
+The same file also showed that your game has `GetComponent` but **not** `GetComponentInChildren` / `GetComponentInParent`, and no `Physics.get_bounceThreshold` (the mod then assumes the engine's usual 2 m/s and says so).
+
+**What D9b does about it** (in this order, nearest first; it stops at the first collider whose box has the board's size and place):
+1. looks at the goal's objects **and up to 4 parent objects above them** (everything below each parent), using the engine call `GetComponentsInChildren` if your game has it, otherwise walking the objects one by one;
+2. asks the physics engine what is at the board's place (`Physics.OverlapSphere`, or `OverlapBox` if that is what the game has) - this finds the collider wherever it sits in the scene;
+3. as a last resort, looks at every collider of the scene (`Object.FindObjectsOfType`).
+It skips triggers and switched-off colliders, never uses a huge collider (the court's floor) as the board, and checks that its own `GetComponent` call really works.
+If it **still** cannot find it, the menu says "Bank unavailable - I cannot measure the backboard (could not find the backboard's collider)" and the facts file now tells the **whole story**: what the engine offers, which objects (with their names) were searched, how many colliders were seen, and the nearest colliders with their names, boxes and distances. That is enough for me to fix it in one more step.
+A board that fails is searched again after 5 s, 15 s, 45 s, then every 2 minutes (not on every shot).
+
+**Tested only against my pretend game** (now built like your real one: the goal is a small leaf object, the board's solid part sits on a sibling object or far away under the court). All 299 Bank checks pass: it finds the board in 12 variants (with and without each engine call), both hoops, and every bank shot scored. **It has still never run in your real game.**
 
 **Stage D9 adds a second switch, "Aimbot Bank"** (Menu -> Basketball). The first Aimbot (direct shots) is **unchanged**. Read the "Aimbot Bank (stage D9)" part right below first,
 then the older parts (D8c) for the direct Aimbot.
@@ -20,7 +36,7 @@ If a bank shot is **not possible** from where you stand, it does **not** shoot a
 The mod measures all of this in the real game while you play, and writes it into the facts file (`bank inputs` line) so I can check it:
 | What | Where it comes from |
 |---|---|
-| Backboard position, direction it faces, width and height | the game's `BasketballGoal` object (`_backboardCenter`, `_backboardNormal`, `_backboardSize`, `_backboardOffset`) and the board's own collider box. The mod only trusts the collider if its size and place match the board. |
+| Backboard position, direction it faces, width and height | the game's `BasketballGoal` object (`_backboardCenter`, `_backboardNormal`, `_backboardSize`, `_backboardOffset`) and the board's own collider box (found as described in "Stage D9b" above). The mod only trusts the collider if its size and place match the board; if the collider found is not the board's size it is used only for the bounce and the facts file says so. |
 | Ring centre and ring radius | the game's `_rimCenter` and `_rimRadius` (your lobby file: radius 0.2286 m, hoops at (0, 3.1, +-12.66)) |
 | Ball size | the radius of the ball's own collider times its scale |
 | Gravity, air drag, physics step | read from the engine (as in D8) |
@@ -57,11 +73,11 @@ I did **not** add a floating message in the game view: the overlay only exists w
 ### What was VERIFIED (on the PC, against a pretend game with my own independent physics)
 - The two switches: only one ON at a time, in every order, with fast taps, with Y; the direct Aimbot is unchanged (all old tests still pass: 13 older test files).
 - The bank maths: **324 checks**, including 300 random scenes (bounce 0.35-0.9, friction 0-0.7, ball radius 0.10-0.15 m, spin, physics step 1/60-1/90 s, from the wing to 1.5 m from the baseline): 232 plans found, 68 refusals, **no plan came within 18.8 mm of the rim**, solve time 1.7 ms on average (worst 6 ms).
-- The game-reading part (`aim_bank.cpp`, **243 checks**) against a pretend `libil2cpp`: it finds the goal, the board, the materials; bank shots from most spots 3-11 m in front of **both** hoops hit the board once, did not touch the pole or the rim, and scored; every "unavailable" case leaves the throw alone; the test mode says WOULD BANK and changes nothing.
+- The game-reading part (`aim_bank.cpp`, **299 checks**, 12 of them new in D9b for the real-game layout) against a pretend `libil2cpp`: it finds the goal, the board, the materials; bank shots from most spots 3-11 m in front of **both** hoops hit the board once, did not touch the pole or the rim, and scored; every "unavailable" case leaves the throw alone; the test mode says WOULD BANK and changes nothing.
 - Memory and thread checks (AddressSanitizer / ThreadSanitizer) on the new code.
 
 ### What I could NOT verify (guesses - any can make the first real test fail)
-1. **The real backboard.** I read it from the game's fields and its collider, but I have never seen your real game's numbers. The first shot's `bank inputs` line shows what it measured: board centre, normal, width, height, and how it was found ("by the board's own collider" / "from the fields only").
+1. **The real backboard.** I read it from the game's fields and its collider. The numbers in your file look right (1.825 x 1.25 m, 0.4 m behind the ring, normal along the court's length), but **D9b's search for the solid part has never run in the real game**. The first lines of the facts file say what it found (`aim: BANK: measured the backboard ... found via ...`) or the whole story if it did not.
 2. **The real bounce.** Whether the real engine mixes the materials like I do, and whether the game changes the ball's speed itself when it hits the board (some games add their own "bank assist" - the report prints `_lastBankAssistInTime` and `_assistInGoal` before and after, and "THE GAME CHANGED OUR SPEED" if it overrides us).
 3. **Spin.** Real throws have backspin. If the mod cannot read it, it assumes none and the file says "(assumed)". Spin changes the bounce, so shots may land a little off.
 4. **The size of the real error.** The pretend game uses my own physics, so it agrees with my maths by construction. The real game may bounce differently, and then the ball goes in a different spot. That is why each bank shot writes `MEASURED BOUNCE` (speed into the board vs out, versus what the plan used) and flight samples around the touch - they let me correct the numbers.
@@ -70,6 +86,7 @@ I did **not** add a floating message in the game view: the overlay only exists w
 7. **Y button, ceiling, official matches:** same open points as for the direct Aimbot below.
 
 ### Bank test plan - try it from several positions (the hoop you throw at is the one you aim at)
+First, **wait about 10 seconds after turning Aimbot Bank on** (the mod measures both backboards in the background). The facts file's `aim: BANK: measured the backboard of the goal with its ring at ...` lines (one per hoop) say it worked.
 Do these with **Aimbot Bank ON, Hold Y to aim ON**, and hold **Y** while you let go. After each shot read the amber/white "last shot" line on the Basketball page.
 1. **Straight in front, about 6 m from the board** (middle of the court, facing the hoop). Expected: "BANK from ~6 m - hits the board ~0 m off centre". The ball should touch the front of the board once, then drop in.
 2. **Left wing, about 45 degrees, 6-8 m.** Expected: bank shot, touching the board on the side you are on.
@@ -85,7 +102,7 @@ Do these with **Aimbot Bank ON, Hold Y to aim ON**, and hold **Y** while you let
 12. **Movement** still works (speed, jump, gravity).
 13. Press **Get facts** and send me the file, plus for each shot: where you stood (rough), what you SAW (touched the board? where did it go?), and what the last-shot line said.
 
-**What I need back:** the facts file lines starting `aim: SHOT #n bank inputs`, `bank cross-check`, `bank check` (it has `MEASURED BOUNCE`) and `decision: BANK SHOT`. The summary line ends with `BANK shots N (scored N, missed N), Bank unavailable N`.
+**What I need back:** the facts file lines starting `aim: BANK:` (what the game offers, and whether the backboard was measured), `aim: SHOT #n bank inputs`, `bank cross-check`, `bank check` (it has `MEASURED BOUNCE`) and `decision: BANK SHOT`. **If the menu still says "I cannot measure the backboard", just send the facts file again - it now contains the reason in full.** The summary line ends with `BANK shots N (scored N, missed N), Bank unavailable N`.
 If a bank shot goes wrong, **tell me the position and what the ball did** (missed the board? hit it too low/high? bounced too far? hit the rim?). The measured bounce and flight samples tell me which number to fix.
 
 ---

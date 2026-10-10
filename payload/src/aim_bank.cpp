@@ -7,6 +7,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <unordered_set>
 
 #include "aim_link.h"
 
@@ -178,6 +179,56 @@ bool AimLink::resolveBankLayout(std::string* why, bool* transient) {
     B.mMBounceCombine = m0(kMat, "get_bounceCombine"); B.mMFrictionCombine = m0(kMat, "get_frictionCombine");
     B.mRAngVel = m0(kRb, "get_angularVelocity"); B.mRAngDrag = m0(kRb, "get_angularDrag"); B.mRMass = m0(kRb, "get_mass"); B.mRInertia = m0(kRb, "get_inertiaTensor");
     B.mRCcd = m0(kRb, "get_collisionDetectionMode"); B.mPBounceThr = m0(kPhys, "get_bounceThreshold");
+    B.mTParent = m0(kTransform, "get_parent");
+    {   // stage D9b: more ways to find the backboard's collider (the real game keeps it OUTSIDE the goal's own small group of objects)
+        void* kObject = cls("Object");
+        B.mObjName = m0(kObject, "get_name");
+        B.mCIsTrigger = m0(kCollider, "get_isTrigger"); B.mCEnabled = m0(kCollider, "get_enabled");
+        auto typeName = [&](void* m, unsigned i) -> std::string {
+            void* pt = api.method_get_param ? api.method_get_param(m, i) : nullptr;
+            if (!pt || !api.type_get_name) return "";
+            char* tn = api.type_get_name(pt); std::string r = tn ? tn : "";
+            if (tn && api.il2cpp_free) api.il2cpp_free(tn);
+            return r;
+        };
+        auto fillable = [](const std::string& t) { return t == "System.Int32" || t == "System.Boolean" || t == "UnityEngine.QueryTriggerInteraction" || t == "UnityEngine.Quaternion"; };
+        // the overload with the fewest parameters whose first parameters have exactly these types and whose other parameters can be filled with a plain default
+        auto findOv = [&](void* k, const char* name, const std::vector<std::string>& prefix) -> BankLayout::Overload {
+            BankLayout::Overload best;
+            if (!k || !api.class_get_methods || !api.method_get_name || !api.method_get_param_count || !api.method_get_param || !api.type_get_name) return best;
+            for (void* kk = k; kk && !best.m; kk = api.class_get_parent ? api.class_get_parent(kk) : nullptr) {
+                void* it = nullptr;
+                while (void* m = api.class_get_methods(kk, &it)) {
+                    const char* mn = api.method_get_name(m);
+                    if (!mn || std::strcmp(mn, name) != 0) continue;
+                    const unsigned n = api.method_get_param_count(m);
+                    if (n < prefix.size() || n > 6) continue;
+                    std::vector<std::string> tys; bool ok = true;
+                    for (unsigned i = 0; i < n; ++i) { tys.push_back(typeName(m, i)); if (i < prefix.size() ? tys[i] != prefix[i] : !fillable(tys[i])) ok = false; }
+                    if (ok && (!best.m || tys.size() < best.types.size())) { best.m = m; best.types = tys; }
+                }
+            }
+            return best;
+        };
+        B.ovCompsKids = findOv(kComponent, "GetComponentsInChildren", {"System.Type"});
+        B.ovOverlapSphere = findOv(kPhys, "OverlapSphere", {"UnityEngine.Vector3", "System.Single"});
+        B.ovOverlapBox = findOv(kPhys, "OverlapBox", {"UnityEngine.Vector3", "UnityEngine.Vector3"});
+        B.ovFindAll = findOv(kObject, "FindObjectsOfType", {"System.Type"});
+        auto yn = [](bool b) { return b ? "yes" : "NO"; };
+        B.engineList = std::string("Transform.get_parent ") + yn(B.mTParent != nullptr) + ", Object.get_name " + yn(B.mObjName != nullptr) + ", Collider.get_isTrigger " + yn(B.mCIsTrigger != nullptr) + ", Collider.get_enabled " + yn(B.mCEnabled != nullptr) +
+                       ", GetComponentsInChildren " + yn(B.ovCompsKids.m != nullptr) + ", Physics.OverlapSphere " + yn(B.ovOverlapSphere.m != nullptr) + ", Physics.OverlapBox " + yn(B.ovOverlapBox.m != nullptr) + ", Object.FindObjectsOfType " + yn(B.ovFindAll.m != nullptr);
+        // what the physics class really offers (names only), so the next version can use what exists
+        if (kPhys && api.class_get_methods && api.method_get_name && api.method_get_param_count) {
+            std::string names; void* it = nullptr; int n = 0;
+            while (void* m = api.class_get_methods(kPhys, &it)) {
+                const char* mn = api.method_get_name(m);
+                if (!mn || (std::strncmp(mn, "Overlap", 7) != 0 && std::strncmp(mn, "Raycast", 7) != 0 && std::strncmp(mn, "Sphere", 6) != 0 && std::strncmp(mn, "Check", 5) != 0 && std::strncmp(mn, "Linecast", 8) != 0)) continue;
+                if (++n > 40) break;
+                names += fmt(" %s(%u)", mn, api.method_get_param_count(m));
+            }
+            B.engineList += " | Physics offers:" + (names.empty() ? std::string(" none of Overlap/Raycast/Check/Sphere") : names);
+        }
+    }
     B.mGetComp = methodWithParam(api, kComponent, "GetComponent", 1, "System.Type");
     B.mGetCompKids = methodWithParam(api, kComponent, "GetComponentInChildren", 1, "System.Type");
     B.mGetCompParent = methodWithParam(api, kComponent, "GetComponentInParent", 1, "System.Type");
@@ -187,7 +238,8 @@ bool AimLink::resolveBankLayout(std::string* why, bool* transient) {
     need(B.mTPos, "Transform.get_position"); need(B.mTScale, "Transform.get_lossyScale"); need(B.mCTransform, "Component.get_transform");
     need(B.mCBounds, "Collider.get_bounds"); need(B.mCMaterial, "Collider.get_sharedMaterial"); need(B.mSRadius, "SphereCollider.get_radius");
     need(B.mMBounce, "PhysicMaterial.get_bounciness"); need(B.mMDyn, "PhysicMaterial.get_dynamicFriction"); need(B.mMBounceCombine, "PhysicMaterial.get_bounceCombine"); need(B.mMFrictionCombine, "PhysicMaterial.get_frictionCombine");
-    if (!B.mGetComp && !B.mGetCompKids && !B.mGetCompParent) lacks += "Component.GetComponent(Type) ";
+    if (!B.mGetComp && !B.mGetCompKids && !B.mGetCompParent && !B.ovCompsKids.m && !B.ovOverlapSphere.m && !B.ovOverlapBox.m && !B.ovFindAll.m)
+        lacks += "any way to find the board's collider (Component.GetComponent(Type), GetComponentsInChildren, Physics.OverlapSphere / OverlapBox, Object.FindObjectsOfType) ";
     if (!api.class_get_type || !api.type_get_object) lacks += "il2cpp_class_get_type/il2cpp_type_get_object ";
     if (!lacks.empty()) return fail("the engine functions I need are missing: " + lacks);
     B.combineNames = enumNames(api, "UnityEngine", "PhysicMaterialCombine");
@@ -207,6 +259,7 @@ bool AimLink::resolveBankLayout(std::string* why, bool* transient) {
                   B.mRAngVel ? "yes" : "NO", B.mRAngDrag ? "yes" : "NO", B.mRMass ? "yes" : "NO", B.mRInertia ? "yes" : "NO", B.mRCcd ? "yes" : "NO", B.mPBounceThr ? "yes" : "NO",
                   (B.mTChildCount && B.mTGetChild) ? "yes" : "NO", B.mGetComp ? "yes" : "NO", B.mGetCompKids ? "yes" : "NO", B.mGetCompParent ? "yes" : "NO", names.c_str(), B.ccdNames.size());
     say("%s", b);
+    say("aim: BANK: ways to look for the backboard's solid part: %s", B.engineList.c_str());
     return true;
 }
 
@@ -250,69 +303,230 @@ bool AimLink::bankGoalFor(const Vec3& hoop, uintptr_t* goalOut, Vec3* ringOut, s
     return true;
 }
 
-// Looks for the collider that is the backboard: first on the backboard's own object, then through the goal's family of objects. A collider is the board when its
-// bounding box has the size of the board (_backboardSize) and sits where the board should be. Returns 0 when none is.
-uintptr_t AimLink::bankFindCollider(uintptr_t goal, uintptr_t boardT, const Vec3& expectCentre, const Vec3& size, bool* strict, Vec3* cOut, Vec3* eOut, std::string* how) {
+// ---------------------------------------------------------------- small helpers for the search (game thread)
+// Fills the arguments of an engine function by the type names of its parameters (a value type is passed as a pointer to the value, an object as the object itself) and calls it.
+// Returns the object it gave back (0 = nothing / an error). A refusal here does not count towards "three errors in a row": these are probing calls.
+uintptr_t AimLink::callOverload(const BankLayout::Overload& o, uintptr_t self, const Vec3* v0, const Vec3* v1, float f, void* ref, bool boolFill) {
+    if (!o.m || o.types.size() > 8) return 0;
+    alignas(8) unsigned char store[8][16];
+    std::memset(store, 0, sizeof store);
+    void* args[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    int nv = 0;
+    for (size_t i = 0; i < o.types.size(); ++i) {
+        const std::string& t = o.types[i];
+        if (t == "UnityEngine.Vector3") { const Vec3* v = nv == 0 ? v0 : v1; ++nv; if (!v) return 0; std::memcpy(store[i], v, 12); args[i] = store[i]; }
+        else if (t == "System.Single") { std::memcpy(store[i], &f, 4); args[i] = store[i]; }
+        else if (t == "System.Type") { args[i] = ref; }
+        else if (t == "System.Int32") { const int all = -1; std::memcpy(store[i], &all, 4); args[i] = store[i]; }                  // a layer mask: every layer
+        else if (t == "UnityEngine.QueryTriggerInteraction") { const int ignore = 1; std::memcpy(store[i], &ignore, 4); args[i] = store[i]; }     // "Ignore": triggers are not solid
+        else if (t == "UnityEngine.Quaternion") { const float q[4] = {0, 0, 0, 1}; std::memcpy(store[i], q, 16); args[i] = store[i]; }
+        else if (t == "System.Boolean") { store[i][0] = boolFill ? 1 : 0; args[i] = store[i]; }
+        else return 0;
+    }
+    bool threw; void* r = invoke(o.m, self, args, &threw);
+    g_.excRun = 0;
+    return threw ? 0 : reinterpret_cast<uintptr_t>(r);
+}
+
+// A managed array of objects: its length and (when it is not longer than `cap`) the objects in it.
+bool AimLink::readObjArray(uintptr_t arr, size_t cap, std::vector<uintptr_t>* out, size_t* total) {
+    out->clear(); *total = 0;
+    if (!plausiblePtr(arr)) return false;
+    unsigned char h[32];
+    if (!pipeGame_.copy(arr, h, sizeof h)) return false;
+    const uint64_t len = rdQ(h, 24);
+    *total = static_cast<size_t>(len);
+    if (len > cap) return true;
+    if (len == 0) return true;
+    std::vector<unsigned char> items(8 * static_cast<size_t>(len));
+    if (!pipeGame_.copy(arr + 32, items.data(), items.size())) return false;
+    for (size_t i = 0; i < static_cast<size_t>(len); ++i) { const uintptr_t p = rdP(items.data(), static_cast<int>(8 * i)); if (plausiblePtr(p)) out->push_back(p); }
+    return true;
+}
+
+// The engine's name of an object ("Backboard", ...), for the facts file only.
+std::string AimLink::bankNameOf(uintptr_t obj) {
+    if (!B_.mObjName || !plausiblePtr(obj)) return "";
+    const uintptr_t str = callObj(B_.mObjName, obj);
+    g_.excRun = 0;
+    if (!plausiblePtr(str)) return "";
+    unsigned char h[24];
+    if (!pipeGame_.copy(str, h, sizeof h)) return "";
+    const int len = rdI(h, 16);
+    if (len < 0 || len > 400) return "";
+    const int n = std::min(len, 40);
+    std::vector<unsigned char> ch(static_cast<size_t>(n) * 2 + 2);
+    if (n > 0 && !pipeGame_.copy(str + 20, ch.data(), static_cast<size_t>(n) * 2)) return "";
+    std::string r;
+    for (int i = 0; i < n; ++i) { const unsigned c = ch[static_cast<size_t>(2 * i)] | (static_cast<unsigned>(ch[static_cast<size_t>(2 * i + 1)]) << 8); r += (c >= 32 && c < 127) ? static_cast<char>(c) : '?'; }
+    if (len > n) r += "...";
+    return r;
+}
+
+std::string AimLink::bankClassOf(uintptr_t obj) const {
+    const tzscan::Api& api = L_.api;
+    if (!api.object_get_class || !api.class_get_name || !plausiblePtr(obj)) return "?";
+    void* k = api.object_get_class(reinterpret_cast<void*>(obj));
+    const char* n = k ? api.class_get_name(k) : nullptr;
+    return n ? n : "?";
+}
+
+// Looks for the collider that is the backboard. The real game keeps it OUTSIDE the goal's own small group of objects, so the search goes through several steps, nearest first:
+//   1. the goal's own objects and their parents (everything below each of them),
+//   2. whatever the physics engine finds at the board's place (Physics.OverlapSphere / OverlapBox),
+//   3. every collider in the scene (Object.FindObjectsOfType), only when the steps before found nothing that looks like the board.
+// A collider is THE board when its box has the board's size (_backboardSize) and sits where the board should be. Returns 0 when none is, with the whole story in `how`.
+uintptr_t AimLink::bankFindCollider(uintptr_t goal, uintptr_t boardT, const Vec3& expect, const Vec3& size, bool* strict, Vec3* cOut, Vec3* eOut, std::string* how) {
     *strict = false;
     const tzscan::Api& api = L_.api;
     void* typeObj = nullptr;
     if (api.class_get_type && api.type_get_object) { void* ty = api.class_get_type(B_.klassCollider); if (ty) typeObj = api.type_get_object(ty); }
     if (!typeObj) { *how = "could not make the Collider type object"; return 0; }
-    // the expected half sizes, big to small
-    float want[3] = {size.x * 0.5f, size.y * 0.5f, size.z * 0.5f};
+    float want[3] = {size.x * 0.5f, size.y * 0.5f, size.z * 0.5f};            // the expected half sizes, big to small
     std::sort(want, want + 3, [](float a, float b) { return a > b; });
-    uintptr_t bestLoose = 0; float bestLooseD = 1e9f; Vec3 lc, le;
-    int tested = 0, withCollider = 0;
-    std::string seen;
-    auto test = [&](uintptr_t tr, const char* where) -> uintptr_t {
-        uintptr_t found = 0;
-        for (void* m : {B_.mGetComp, B_.mGetCompKids, B_.mGetCompParent}) {
-            if (!m) continue;
-            const uintptr_t c = callObjArg(m, tr, typeObj);
-            if (!plausiblePtr(c)) continue;
-            unsigned char head[24];
-            if (!pipeGame_.copy(c, head, sizeof head) || rdQ(head, 16) == 0) continue;       // a destroyed engine object
-            found = c; break;
-        }
-        ++tested;
-        if (!found) return 0;
-        ++withCollider;
-        Vec3 c, e;
-        if (!callBounds(B_.mCBounds, found, &c, &e)) return 0;
-        float have[3] = {e.x, e.y, e.z};
+
+    struct Cand { uintptr_t col = 0; Vec3 c, e; float dc = 0, vol = 0; bool shapeOk = false, covers = false; std::string src; };
+    std::vector<Cand> cands;
+    std::unordered_set<uintptr_t> seen;
+    int nSeen = 0, nFar = 0, nTrigger = 0, nOff = 0;
+    std::string trail;
+    auto consider = [&](uintptr_t c, const std::string& src) {
+        if (!plausiblePtr(c) || !seen.insert(c).second) return;
+        ++nSeen;
+        unsigned char head[24];
+        if (!pipeGame_.copy(c, head, sizeof head) || rdQ(head, 16) == 0) return;       // a destroyed engine object
+        Vec3 ce, ex;
+        if (!callBounds(B_.mCBounds, c, &ce, &ex)) { g_.excRun = 0; return; }
+        const float dc = lenV(subV(ce, expect));
+        if (dc - lenV(ex) > 3.0f) { ++nFar; return; }                                   // nowhere near the board
+        bool flag = false;
+        if (B_.mCIsTrigger) { const bool ok = callBool(B_.mCIsTrigger, c, &flag); g_.excRun = 0; if (ok && flag) { ++nTrigger; return; } }       // a trigger is not solid
+        flag = true;
+        if (B_.mCEnabled) { const bool ok = callBool(B_.mCEnabled, c, &flag); g_.excRun = 0; if (ok && !flag) { ++nOff; return; } }              // a switched-off collider is not solid
+        float have[3] = {ex.x, ex.y, ex.z};
         std::sort(have, have + 3, [](float a, float b) { return a > b; });
-        bool shapeOk = true;
-        for (int i = 0; i < 3; ++i) if (std::fabs(have[i] - want[i]) > 0.35f * want[i] + 0.03f) shapeOk = false;
-        const float dc = lenV(subV(c, expectCentre));
-        if (seen.size() < 600) seen += fmt(" [%s: centre %s half sizes %s, %.2f m from the expected board centre%s]", where, fv(c).c_str(), fv(e).c_str(), static_cast<double>(dc), shapeOk ? ", same size as the board" : "");
-        if (shapeOk && dc < 0.35f) { *strict = true; *cOut = c; *eOut = e; return found; }
-        if (dc < 0.5f && dc < bestLooseD) { bestLooseD = dc; bestLoose = found; lc = c; le = e; }
-        return 0;
+        Cand k; k.col = c; k.c = ce; k.e = ex; k.dc = dc; k.src = src; k.vol = ex.x * ex.y * ex.z;
+        k.shapeOk = std::fabs(have[0] - want[0]) <= 0.35f * want[0] + 0.03f && std::fabs(have[1] - want[1]) <= 0.35f * want[1] + 0.03f && have[2] <= 0.2f;       // the board's width and height, and a thin plate
+        k.covers = std::fabs(expect.x - ce.x) <= ex.x + 0.08f && std::fabs(expect.y - ce.y) <= ex.y + 0.08f && std::fabs(expect.z - ce.z) <= ex.z + 0.08f;        // the board's middle is inside its box
+        cands.push_back(k);
     };
-    // 1. the backboard's own object (and its children / parents)
-    if (plausiblePtr(boardT)) { const uintptr_t r = test(boardT, "backboard object"); if (r) { *how = "collider on the backboard object (shape and place match the board)"; return r; } }
-    // 2. the goal's family: climb up two levels, then walk down (breadth first)
-    if (B_.mTChildCount && B_.mTGetChild) {
-        uintptr_t root = callObj(B_.mCTransform, goal);
-        if (plausiblePtr(root)) {
-            std::vector<uintptr_t> queue{root};
-            for (size_t qi = 0; qi < queue.size() && queue.size() < 300 && tested < 400; ++qi) {
+    auto haveStrict = [&]() { for (const Cand& k : cands) if (k.shapeOk && k.dc < 0.35f) return true; return false; };
+
+    // everything below one object of the hierarchy (one engine call when it exists, else walking the objects one by one)
+    std::unordered_set<uintptr_t> walked;
+    auto collect = [&](uintptr_t rootT, const std::string& label) {
+        if (!plausiblePtr(rootT)) return;
+        int kidsHere = 0;
+        if (B_.mTChildCount && callInt(B_.mTChildCount, rootT, &kidsHere) && kidsHere > 48) { trail += fmt(" [%s: %d child objects - too many to search]", label.c_str(), kidsHere); return; }
+        const int seenBefore = nSeen; const size_t candBefore = cands.size();
+        if (B_.ovCompsKids.m) {
+            std::vector<uintptr_t> items; size_t total = 0;
+            const uintptr_t arr = callOverload(B_.ovCompsKids, rootT, nullptr, nullptr, 0, typeObj, true);
+            if (!readObjArray(arr, 400, &items, &total)) { trail += fmt(" [%s: the engine call gave no list]", label.c_str()); return; }
+            if (total > 400) { trail += fmt(" [%s: %zu colliders below it - too many to search]", label.c_str(), total); return; }
+            for (uintptr_t c : items) consider(c, label);
+        } else if (B_.mTChildCount && B_.mTGetChild) {
+            std::vector<uintptr_t> queue{rootT};
+            for (size_t qi = 0; qi < queue.size() && queue.size() < 250; ++qi) {
+                g_.excRun = 0;                                    // (a failing call here is only a failed look, not a broken engine)
                 const uintptr_t tr = queue[qi];
-                const uintptr_t r = test(tr, "goal family");
-                if (r) { *how = "collider found while walking the goal's objects (shape and place match the board)"; return r; }
+                if (!walked.insert(tr).second) continue;
+                for (void* m : {B_.mGetComp, B_.mGetCompKids, B_.mGetCompParent}) {
+                    if (!m) continue;
+                    const uintptr_t c = callObjArg(m, tr, typeObj);
+                    if (plausiblePtr(c)) { consider(c, label); break; }
+                }
                 int kids = 0;
-                if (!callInt(B_.mTChildCount, tr, &kids) || kids < 0 || kids > 64) continue;
-                for (int i = 0; i < kids && queue.size() < 300; ++i) {
+                if (!callInt(B_.mTChildCount, tr, &kids) || kids < 0 || kids > 48) continue;
+                for (int i = 0; i < kids && queue.size() < 250; ++i) {
                     int idx = i;
                     const uintptr_t ch = callObjArg(B_.mTGetChild, tr, &idx);
                     if (plausiblePtr(ch)) queue.push_back(ch);
                 }
             }
+        } else {
+            for (void* m : {B_.mGetComp, B_.mGetCompKids, B_.mGetCompParent}) {       // no way to walk: only this one object
+                if (!m) continue;
+                const uintptr_t c = callObjArg(m, rootT, typeObj);
+                if (plausiblePtr(c)) { consider(c, label); break; }
+            }
         }
+        trail += fmt(" [%s: %d colliders seen, %zu near the board]", label.c_str(), nSeen - seenBefore, cands.size() - candBefore);
+    };
+
+    // step 1: the goal's objects, then each parent above them (nearest first), until something that looks like the board turns up
+    {
+        std::vector<uintptr_t> roots; std::vector<std::string> labels;
+        auto addRoot = [&](uintptr_t t, const std::string& lab) { if (!plausiblePtr(t)) return; for (uintptr_t r : roots) if (r == t) return; roots.push_back(t); labels.push_back(lab); };
+        addRoot(boardT, "backboard object");
+        uintptr_t t = callObj(B_.mCTransform, goal);
+        g_.excRun = 0;
+        for (int lvl = 0; lvl < 5 && plausiblePtr(t) && roots.size() < 7; ++lvl) {
+            std::string lab = lvl == 0 ? "goal object" : fmt("parent %d above the goal", lvl);
+            const std::string nm = bankNameOf(t);
+            if (!nm.empty()) lab += " '" + nm + "'";
+            addRoot(t, lab);
+            t = B_.mTParent ? callObj(B_.mTParent, t) : 0;
+            g_.excRun = 0;
+        }
+        for (size_t i = 0; i < roots.size() && !haveStrict(); ++i) collect(roots[i], labels[i]);
+        if (!B_.mTParent) trail += " [Transform.get_parent does not exist: only the goal's own objects were searched]";
     }
-    if (bestLoose) { *cOut = lc; *eOut = le; *how = fmt("collider near the board but not the board's size (%d objects tested, %d with a collider)", tested, withCollider); return bestLoose; }
-    *how = fmt("no collider of the board's size near it (%d objects tested, %d with a collider):%s", tested, withCollider, seen.c_str());
-    return 0;
+    // step 2: ask the physics engine what is at the board's place
+    if (!haveStrict() && (B_.ovOverlapSphere.m || B_.ovOverlapBox.m)) {
+        const float rr = 0.5f * std::sqrt(size.x * size.x + size.y * size.y) + 0.35f;
+        Vec3 ctr = expect, half{rr, rr, rr};
+        std::vector<uintptr_t> items; size_t total = 0;
+        const uintptr_t arr = B_.ovOverlapSphere.m ? callOverload(B_.ovOverlapSphere, 0, &ctr, nullptr, rr, nullptr, false) : callOverload(B_.ovOverlapBox, 0, &ctr, &half, 0, nullptr, false);
+        const int before = nSeen; const size_t cb = cands.size();
+        if (readObjArray(arr, 400, &items, &total) && total <= 400) {
+            if (!items.empty() && B_.mGetComp && B_.mCTransform) {       // a check of the GetComponent search above, on a collider that surely exists
+                const uintptr_t tr = callObj(B_.mCTransform, items[0]); g_.excRun = 0;
+                const uintptr_t back = plausiblePtr(tr) ? callObjArg(B_.mGetComp, tr, typeObj) : 0; g_.excRun = 0;
+                trail += back ? " [GetComponent check on a collider the physics found: works]" : " [GetComponent check on a collider the physics found: gave NOTHING - the GetComponent search above cannot be trusted]";
+            }
+            for (uintptr_t c : items) consider(c, "physics query at the board's place");
+            trail += fmt(" [physics query (%s) at the board's place: %zu colliders, %zu new, %zu near the board]", B_.ovOverlapSphere.m ? "sphere" : "box", total, static_cast<size_t>(nSeen - before), cands.size() - cb); }
+        else trail += fmt(" [physics query (%s) at the board's place: no usable answer (%zu)]", B_.ovOverlapSphere.m ? "sphere" : "box", total);
+    }
+    // step 3: every collider of the scene
+    if (!haveStrict() && B_.ovFindAll.m && !g_.heavyOk) trail += " [search of the whole scene: skipped on this attempt (it is slow; it is done on the 1st and 3rd attempt)]";
+    if (!haveStrict() && B_.ovFindAll.m && g_.heavyOk) {
+        std::vector<uintptr_t> items; size_t total = 0;
+        const uintptr_t arr = callOverload(B_.ovFindAll, 0, nullptr, nullptr, 0, typeObj, false);
+        const int before = nSeen; const size_t cb = cands.size();
+        if (readObjArray(arr, 4000, &items, &total) && total <= 4000) { for (uintptr_t c : items) consider(c, "search of the whole scene"); trail += fmt(" [search of the whole scene: %zu colliders, %zu new, %zu near the board]", total, static_cast<size_t>(nSeen - before), cands.size() - cb); }
+        else trail += fmt(" [search of the whole scene: no usable answer (%zu colliders)]", total);
+    }
+
+    // what to say about the candidates (the nearest few, with the engine's names)
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.dc < b.dc; });
+    std::string list;
+    for (size_t i = 0; i < cands.size() && i < 6; ++i) {
+        const Cand& k = cands[i];
+        std::string nm = bankNameOf(k.col);
+        list += fmt(" [%s '%s' centre %s half sizes %s, %.2f m from the expected board centre%s%s via %s]", bankClassOf(k.col).c_str(), nm.c_str(), fv(k.c).c_str(), fv(k.e).c_str(), static_cast<double>(k.dc),
+                    k.shapeOk ? ", same size as the board" : "", k.covers ? ", contains the board's middle" : "", k.src.c_str());
+    }
+    const std::string stats = fmt("%d colliders seen (%d far away, %d triggers, %d switched off, %zu near the board)", nSeen, nFar, nTrigger, nOff, cands.size());
+    const Cand* pick = nullptr;
+    bool isStrict = false;
+    for (const Cand& k : cands) if (k.shapeOk && k.dc < 0.35f && (!pick || k.dc < pick->dc)) { pick = &k; isStrict = true; }
+    if (!pick) {          // not the board's size: the tightest box that contains the board's middle, else the nearest one (used for the material only)
+        auto plausibleBox = [](const Cand& k) { const float mx = std::max(k.e.x, std::max(k.e.y, k.e.z)), mn = std::min(k.e.x, std::min(k.e.y, k.e.z)); return mx <= 2.5f && mn <= 0.6f; };      // not the whole court's floor or walls
+        for (const Cand& k : cands) if (k.covers && plausibleBox(k) && (!pick || k.vol < pick->vol)) pick = &k;
+        if (!pick) for (const Cand& k : cands) if (k.dc < 0.5f && plausibleBox(k) && (!pick || k.dc < pick->dc)) pick = &k;
+    }
+    if (!pick) { *how = "no collider near the board's place (" + stats + ")." + trail + (list.empty() ? std::string() : " Nearest colliders:" + list); return 0; }
+    *strict = isStrict; *cOut = pick->c; *eOut = pick->e;
+    const std::string nm = bankNameOf(pick->col);
+    *how = fmt("%s '%s' found via %s (%s)", bankClassOf(pick->col).c_str(), nm.c_str(), pick->src.c_str(), isStrict ? "its box has the board's size and place" : "its box is NOT the board's size - used only for the material");
+    {   // the story of the search is written down in every case (it is what lets me fix things from your facts file)
+        std::string story = ". Search: " + stats + "." + trail + (isStrict || list.empty() ? std::string() : " Nearest colliders:" + list);
+        if (story.size() > 1400) story.resize(1400);
+        *how += story;
+    }
+    return pick->col;
 }
 
 // One physic material: bounciness, frictions and how they are mixed. A collider without a material uses the engine's default material.
@@ -335,6 +549,28 @@ bool AimLink::bankMaterial(uintptr_t collider, float* bounce, float* dyn, float*
 
 // The measured backboard of one goal (cached). Geometry comes from the board's collider box when it matches the game's board data, else from the game's data fields.
 bool AimLink::bankBoardFor(uintptr_t goal, const Vec3& ring, BoardInfo** out, std::string* why) {
+    for (BoardInfo& b : g_.boards) if (b.goal == goal && b.built) {
+        // still the same? (a destroyed / replaced collider must not be used)
+        unsigned char head[24];
+        Vec3 c, e;
+        if (plausiblePtr(b.collider) && pipeGame_.copy(b.collider, head, sizeof head) && rdQ(head, 16) != 0 && callBounds(B_.mCBounds, b.collider, &c, &e) && lenV(subV(c, b.cBounds)) < 0.02f) { *out = &b; return true; }
+        b.built = false;
+    }
+    // a backboard that could not be measured is not searched for again on every shot: the search can be long (stage D9b), so it is repeated after a pause (5, 15, 45, then every 120 seconds)
+    const double now = tnow();
+    G::BoardFail* fail = nullptr;
+    for (G::BoardFail& f : g_.boardFails) if (f.goal == goal) fail = &f;
+    if (fail && now < fail->next) { *why = fail->why; return false; }
+    g_.heavyOk = !fail || fail->tries == 2;
+    if (bankBoardBuild(goal, ring, out, why)) { if (fail) fail->next = 0; return true; }
+    if (!fail) { g_.boardFails.push_back(G::BoardFail()); fail = &g_.boardFails.back(); fail->goal = goal; }
+    fail->why = *why;
+    fail->next = now + (fail->tries == 0 ? 5.0 : fail->tries == 1 ? 15.0 : fail->tries < 4 ? 45.0 : 120.0);
+    ++fail->tries;
+    return false;
+}
+
+bool AimLink::bankBoardBuild(uintptr_t goal, const Vec3& ring, BoardInfo** out, std::string* why) {
     for (BoardInfo& b : g_.boards) if (b.goal == goal && b.built) {
         // still the same? (a destroyed / replaced collider must not be used)
         unsigned char head[24];
@@ -443,7 +679,12 @@ void AimLink::bankShot(Shot& s, const std::string& head, const std::string& hoop
     if (!bankGoalFor(s.hoopPos, &goal, &ring, &why)) { bankUnavailable(s, head, "I cannot find that hoop's goal", why); return; }
     s.ring = ring;
     BoardInfo* bi = nullptr;
-    if (!bankBoardFor(goal, ring, &bi, &why)) { bankUnavailable(s, head, "I cannot measure the backboard", why); return; }
+    if (!bankBoardFor(goal, ring, &bi, &why)) {
+        std::string brief = why.substr(0, why.find(':'));       // "could not find the backboard's collider" (the long story follows the first colon)
+        if (brief.size() > 70) brief.resize(70);
+        bankUnavailable(s, head, "I cannot measure the backboard (" + brief + ")", why.size() > 1800 ? why.substr(0, 1800) + " ..." : why);
+        return;
+    }
     // 2. the ball: radius from its collider, bounce from its material
     const uintptr_t props = rdP(bb, B_.bProps);
     std::vector<unsigned char> pb(static_cast<size_t>(B_.props.size));
