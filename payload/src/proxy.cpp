@@ -576,7 +576,12 @@ void* scanMain(void* arg) {
             job->options.brief = true;          // stage D5c: short report about the headset movement classes (keeps the facts file small enough to send)
             if (topic == tzscan::Topic::Shot) {  // stage D7: balls, hoops, rims, shots. The facts file that reaches me is cut at about 265 KB, so this report has its own size budget.
                 job->options.topic = tzscan::Topic::Shot; job->options.brief = false;
-                job->options.maxLines = 2000; job->options.reservedLines = 450; job->options.maxBytes = 190000; job->options.reservedBytes = 45000;
+                job->options.maxLines = 3000; job->options.reservedLines = 500; job->options.maxBytes = 190000; job->options.reservedBytes = 45000;
+                job->options.shotIndex = false; job->options.listAssemblies = false;      // stage D7c: the earlier report already has the index and the assembly list
+                job->options.liveDelaySeconds = 25;                                       // time to close the menu, pick up a ball, take a shot and hold a ball again
+#ifdef TZ_FAST_TEST
+                job->options.liveDelaySeconds = std::getenv("TZ_SHOT_LIVE_DELAY_S") ? std::atoi(std::getenv("TZ_SHOT_LIVE_DELAY_S")) : 0;     // PC test only
+#endif
             }
             double deadline = job->options.maxSeconds + job->options.stallSeconds + 120.0;      // longer than the scan can honestly take
 #ifdef TZ_FAST_TEST
@@ -650,7 +655,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D7b: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot switch and distance slider (the part that moves the ball is NOT built yet) + ball-and-hoops scan)");
+    fact("Timmyzstuff facts (stage D7c: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot switch and distance slider (the part that moves the ball is NOT built yet) + ball-and-hoops scan)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -938,7 +943,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D7b: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot page)");
+    logf_("payload loaded (stage D7c: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot page)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

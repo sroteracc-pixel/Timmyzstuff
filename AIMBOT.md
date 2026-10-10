@@ -1,8 +1,8 @@
-# Aimbot (stage D7b) - what exists, what does not
+# Aimbot (stage D7c) - what exists, what does not
 
 **Short version:** the menu page and the "should the aimbot act?" rules and aim maths are built and tested on a PC.
 **The part that moves the real ball is NOT built yet.** Nobody (me included) has seen how this game throws the ball, so I did not
-guess. Stage D7b adds a scan that collects exactly that, once in practice and once in an online game. Send me both facts files and stage D8 builds the real connection.
+guess. Stage D7c adds a scan that collects exactly that, once in the lobby and once in an official match. Send me both facts files and stage D8 builds the real connection.
 
 In the headset today, the Aimbot switch only changes what the menu says and what the facts file logs. **It does not change any shot.**
 The menu says so ("Game link: not built yet").
@@ -49,55 +49,67 @@ These are numbers I picked, not facts from the game:
   drag, a different ball gravity or a bouncy rim, the ball can miss.** D8 must measure these.
 - The ball gravity is NOT the player gravity you already saw in Movement (-0.9). The ball's own gravity is unknown.
 
-## Inside and outside online games (why your other aimbot may only work in practice)
-You told me the Astryx aimbot works when shooting outside a game but not inside a game. I can NOT tell you why, and I can NOT promise mine will
-work in both. Here is what the game files you already sent show (class names only, nothing about how they behave):
-- The game has **separate practice code**: `SpawnBasketballSinglePlayer`, `ShovelTools.BasketballSinglePlayer`.
-- The game has an **online network system** (Normcore, the file `Normal.Realtime.dll`), and many classes that keep players in sync (`PlayerStateSync`, `StevePlayerSync` ...).
-- So in an online game the ball and players are probably "network objects". With this kind of system one player **owns** an object, and a change made by
-  someone who does not own it can be ignored or overwritten. That is **my guess** for why changing the ball works in practice and not in a match. It is NOT proven.
-Other possible reasons (also unproven): the match uses a different ball class, or the game checks shots itself.
+## Lobby vs official match (why your other aimbot may only work in the lobby)
+You told me the Astryx aimbot works in the multiplayer lobby but not in an official match. I can NOT tell you why, and I can NOT promise mine will work in both.
+(Sorry: in my first version I called the lobby "single player". That was my wrong guess from class names. The lobby is a multiplayer room.)
 
-What I did about it, so we find out for real instead of guessing:
-- The scan now also writes the network classes (`Realtime`, `RealtimeView`, `RealtimeTransform`: who owns an object, and are you in a room) and looks for the running
-  copies of the room and the views. **The facts file from a scan in practice and a scan in an online match will show the difference.**
-- Stage D8 will check **every shot**: after it changes the ball, it reads the ball again a few frames later and writes into the facts file whether the ball
-  KEPT the new speed (and whether you were in practice or in a match). If a match overwrites it, the facts file will say so and I can try another way (for example asking for ownership of the ball). No promise it works.
-- To make sure it works in both places, the only real proof is testing in both. That is why the checklist below has you scan in both.
+**What your lobby facts file (stage D7b) showed - these are facts from the game:**
+- The game's script thread is the one called `UnityMain`. The controller function is called on it. That is where we can safely touch the ball later.
+- Even in the lobby you are connected to a network room (Normcore, `Normal.Realtime`).
+- The ball is the class `ShovelTools.Basketball` (101 fields). Its network copy is `BasketballStateSync`, which holds: held by left/right hand, who holds it, who owned it last,
+  a text called `_shotData`, `_isGameBall`, `_isInPlay`, and a ball action state. It also has `IsCurrentOwner`.
+- The hand-grab library (Autohand) holds the ball's physics body (`rb`), `beingHeld`, `_throwing`, and has `OnRelease` / `GetVelocity` methods.
+- The game has its OWN shot assist: classes `BasketballShotAssist`, `ShotAssistParams`, `PredictedShotResult`, `BankShotCandidate`, `ThrowAssist`, `BasketballAssist`. Only their names are known so far, not what they do.
+- The Unity functions for reading and setting a ball's speed exist (found in `libunity.so`).
+- `BallPhysics` is NOT the basketball (it is a pitch / flight-path system), so I stopped using it.
+- The rim: `GymClassRimBend._rim` is a Grabbable (you can grab the rim), `_isNorth` says which end. Rim bounciness seen: 0.33, friction 0.7.
 
-## What the new scan collects ("Scan ball and hoops")
-Read-only, like the Movement scan. It writes into the facts file:
-1. The game's ball / hoop / rim / shoot / throw classes, written out with all fields and methods: for example `BallPhysics`, `RimPhysics`,
-   `BasketballPlayer`, `BasketballSinglePlayer`, plus the Autohand (VR grabbing) classes. (It leaves out the 12 empty "Parameter..." event
-   classes, which only wasted places. I checked this against the real class names from your files.)
-2. The network classes (`Normal.Realtime.Realtime`, `RealtimeView`, `RealtimeTransform`) and live copies of the room and the views.
-3. Which Unity functions exist for reading and setting a Rigidbody's velocity and a Transform's position (it only LOOKS them up, it **calls nothing**).
-4. Live values of the rims, the ball physics (drag, mass, held flag), the player's ball/hand fields and any ball objects it finds.
-5. Which thread calls the controller function, listed in `threads:` lines. (Unity objects may only be touched from the game's main thread, so D8 needs to know it.)
+**What I only GUESS (not proven):**
+- The ball has an `_isGameBall` flag, and there are names like `IsGameManagedBall`, `BallControlManager`, `GameManager`. So official-match balls may be handled differently from lobby balls
+  (for example owned or controlled by the game). That could be why changing the ball works in the lobby and not in a match. NOT proven.
+- Other possible reasons: the match uses the assist code with fixed settings, or the game checks the shot data.
 
-The scan is limited in size so the facts file is not cut off. If a network class has a different name in your game, the file says "NOT found in this game".
+**What D7c does about it:** it scans exactly these classes (their fields and methods) and their running copies, in the lobby and in a match, so the two files can be compared:
+the ball, its sync, the game's shot assist and its settings (real numbers), the hoops, and the game / match state (`GameManager`, `BasketballGameContext`).
+
+**Two ways D8 could work (I will choose from the facts, no promise):**
+1. Calculate the shot myself and set the ball's speed after you let go (what this page promises). Needs the ball to be yours to change.
+2. Make the game's OWN shot assist stronger (change its settings). The game then does the aiming itself, which may work in matches too. Only possible if the assist settings can be changed and are not forced by the match.
+Either way D8 will check EVERY shot: it reads the ball again a few frames later and writes into the facts file whether the change stuck, and whether you were in the lobby or a match.
+
+## What the new scan collects ("Scan ball and hoops", stage D7c)
+Read-only. It writes into the facts file:
+1. About 25 exact classes (fields with positions, methods): the ball `Basketball`, the game's shot assist (`BasketballShotAssist`, `ShotAssistParams`, `PredictedShotResult`, `BankShotCandidate`, `RimTarget`, `ShotData`, `ThrowAssist`, `BasketballAssist`),
+   the hoops (`BasketballGoal`, `BasketballGoalManager`, `HoopManager`, `NetRimReference`), the ball control (`BallControl`, `BallControlManager`, ...), the state (`GameManager`, `BasketballGameContext`)
+   and two network classes (`RealtimeView`, `RealtimeTransform`: who owns an object). Names that are not found are listed in one line.
+   (The long class index, the assembly list and the classes I already have are left out, so the file stays small.)
+2. Which Unity functions exist for reading and setting a ball's speed (it only LOOKS them up, it **calls nothing**).
+3. **25 seconds after you press the button** (so you can close the menu, pick up a ball, take a shot and hold a ball), it reads the running objects: the balls (held or not, last shot data),
+   the sync objects, the hoops, the assist settings (real numbers), the ball control, and the game / match state.
+4. Which kinds of threads the game has.
 
 ## Online game - one honest warning
 GymClass is an online game. Speed, jump, gravity and especially an aimbot may be visible to other players and could put your account at risk.
 Nothing in the files can tell me whether the game detects it. Your call.
 
-## Stage D7b test checklist (in the headset)
-1. Update the patcher, start the game. In the menu go to **Basketball**: you see the **Aimbot** card and the **Game link: not built yet** card.
-2. Turn the **Aimbot** switch on and off: it should change. Nothing in the game changes (that is correct for D7b).
-3. Move **Max shot distance**: 5 m, 6 m ... 49 m, then **Unlimited** at the far end. Close and open the menu: the slider keeps its place, the switch is off again after restarting the game.
-4. Check the **Movement** page still works (Speed, Jump, Gravity). Nothing there should have changed.
-5. **Scan 1 - practice (outside a game):** stand on a court with a ball and a hoop. Press **Scan ball and hoops**. Wait for "Scan done" (about a minute).
-   While it runs, close the menu and pick up a ball and throw a few shots (the menu blocks the game's buttons while it is open).
-6. Open the patcher, press **Get facts**, send me the file. Call it "practice".
-7. **Scan 2 - online game:** close the game completely and open it again (this starts a fresh facts file). Join an online game, wait until you are on the court with the ball.
-   Open the menu -> Basketball, press **Scan ball and hoops**, close the menu, throw a few shots while it runs.
-8. When it says "Scan done", press **Get facts** and send me that file too. Call it "online game".
+## Stage D7c test checklist (in the headset)
+1. Update the patcher, start the game. In the menu go to **Basketball**: the **Aimbot** card and the **Game link: not built yet** card are there. The switch does nothing in the game yet.
+2. Check the **Movement** page still works (Speed, Jump, Gravity). Nothing there changed.
+3. **Scan 1 - multiplayer lobby:** start the game fresh (so the facts file is small), join the lobby, spawn a ball and stand near a hoop.
+   Open the menu -> Basketball and press **Scan ball and hoops**. Then:
+   - close the menu (B),
+   - pick up a ball, take ONE shot at a hoop,
+   - pick a ball up again and HOLD it until the menu says "Scan done" (about one minute in total).
+4. Open the patcher, press **Get facts**, send me the file. Call it "lobby".
+5. **Scan 2 - official match:** close the game completely and open it again (a fresh facts file). Join an official match and wait until the game ball is on the court.
+   Do exactly the same scan (press Scan, close the menu, take ONE shot, hold a ball). Open the menu with the same button combination as before.
+6. Press **Get facts** and send me that file too. Call it "official match".
 
-If the game lags a lot or closes during a scan, tell me which step it was. (I could only test the scan on a PC; the lag while scanning in a live online game is unknown.)
+If the game lags a lot or closes during a scan, tell me which step it was. (I could only test the scan on a PC. How a live official match reacts to it is unknown.)
 
 ## Stage D8 plan (needs your new facts file)
 Using the scan data: detect the moment the ball is released, read its position and velocity, read each hoop's position,
 call the rules + maths above, write the new velocity on the game's main thread, and read it back a few frames later to check that the ball kept it
-(written to the facts file for every shot, with "practice" or "online game"). Still unknown until then: how the game releases the ball,
+(written to the facts file for every shot, with "lobby" or "official match"). Still unknown until then: how the game releases the ball,
 whether the game (or the network system) re-applies its own velocity afterwards, who owns the ball in an online game, the ball's real gravity / drag,
-and whether it works in BOTH practice and online games.
+and whether it works in BOTH the lobby and official matches.

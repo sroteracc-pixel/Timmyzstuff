@@ -89,7 +89,21 @@ Klass kRealtime{"Realtime", "Normal.Realtime", &kBehaviour, {{"_connected", &tBo
 Klass kRtView{"RealtimeView", "Normal.Realtime", &kBehaviour, {{"_ownerId", &tInt, 24, 0}, {"_viewId", &tInt, 28, 0}}, {}, 0, false, false, 48};
 Klass kRtTransform{"RealtimeTransform", "Normal.Realtime", &kBehaviour, {{"_ownedByMe", &tBool, 24, 0}}, {}, 0, false, false, 48};
 Klass kRtOther{"RealtimeVoice", "Normal.Realtime", &kBehaviour, {{"_x", &tInt, 24, 0}}, {}, 0, false, false, 48};     // another network class: not in the list, must not be written
-Image iShot{"IRL.GymFake", {&kRimSync, &kRimBend, &kSlider, &kBall, &kShotPrefs, &kPrimary, &kFootball, &kBaseball, &kParamMass, &kBallPhys, &kACommand, &kShotCmd}};
+// stage D7c: the exact classes of the real game (names, parents and field types from the stage D7b lobby file)
+Klass kRtComp{"RealtimeComponent`1", "Normal.Realtime", &kBehaviour, {}, {}, 0, false, false, 48};
+Klass kValueType{"ValueType", "System", nullptr, {}, {}, 0, false, false, 16};
+Type tStr{"System.String", nullptr};
+Klass kBasketball{"Basketball", "ShovelTools", &kBehaviour, {{"_rb", &tRB, 24, 0}, {"_state", &tInt, 32, 0}, {"_isHeld", &tBool, 36, 0}, {"_ballType", &tInt, 40, 0}}, {}, 0, false, false, 64};
+Klass kStateSync{"BasketballStateSync", "", &kRtComp, {{"_isHeldLeft", &tBool, 72, 0}, {"_shotData", &tStr, 96, 0}, {"_isGameBall", &tBool, 104, 0}}, {}, 0, false, false, 112};
+Klass kShotAssist{"BasketballShotAssist", "ShovelTools", &kBehaviour, {{"_strength", &tFloat, 24, 0}, {"_maxDistance", &tFloat, 28, 0}}, {}, 0, false, false, 48};
+Klass kAssistParams{"ShotAssistParams", "ShovelTools", nullptr, {{"AssistRadius", &tFloat, 16, 0}, {"ArcHeight", &tFloat, 20, 0}}, {}, 0, false, false, 32};
+Klass kPredicted{"PredictedShotResult", "ShovelTools", &kValueType, {{"willScore", &tBool, 0, 0}, {"flightTime", &tFloat, 4, 0}}, {}, 0, true, false, 16};       // a struct: written out, never searched in memory
+Klass kGoal{"BasketballGoal", "ShovelTools", &kBehaviour, {{"_rimTransform", &tTransform, 24, 0}, {"_isNorth", &tBool, 32, 0}}, {}, 0, false, false, 48};
+Klass kGameMgr{"GameManager", "ShovelTools", &kBehaviour, {{"_officialMatch", &tBool, 24, 0}, {"_mode", &tInt, 28, 0}}, {}, 0, false, false, 48};
+Klass kCannon{"CannonBall", "", &kBehaviour, {{"explosion", &tOther, 24, 0}}, {}, 0, false, false, 32};          // a "ball" name that is noise: never written out
+Klass kTether{"TetherBallCollision", "", &kBehaviour, {{"x", &tInt, 24, 0}}, {}, 0, false, false, 32};
+Image iShot{"IRL.GymFake", {&kRimSync, &kRimBend, &kSlider, &kBall, &kShotPrefs, &kPrimary, &kFootball, &kBaseball, &kParamMass, &kBallPhys, &kACommand, &kShotCmd,
+                            &kBasketball, &kStateSync, &kShotAssist, &kAssistParams, &kPredicted, &kGoal, &kGameMgr, &kCannon, &kTether}};
 Image iNet{"Normal.Realtime", {&kRealtime, &kRtView, &kRtTransform, &kRtOther}};
 Image iAuto{"Autohand.Runtime", {&kGrabBase, &kGrabbable, &kHandA, &kMenuHand}};
 Image iPhys{"UnityEngine.PhysicsModule", {&kRigidbody, &kPhysics}};
@@ -117,6 +131,9 @@ void init() {
     kRimBend.methods = {mk("Bend", 1, &tVoid, 0x3520), mk("OnCollisionEnter", 1, &tVoid, 0x3530)};
     kBall.methods = {mk("OnRelease", 1, &tVoid, 0x3540), mk("get_IsHeld", 0, &tBool, 0x3550)};
     kBallPhys.methods = {mk("FixedUpdate", 0, &tVoid, 0x3580), mk("OnThrown", 1, &tVoid, 0x3590)};
+    kBasketball.methods = {mk("OnRelease", 1, &tVoid, 0x3800 - 0x100), mk("Shoot", 2, &tVoid, 0x37a0)};
+    kShotAssist.methods = {mk("ComputeAssist", 3, &tVec3, 0x37b0)};
+    kStateSync.methods = {mk("get_IsCurrentOwner", 0, &tBool, 0x37c0)};
     kRealtime.methods = {mk("get_connected", 0, &tBool, 0x35a0)};
     kRtView.methods = {mk("RequestOwnership", 0, &tVoid, 0x35b0), mk("get_isOwnedLocallySelf", 0, &tBool, 0x35c0)};
     kGrabBase.methods = {mk("OnRelease", 1, &tVoid, 0x3560), mk("get_IsHeld", 0, &tBool, 0x3570)};
@@ -192,8 +209,9 @@ __attribute__((visibility("default"))) void fake_set_shot_world(int on) {
 // running copies of the ball-and-hoops classes: 0 = RimSync, 1 = GymClassRimBend, 2 = BasketballBall, 3 = BallPhysics, 4 = Realtime, 5 = RealtimeView, 6 = RealtimeTransform.
 // `variant` 1 marks the ball as held.
 __attribute__((visibility("default"))) void* fake_make_shot_object(int which, int variant) {
-    Klass* k = which == 0 ? &kRimSync : (which == 1 ? &kRimBend : (which == 2 ? &kBall : (which == 3 ? &kBallPhys : (which == 4 ? &kRealtime : (which == 5 ? &kRtView : &kRtTransform)))));
-    unsigned char* o = static_cast<unsigned char*>(calloc(1, 48));
+    Klass* const all[] = {&kRimSync, &kRimBend, &kBall, &kBallPhys, &kRealtime, &kRtView, &kRtTransform, &kBasketball, &kStateSync, &kGoal, &kShotAssist, &kAssistParams, &kGameMgr};
+    Klass* k = all[which];
+    unsigned char* o = static_cast<unsigned char*>(calloc(1, 128));
     std::memcpy(o, &k, 8);
     const uint64_t cached = reinterpret_cast<uint64_t>(o) + 0x40; std::memcpy(o + 16, &cached, 8);
     const uint64_t ref = 0x7a00001000ULL + 16 * variant; std::memcpy(o + 24, &ref, 8);
@@ -203,7 +221,13 @@ __attribute__((visibility("default"))) void* fake_make_shot_object(int which, in
     else if (which == 3) { const float drag = 0.05f * (variant + 1), mass = 0.62f; std::memcpy(o + 32, &drag, 4); std::memcpy(o + 36, &mass, 4); o[40] = variant ? 1 : 0; }
     else if (which == 4) { o[24] = 1; const int cid = 3; std::memcpy(o + 28, &cid, 4); }                          // connected, client 3
     else if (which == 5) { const int owner = 2 + variant, view = 100 + variant; std::memcpy(o + 24, &owner, 4); std::memcpy(o + 28, &view, 4); }
-    else { o[24] = 1; }
+    else if (which == 6) { o[24] = 1; }
+    else if (which == 7) { const float zero = 0.0f; (void)zero; const int st = 2 + variant; std::memcpy(o + 32, &st, 4); o[36] = variant ? 1 : 0; const int bt = 1; std::memcpy(o + 40, &bt, 4); }    // a ball: held or not
+    else if (which == 8) { o[72] = variant ? 1 : 0; const uint64_t str = 0x7a00002000ULL + 32 * variant; std::memcpy(o + 96, &str, 8); o[104] = 1; }                                     // sync: held left, shot data text, game ball
+    else if (which == 9) { const uint64_t tr = 0x7a00003000ULL + 16 * variant; std::memcpy(o + 24, &tr, 8); o[32] = variant ? 0 : 1; }                                                   // a hoop: north or south
+    else if (which == 10) { const float strength = 0.6f, dist = 12.5f; std::memcpy(o + 24, &strength, 4); std::memcpy(o + 28, &dist, 4); }
+    else if (which == 11) { const float radius = 0.3f + 0.1f * variant, arc = 1.5f; std::memcpy(o + 16, &radius, 4); std::memcpy(o + 20, &arc, 4); }
+    else { o[24] = variant ? 1 : 0; const int mode = 3; std::memcpy(o + 28, &mode, 4); }                                                                                              // game manager: official match or lobby
     return o;
 }
 // the pretend icall table: only the Rigidbody velocity getter (with its full signature) is "found"

@@ -72,6 +72,10 @@ struct Options {
     int maxSeconds = 90;          // the memory search stops after this long
     bool brief = false;           // short report: only the important classes (full detail) + the live values; no index, no single-line hits
     int stallSeconds = 10;        // ... and is given up on when it makes no progress at all for this long (a stuck read)
+    // ball-and-hoops report only (stage D7c):
+    int liveDelaySeconds = 0;     // wait this long before looking at the running objects (time to close the menu, pick up a ball and shoot)
+    bool shotIndex = false;       // write the (long) class-name index; the earlier report already has it
+    bool listAssemblies = true;   // one line per assembly
     // the size budget of the report (the facts file that reaches the person is cut at about 265 KB). maxBytes = 0: no byte budget.
     int maxLines = 7000, reservedLines = 80;
     size_t maxBytes = 0, reservedBytes = 0;
@@ -130,7 +134,7 @@ bool classNameMatches(const std::string& name);       // movement-ish class name
 bool indexNameMatches(const std::string& name);       // broader: also player / character / parameters ...
 bool fieldNameMatches(const std::string& name);
 bool shotNameMatches(const std::string& name);        // stage D7: classes about balls, hoops, rims, shots, throws, grabbing
-int shotDetailRank(const std::string& name, const std::string& parent);     // 3 ball / hoop / rim, 2 shoot / throw / goal / shot, 0 bot commands, -1 not written out in full
-bool shotLiveWanted(const std::string& full, bool ours, const std::string& parent);   // is a running copy of this class searched for?
+bool shotTargetName(const std::string& name);                                 // is this one of the exact ball / hoop / shot-assist classes that are written out in full?
+bool shotLiveWanted(const std::string& name, bool ours, const std::string& parent);   // is a running copy of this class searched for?
 
 }  // namespace tzscan

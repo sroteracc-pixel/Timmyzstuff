@@ -590,10 +590,10 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
             c.fillCircle(rx + 28, ry + 26, 7, rgba(150, 150, 170));
             c.text(kFontLabel, rx + 46, ry + 32, "Game link: not built yet", white);
             const char* note =
-                s.scanState == 1 ? "Scanning the game's code... this can take about a minute." :
+                s.scanState == 1 ? "Scanning... close the menu, pick up a ball, shoot once, hold a ball (about 1 min)." :
                 s.scanState == 2 ? "Scan done. Press Get facts in the patcher and send me the file." :
                 s.scanState == 3 ? "Scan failed. Press Get facts in the patcher and send me the file." :
-                "The switch does not change the game yet. Press Scan, then Get facts.";
+                "Press Scan, close the menu, pick up a ball, shoot once, then hold a ball.";
             c.text(kFontTiny, rx + 22, ry + 63, note, grey);
             const float bw = 214, bh = 36, bx = rx + rw - bw - 18, by = ry + 8;
             const bool hv = s.hover == HIT_SCAN_SHOT, busy = s.scanState == 1;

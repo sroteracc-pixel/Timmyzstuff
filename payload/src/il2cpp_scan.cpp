@@ -707,54 +707,33 @@ CopySearch findCopies(const ClassInfo& cls, int maxCopies, int maxSeconds, int s
 // ---- stage D7: the "ball and hoops" report -----------------------------------------------------------------------------
 namespace {
 const int kMaxShotIndex = 500;         // index lines (names only)
-const int kMaxShotDetail = 30;         // ball / hoop classes written out in full
+const int kMaxShotDetail = 45;         // ball / hoop / shot-assist classes written out in full
 const int kMaxShotLive = 12;           // classes looked for in memory
 
-// is this one of the few classes we always want in full?
-bool shotExplicit(const ClassRef& c, bool autohand) {
-    static const char* const ours[] = {"RimSync", "GymClassRimBend", "GymClassSlider", "PlayerNetworked", nullptr};
-    static const char* const hand[] = {"Autohand.GrabbableBase", "Autohand.Grabbable", "Autohand.Hand", nullptr};
-    return autohand ? inList(c.full, hand) : inList(c.name, ours);
-}
-// The network library of the game (Normcore, seen in the earlier facts files as "Normal.Realtime.dll"). Online games keep the ball in sync between
-// players; these three classes say who OWNS an object and whether we are in a room. Looked up by exact name; if one is missing the report says so.
-const char* const kNetClasses[] = {"Normal.Realtime.Realtime", "Normal.Realtime.RealtimeView", "Normal.Realtime.RealtimeTransform", nullptr};
-bool shotNet(const ClassRef& c) { return inList(c.full, kNetClasses); }
-// strong names: these get the full list of fields and methods
-bool shotStrong(const std::string& name) {
-    const std::string l = lowerOf(name.c_str());
-    static const char* otherSports[] = {"football", "baseball", "softball", "soccer", "paintball", "dodgeball", "volleyball", "tennis", "boxing", "golf", nullptr};
-    if (hasAny(l, otherSports) && l.find("basket") == std::string::npos) return false;
-    static const char* longWords[] = {"basket", "hoop", "backboard", "swish", "shoot", "throw", nullptr};
-    if (hasAny(l, longWords)) return true;
-    static const char* tokenWords[] = {"rim", "goal", "shot", "ball", nullptr};
-    for (const std::string& t : camelTokens(name)) if (inList(t, tokenWords)) return true;
-    return false;
-}
-// Classes that can never hold what we look for: event delegates ("ParameterBasketballMass" is an event, 0 fields) and enums.
-bool shotUselessParent(const std::string& parent) { return parent == "MulticastDelegate" || parent == "Delegate" || parent == "Enum"; }
-// How much a strong class matters (written out first): 3 = the ball / hoop / rim themselves, 2 = shoot / throw / goal / shot, 0 = bot commands (tiny, last), -1 = not wanted.
-int shotRank(const std::string& name, const std::string& parent) {
-    if (!shotStrong(name) || shotUselessParent(parent)) return -1;
-    if (parent == "ACommand") return 0;
-    const std::string l = lowerOf(name.c_str());
-    if (l.find("basket") != std::string::npos || l.find("hoop") != std::string::npos || l.find("backboard") != std::string::npos) return 3;
-    static const char* tokenWords[] = {"rim", "ball", nullptr};
-    for (const std::string& t : camelTokens(name)) if (inList(t, tokenWords)) return 3;
-    return 2;
-}
-// which running copies are worth looking for. 0 = the most important, 1 = also wanted, -1 = no.
-// The rims, the player (only its ball / rim / grab fields are written), the ball physics, the network room and views, and anything called basketball / hoop.
-// Never delegates, enums, structs or bot commands (they have no running copies worth reading).
-int shotLive(const ClassRef& c, bool ours, const std::string& parent) {
-    if (shotUselessParent(parent) || parent == "ValueType" || parent == "ACommand") return -1;
-    if (inList(c.full, kNetClasses)) return c.name == "RealtimeTransform" ? -1 : 0;        // the room (are we online?) and the views (who owns what)
-    if (!ours) return -1;
-    static const char* const first[] = {"RimSync", "GymClassRimBend", "PlayerLocomotion", "BallPhysics", "RimPhysics", nullptr};
-    if (inList(c.name, first)) return 0;
-    const std::string l = lowerOf(c.name.c_str());
-    return (l.find("basketball") != std::string::npos || l.find("hoop") != std::string::npos) ? 1 : -1;
-}
+// ---- The exact classes. The stage D7b scan of the real game (lobby) listed every class with a ball / hoop / shot-like name (311 of them) and showed that most
+// are noise (audio, tether ball, shaders, bots ...). These are the ones that matter for an aimbot: the ball, the game's OWN shot assist, the hoops and the
+// game / match state. Found by exact name (in the game's own code); a name that is not there is reported.
+struct ShotTarget { const char* name; int maxFields; int maxMethods; };        // 0 = the usual limit for important classes
+const ShotTarget kShotTargets[] = {
+    {"Basketball", 0, 0},                                                                            // the ball script (101 fields)
+    {"BasketballShotAssist", 0, 0}, {"ShotAssistParams", 0, 0}, {"PredictedShotResult", 0, 0}, {"BankShotCandidate", 0, 0}, {"RimTarget", 0, 0},     // the game's own aim help
+    {"ShotData", 0, 0}, {"BasketballAssist", 0, 0}, {"ThrowAssist", 0, 0},
+    {"BasketballGoal", 0, 0}, {"BasketballGoalManager", 0, 0}, {"HoopManager", 0, 0}, {"NetRimReference", 0, 0},                                   // the hoops
+    {"BasketballGameContext", 0, 60}, {"GameManager", 120, 120},                                     // lobby or official match?
+    {"BallControl", 0, 0}, {"BallControlManager", 0, 80}, {"BasketballProperties", 0, 0}, {"ShootGesture", 0, 0}, {"ShootGameBall", 0, 0},
+    {"BallPhysicsUtilities", 0, 0}, {"ReleasedBallCommand", 0, 0}, {"ShotManager", 0, 0}, {"ShotDetectionHelper", 0, 0}, {"SteveBallSync", 0, 0}, {"BallController", 0, 0},
+    {nullptr, 0, 0}};
+// The network library of the game (Normcore: "Normal.Realtime.dll"). Written out with limits (who owns an object, how to ask for ownership).
+const char* const kNetClasses[] = {"Normal.Realtime.RealtimeView", "Normal.Realtime.RealtimeTransform", nullptr};
+// Classes whose running copies are looked for in memory, most important first (at most kMaxLiveTargets).
+const char* const kShotLive[] = {"Basketball", "BasketballStateSync", "GameManager", "BasketballGameContext", "BasketballGoal", "BasketballShotAssist", "ShotAssistParams",
+                                 "ThrowAssist", "BasketballAssist", "HoopManager", "BallControl", "BallControlManager", nullptr};
+
+// Classes that can never have a useful running copy: event delegates, enums, structs (they live inside other objects).
+bool shotUselessParent(const std::string& parent) { return parent == "MulticastDelegate" || parent == "Delegate" || parent == "Enum" || parent == "ValueType"; }
+bool shotIsTarget(const std::string& name) { for (const ShotTarget* t = kShotTargets; t->name; ++t) if (name == t->name) return true; return false; }
+// is a running copy of this class searched for?  (only the game's own code; never delegates / enums / structs)
+bool shotLiveName(const std::string& name, bool ours, const std::string& parent) { return ours && !shotUselessParent(parent) && inList(name, kShotLive); }
 bool shotFieldMatches(const std::string& name) {
     static const char* words[] = {"ball", "rim", "grab", "hold", "shot", "throw", "hoop", "wrist", "power", "hand", "release", "goal", "pass", "aim", nullptr};
     return hasAny(lowerOf(name.c_str()), words);
@@ -840,11 +819,8 @@ void shotEngineReport(const Api& api, void** assemblies, size_t asmCount, uintpt
 }  // namespace
 
 // exposed for the test (the real class names from the earlier facts files are checked against these)
-int shotDetailRank(const std::string& name, const std::string& parent) { return shotRank(name, parent); }
-bool shotLiveWanted(const std::string& full, bool ours, const std::string& parent) {
-    ClassRef c; c.name = full.substr(full.rfind('.') == std::string::npos ? 0 : full.rfind('.') + 1); c.full = full;
-    return shotLive(c, ours, parent) >= 0;
-}
+bool shotTargetName(const std::string& name) { return shotIsTarget(name); }
+bool shotLiveWanted(const std::string& name, bool ours, const std::string& parent) { return shotLiveName(name, ours, parent); }
 
 Summary run(const Api& api, uintptr_t libBase, LogFn log) {
     Options o; o.libBase = libBase;
@@ -857,7 +833,7 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     const bool shot = opt.topic == Topic::Shot;
     gStep.store("starting");
     out.line("--- game code scan (read-only) ---");
-    if (shot) out.line("scan: BALL AND HOOPS scan (stage D7): classes about balls, hoops, rims, shots and grabbing, the running rims, and the engine functions a ball needs");
+    if (shot) out.line("scan: BALL AND HOOPS scan (stage D7): the ball, the hoops, the game's own shot assist, the game / match state, and the engine functions a ball needs");
     listThreads(out);
     void* domain = api.domain_get();
     if (!domain) { sum.error = "the game's runtime is not ready yet (no domain)"; out.line("scan: %s", sum.error.c_str()); return sum; }
@@ -877,7 +853,7 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
         AsmRef ar; ar.name = rawName ? rawName : "?"; ar.skip = skipAssembly(ar.name); ar.ours = oursAssembly(ar.name);
         const size_t count = api.image_get_class_count(image);
         ++sum.assemblies;
-        out.line("scan: assembly %s classes=%d %s", ar.name.c_str(), static_cast<int>(count), ar.skip ? "(engine / system: skipped)" : (ar.ours ? "(the game's own code)" : "(other: names only)"));
+        if (opt.listAssemblies) out.line("scan: assembly %s classes=%d %s", ar.name.c_str(), static_cast<int>(count), ar.skip ? "(engine / system: skipped)" : (ar.ours ? "(the game's own code)" : "(other: names only)"));
         asms.push_back(ar);
         if (ar.skip) continue;
         const int asmIndex = static_cast<int>(asms.size()) - 1;
@@ -899,13 +875,14 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     int indexLines = 0;
     gStep.store("2 of 6: class-name index");
     if (opt.brief && !shot) out.line("scan: BRIEF scan: the class index and the single-line speed / jump / gravity hits are left out (the earlier scans already wrote them)");
-    out.line(shot ? "--- index of class names about balls, hoops, rims, shots, throws and grabbing (the game's own code + Autohand) ---" : "--- index of class names (the game's own code + Normal.*) ---");
+    if (shot && !opt.shotIndex) out.line("scan: (the class-name index is left out of this report: the earlier ball-and-hoops file already has it)");
+    else out.line(shot ? "--- index of class names about balls, hoops, rims, shots, throws and grabbing (the game's own code + Autohand) ---" : "--- index of class names (the game's own code + Normal.*) ---");
     for (const ClassRef& c : classes) {
         if (opt.brief && !shot) break;                     // brief scan: the index was already written by the earlier scans
+        if (shot && !opt.shotIndex) break;
         const AsmRef& ar = asms[c.asmIndex];
         if (shot) {
-            if (shotNet(c)) { /* the network classes are always listed */ }
-            else if (!(ar.ours || startsWith(c.full, "Autohand.")) || !(shotNameMatches(c.name) || shotExplicit(c, false) || shotExplicit(c, true))) continue;
+            if (!(ar.ours || startsWith(c.full, "Autohand.")) || !shotNameMatches(c.name)) continue;
             if (indexLines >= kMaxShotIndex) { out.line("scan: (index stopped at %d lines)", kMaxShotIndex); break; }
         } else {
             if (!(ar.ours || startsWith(ar.name, "Normal."))) continue;
@@ -973,34 +950,25 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
         if (priority) ++priorityCount; else ++otherCount;
     };
     const char* const* priorityNames = opt.brief ? kPriorityBrief : kPriorityClasses;
-    if (shot) {       // the rims and the slider first, then the ball / hoop classes, then shoot / throw ones, then the hand-grab library, then the network classes
-        auto parentOf = [&](const ClassRef& c) { void* par = api.class_get_parent(c.klass()); const char* n = par ? api.class_get_name(par) : nullptr; return std::string(n ? n : ""); };
+    if (shot) {       // the exact ball / hoop / shot-assist classes, in the order of kShotTargets, then the network classes
         int shotCount = 0;
-        for (int pass = 0; pass < 6; ++pass) {
-            const int limit = pass <= 3 ? kMaxShotDetail - 6 : kMaxShotDetail;          // the last 6 places are kept for the hand-grab and network classes
-            for (size_t i = 0; i < classes.size() && shotCount < limit; ++i) {
+        std::string missingNames;
+        for (const ShotTarget* t = kShotTargets; t->name && shotCount < kMaxShotDetail; ++t) {
+            int found = 0;
+            for (size_t i = 0; i < classes.size() && found < 2 && shotCount < kMaxShotDetail; ++i) {      // (two classes can share a name, for example ShotData)
                 const ClassRef& c = classes[i];
-                if (detailed[i]) continue;
-                const bool ours = asms[c.asmIndex].ours;
-                bool take = false;
-                switch (pass) {
-                    case 0: take = ours && shotExplicit(c, false); break;
-                    case 1: take = ours && shotRank(c.name, parentOf(c)) == 3; break;
-                    case 2: take = ours && shotRank(c.name, parentOf(c)) == 2; break;
-                    case 3: take = ours && shotRank(c.name, parentOf(c)) == 0; break;
-                    case 4: take = shotExplicit(c, true); break;
-                    case 5: take = shotNet(c); break;
-                }
-                if (!take) continue;
-                detail(i, true, pass == 4 ? 160 : (pass == 5 ? 120 : 0), pass == 4 ? 220 : (pass == 5 ? 160 : 0));
-                ++shotCount;
+                if (detailed[i] || !asms[c.asmIndex].ours || c.name != t->name) continue;
+                detail(i, true, t->maxFields, t->maxMethods);
+                ++found; ++shotCount;
             }
+            if (!found) { missingNames += t->name; missingNames += " "; }
         }
-        for (const char* const* n = kNetClasses; *n; ++n) {         // say it when a network class is not there (the names are expected, not proven)
+        for (const char* const* n = kNetClasses; *n && shotCount < kMaxShotDetail; ++n) {
             bool found = false;
-            for (const ClassRef& c : classes) if (c.full == *n) { found = true; break; }
-            if (!found) out.line("scan: network class %s: NOT found in this game", *n);
+            for (size_t i = 0; i < classes.size(); ++i) if (!detailed[i] && classes[i].full == *n) { detail(i, true, 40, 90); ++shotCount; found = true; break; }
+            if (!found) missingNames += std::string(*n) + " ";
         }
+        out.key("scan: classes asked for by name but NOT found in this game: %s", missingNames.empty() ? "(none)" : missingNames.c_str());
     }
     for (int pass = 0; pass < (opt.brief || shot ? (shot ? 0 : 1) : 2); ++pass) {               // important classes: the named ones first, then anything vertical / jump / gravity / parameters
         for (size_t i = 0; i < classes.size(); ++i) {
@@ -1057,12 +1025,13 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     out.line("scan: step 5 of 6: planning the live search");
     std::vector<LivePlan> plans;
     if (opt.searchMemory) {
-        std::vector<const ClassRef*> wanted;                 // which classes get a live search (in the shot scan: the most important ones first)
+        std::vector<const ClassRef*> wanted;                 // which classes get a live search (in the shot scan: in the order of kShotLive)
         if (shot) {
-            for (int rankWanted = 0; rankWanted <= 1; ++rankWanted)
+            for (const char* const* n = kShotLive; *n; ++n)
                 for (const ClassRef& c : classes) {
+                    if (c.name != *n || !asms[c.asmIndex].ours) continue;
                     void* par = api.class_get_parent(c.klass()); const char* pnm = par ? api.class_get_name(par) : nullptr;
-                    if (shotLive(c, asms[c.asmIndex].ours, pnm ? pnm : "") == rankWanted) wanted.push_back(&c);
+                    if (shotLiveName(c.name, true, pnm ? pnm : "")) { wanted.push_back(&c); break; }
                 }
         } else {
             for (const ClassRef& c : classes) if (asms[c.asmIndex].ours && inList(c.name, opt.brief ? kLiveBrief : kLiveClasses)) wanted.push_back(&c);
@@ -1071,7 +1040,7 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
             const ClassRef& c = *cp;
             if (static_cast<int>(plans.size()) >= (shot ? kMaxShotLive : kMaxLiveTargets)) break;
             LivePlan p; p.klassInv = ~static_cast<uint64_t>(reinterpret_cast<uintptr_t>(c.klass())); p.full = c.full;
-            p.filterShot = shot && c.name == "PlayerLocomotion";
+            p.filterShot = false;
             p.unityObject = isUnityObjectClass(api, c.klass());
             const int32_t isz = api.class_instance_size ? api.class_instance_size(c.klass()) : 0;
             p.size = (isz >= 16 && isz <= 4096) ? isz : 512;
@@ -1092,6 +1061,12 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
       out.key("scan: step 5 done: %d class(es) planned for the live search: %s", static_cast<int>(plans.size()), names.c_str()); }
     std::vector<ClassRef>().swap(classes);            // free our own copies of the class pointers before the memory search
     if (thread && api.thread_detach) api.thread_detach(thread);       // the memory search needs no il2cpp calls
+    if (shot && opt.searchMemory && !plans.empty() && opt.liveDelaySeconds > 0) {
+        // Time for the person to close the menu, pick up a ball and take a shot: the running ball only has useful values then.
+        out.key("scan: waiting %d seconds before looking at the running objects, so you can close the menu, pick up a ball and take a shot, then hold a ball again", opt.liveDelaySeconds);
+        gStep.store("5b: waiting for you to pick up a ball");
+        for (int i = 0; i < opt.liveDelaySeconds; ++i) usleep(1000000);
+    }
 
     // ---- 6. look through the game's memory for the running copies and write down their field values
     // The search runs on its own thread; this thread only watches it. If it makes no progress for a while, we give up on it.

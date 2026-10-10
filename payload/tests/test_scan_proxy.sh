@@ -52,7 +52,7 @@ int main(int, char** argv) {
     if (getenv("HOST_SHOT_WORLD")) {                                         // stage D7: the pretend game also has rims, a ball and the engine classes
       void (*sw)(int) = (void (*)(int))dlsym(il, "fake_set_shot_world"); if (sw) sw(1);
       void* (*mo)(int, int) = (void* (*)(int, int))dlsym(il, "fake_make_shot_object");
-      if (mo) { mo(0, 0); mo(0, 1); mo(1, 0); mo(1, 1); mo(2, 1); }
+      if (mo) { mo(0, 0); mo(0, 1); mo(1, 0); mo(1, 1); mo(2, 1); mo(7, 0); mo(7, 1); mo(8, 0); mo(9, 0); mo(9, 1); mo(10, 0); mo(11, 0); mo(12, 1); }
     }
     if (getenv("HOST_PLAYER")) {                                             // the headset's player object (the one the movement link looks for)
       void* (*mkp)(int) = (void* (*)(int))dlsym(il, "fake_make_player_locomotion");
@@ -178,13 +178,22 @@ F9="$W/shot.txt"
 check "game still starts (65542)" '[[ "$out_last" == *"RESULT=65542"* ]]'
 check "the ball and hoops scan was requested and logged" 'grep -q "^--- BALL AND HOOPS scan requested from the menu" "$F9"'
 check "it says what it is" 'grep -q "^scan: BALL AND HOOPS scan (stage D7)" "$F9"'
-check "the rim, ball and hand-grab classes are written with their fields" 'grep -q "^scan: CLASS ShovelTools.RimSync : MonoBehaviour" "$F9" && grep -q "^scan:   field _hoopHeight : System.Single @36" "$F9" && grep -q "^scan: CLASS ShovelTools.BasketballBall" "$F9" && grep -q "^scan: CLASS Autohand.GrabbableBase" "$F9"'
+check "the ball, the game's shot assist and the hoop classes are written with their fields" 'grep -q "^scan: CLASS ShovelTools.Basketball : MonoBehaviour" "$F9" && grep -q "^scan:   field _isHeld : System.Boolean @36" "$F9" && grep -q "^scan: CLASS ShovelTools.BasketballShotAssist" "$F9" && grep -q "^scan: CLASS ShovelTools.BasketballGoal" "$F9" && grep -q "^scan: CLASS ShovelTools.GameManager" "$F9"'
+check "the long class index and the assembly list are left out of this report" '! grep -q "^scan: index " "$F9" && ! grep -q "^scan: assembly " "$F9" && grep -q "the class-name index is left out" "$F9"'
+check "the classes that were asked for by name but are missing are reported in one line" 'grep -q "^scan: classes asked for by name but NOT found in this game: .*BankShotCandidate" "$F9"'
 check "the engine functions are looked up and reported" 'grep -q "^scan: engine class UnityEngine.Rigidbody found" "$F9" && grep -q "^scan:   method set_velocity(1) : System.Void rva=" "$F9" && grep -q "^scan: icall UnityEngine.Rigidbody::get_velocity_Injected(UnityEngine.Vector3&) -> found" "$F9"'
-check "the running rims and the ball were found in memory and their values written" 'grep -q "^scan: live ShovelTools.RimSync #1 size=48" "$F9" && grep -q "^scan:   live _hoopHeight = 3.05 " "$F9" && grep -q "^scan: live ShovelTools.BasketballBall #1" "$F9"'
+check "the running balls, hoops and the game's shot assist were found in memory and their values written" 'grep -q "^scan: live ShovelTools.Basketball #1 size=64" "$F9" && grep -q "^scan:   live _strength = 0.6 " "$F9" && grep -q "^scan: live ShovelTools.BasketballGoal #1" "$F9" && grep -q "^scan:   live _officialMatch = true " "$F9"'
+check "the 25-second pause is a test setting: off here (no 'waiting' line)" '! grep -q "^scan: waiting " "$F9"'
 check "the scan finished OK and the menu was told" 'grep -q "^--- scan finished: ok ---" "$F9" && grep -q "^scan: DONE" "$F9"'
 check "no movement classes in this report" '! grep -q "^scan: CLASS Game.PlayerMovement" "$F9" && ! grep -q "^scan: field-hit" "$F9"'
 check "the report is small" '[ "$(wc -c < "$F9")" -lt 100000 ]'
 check "no memory addresses written with a 0x prefix" '! grep -q "0x[0-9a-f]\{4,\}" "$F9"'
+
+echo "== stage D7c: the pause before the live search, through the real path (3 s in this test; 25 s in the headset)"
+runscan shotwait TZ_SAMPLE_MS=20000 TZ_TEST_SHOT_SCAN=1 HOST_SHOT_WORLD=1 TZ_SHOT_LIVE_DELAY_S=3 "HOST_WAIT_LINE=--- scan finished"
+F9W="$W/shotwait.txt"
+check "the scan tells the person it is waiting, and why" 'grep -q "^scan: waiting 3 seconds before looking at the running objects, so you can close the menu, pick up a ball and take a shot" "$F9W"'
+check "after the pause the live objects are still found and the scan finishes OK" 'grep -q "^scan: live ShovelTools.Basketball #1" "$F9W" && grep -q "^--- scan finished: ok ---" "$F9W"'
 
 echo "== stage D7: the Aimbot switch is on at 23 m, then at Unlimited (pretend menu)"
 runscan aim TZ_SAMPLE_MS=7000 TZ_TEST_AIM=23 "HOST_WAIT_LINE=aimbot: menu asks aimbot=ON"
