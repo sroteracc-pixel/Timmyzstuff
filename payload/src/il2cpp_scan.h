@@ -53,17 +53,28 @@ struct Api {
     bool (*class_is_valuetype)(void* klass) = nullptr;
     bool (*class_is_enum)(void* klass) = nullptr;
     int32_t (*class_value_size)(void* klass, uint32_t* align) = nullptr;
+    // optional, stage D7: only LOOKED FOR and reported (the ball scan says whether they exist); nothing calls them yet
+    void* (*runtime_invoke)(void* method, void* obj, void** params, void** exc) = nullptr;
+    void* (*class_get_method_from_name)(void* klass, const char* name, int argsCount) = nullptr;
+    void* (*resolve_icall)(const char* name) = nullptr;
 };
 
 // Looks the functions up in an already loaded libil2cpp.so. `missing` lists required ones that were not found.
 bool loadApi(void* lib, Api* out, std::string* missing);
 
+// What the report is about. Movement = the headset movement classes (stages D4 - D6). Shot = balls, hoops, rims and shots (stage D7, for the Aimbot).
+enum class Topic { Movement, Shot };
+
 struct Options {
+    Topic topic = Topic::Movement;
     uintptr_t libBase = 0;        // where libil2cpp.so is mapped (only used when the system cannot tell which library an address is in)
     bool searchMemory = true;     // look for the running copies of the important classes and print their field values
     int maxSeconds = 90;          // the memory search stops after this long
     bool brief = false;           // short report: only the important classes (full detail) + the live values; no index, no single-line hits
     int stallSeconds = 10;        // ... and is given up on when it makes no progress at all for this long (a stuck read)
+    // the size budget of the report (the facts file that reaches the person is cut at about 265 KB). maxBytes = 0: no byte budget.
+    int maxLines = 7000, reservedLines = 80;
+    size_t maxBytes = 0, reservedBytes = 0;
     // only for the PC tests (0 = off): pretend the memory read gets stuck after this many chunks / make the copy pipe this small
     int testHangAfterChunks = 0;
     size_t testPipeBytes = 0;
@@ -118,5 +129,8 @@ CopySearch findCopies(const ClassInfo& cls, int maxCopies, int maxSeconds, int s
 bool classNameMatches(const std::string& name);       // movement-ish class names
 bool indexNameMatches(const std::string& name);       // broader: also player / character / parameters ...
 bool fieldNameMatches(const std::string& name);
+bool shotNameMatches(const std::string& name);        // stage D7: classes about balls, hoops, rims, shots, throws, grabbing
+int shotDetailRank(const std::string& name, const std::string& parent);     // 3 ball / hoop / rim, 2 shoot / throw / goal / shot, 0 bot commands, -1 not written out in full
+bool shotLiveWanted(const std::string& full, bool ours, const std::string& parent);   // is a running copy of this class searched for?
 
 }  // namespace tzscan

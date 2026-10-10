@@ -45,6 +45,7 @@ struct Outcome {
     int hand = -1;                  // which controller is the pointer (0 = left, 1 = right), -1 = none
     int clickedId = 0;              // HitId pressed in this update (0 = none)
     bool scanRequested = false;     // the "Scan game code" button was pressed (and no scan is running)
+    bool shotScanRequested = false; // the "Scan ball and hoops" button (Basketball page) was pressed (and no scan is running)
 };
 
 class Interaction {

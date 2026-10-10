@@ -9,7 +9,7 @@ pass=0; failn=0
 check() { if eval "$2"; then pass=$((pass+1)); echo "  PASS  $1"; else failn=$((failn+1)); echo "  FAIL  $1"; fi; }
 
 g++ -std=c++17 -shared -fPIC -fvisibility=hidden -I"$HERE/fake_jni" -I"$HERE/../src" -I"$HERE/../../menu/src" -DTZ_FAST_TEST \
-  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/movement.cpp" "$HERE/../src/game_link.cpp" "$HERE/../src/il2cpp_scan.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" "$HERE/../../menu/src/menu_input.cpp" \
+  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/movement.cpp" "$HERE/../src/game_link.cpp" "$HERE/../src/aimbot.cpp" "$HERE/../src/il2cpp_scan.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" "$HERE/../../menu/src/menu_input.cpp" \
   -ldl -pthread -Wl,--version-script="$HERE/../exports.map" -o "$W/libmain.so" || exit 2
 cat > "$W/orig.cpp" <<'C'
 extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void*, void*) { return 0x00010006; }
@@ -41,20 +41,27 @@ g++ -shared -fPIC "$W/plug.cpp" -o "$W/libOculusXRPlugin.so"
 cat > "$W/host.cpp" <<'C'
 #include <dlfcn.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <cstdio>
 #include <cstdlib>
+static void** gTable = nullptr;
+static void* worker(void*) {                                // a SECOND thread calls the controller function too (stage D7: the payload tells which threads call it)
+  pthread_setname_np(pthread_self(), "hostworker");
+  for (int i = 0; i < 20; ++i) { unsigned char st[128]; for (int k = 0; k < 128; ++k) st[k] = 0xFF; ((int(*)(unsigned, void*))gTable[3])(3u, st); }
+  return nullptr;
+}
 int main(int, char** argv) {
   void* ovr = dlopen("libOVRPlugin.so", RTLD_NOW);
   void* plug = dlopen(argv[2], RTLD_NOW);                 // full path, so the maps line names it
   if (!ovr || !plug) { std::printf("NOLIB\n"); return 4; }
   void** t = (void**)malloc(64 * sizeof(void*));          // the plugin keeps its table on the HEAP
   t[0] = dlsym(ovr, "ovrp_EndFrame4"); t[1] = dlsym(ovr, "ovrp_BeginFrame4"); t[2] = dlsym(ovr, "ovrp_WaitToBeginFrame");
-  t[3] = dlsym(ovr, "ovrp_GetControllerState4");
+  t[3] = dlsym(ovr, "ovrp_GetControllerState4"); gTable = t;
   void* h = dlopen(argv[1], RTLD_NOW);
   int (*f)(void*, void*) = (int(*)(void*, void*))dlsym(h, "JNI_OnLoad");
   std::printf("RESULT=%d\n", f(nullptr, nullptr));
   long hostEnd = 0, bad = 0;
-  for (int i = 0; i < 160; ++i) {                          // ~8 seconds of "frames"
+  for (int i = 0; i < 200; ++i) {                          // ~10 seconds of "frames"
     long r = ((long(*)(int,long,int,long))t[0])(i, 2, 3, 4);
     if (r != i + 4 + 9 + 16) ++bad;    // must equal what the real function returns
     ++hostEnd;
@@ -63,17 +70,19 @@ int main(int, char** argv) {
     { unsigned char st[128]; for (int k = 0; k < 128; ++k) st[k] = 0xFF;
       if (((int(*)(unsigned, void*))t[3])(3u, st) != 0) ++bad;          // menu is closed: the game must see the real bytes
       if (st[4] != 0x10 || st[40] != 0x10 || st[0] != 0x10 || st[100] != 0xFF) ++bad; }
+    if (i == 120) { pthread_t th; pthread_create(&th, nullptr, worker, nullptr); pthread_join(th, nullptr); }
     usleep(50 * 1000);
   }
+  sleep(2);                                                // let the payload write its next progress line
   long (*ec)() = (long(*)())dlsym(ovr, "fake_end_calls");
   long (*ic)() = (long(*)())dlsym(ovr, "fake_input_calls");
   std::printf("HOST_END=%ld REAL_END=%ld BAD=%ld INPUT_REAL=%ld\n", hostEnd, ec(), bad, ic());
   return 0;
 }
 C
-g++ -o "$W/host" "$W/host.cpp" -ldl
+g++ -o "$W/host" "$W/host.cpp" -ldl -pthread
 mkdir -p "$W/facts"
-out=$(cd "$W" && LD_LIBRARY_PATH="$W" TZ_FACTS_DIR="$W/facts" "$W/host" "$W/libmain.so" "$W/libOculusXRPlugin.so" 2>&1)
+out=$(cd "$W" && LD_LIBRARY_PATH="$W" TZ_FACTS_DIR="$W/facts" TZ_SAMPLE_MS=9500 "$W/host" "$W/libmain.so" "$W/libOculusXRPlugin.so" 2>&1)
 F="$W/facts/timmyzstuff_facts.txt"
 echo "$out" | grep -E "RESULT|HOST_END"
 cp -f "$F" /tmp/facts_main.txt
@@ -87,6 +96,9 @@ check "real function saw every call the host made" '( h=$(echo "$out" | sed -n "
 check "watcher counted calls (EndFrame4 count > 0 in the file)" 'grep -E "frame watch ovrp_EndFrame4: installed, [1-9][0-9]* calls" "$F" >/dev/null'
 check "input doorway installed in the heap table too" 'grep -q "input block: ovrp_GetControllerState4 doorway installed in 1 heap slot" "$F"'
 check "input doorway: every game call reached the real function, nothing blanked while the menu is closed (BAD=0 covers the bytes)" '[ "$(echo "$out" | sed -n "s/.*INPUT_REAL=\([0-9]*\).*/\1/p")" -ge 160 ] && grep -q "^input: block installed;.* 0 of them blanked" "$F"'
+check "the facts say WHICH thread calls the controller doorway (the game's main thread is where the Aimbot must work later)" 'grep -qE "^threads: controller-state doorway is called by: thread [0-9]+ .host. \([0-9]+ calls\)" "$F"'
+check "a second calling thread is noticed and named" 'grep -qE "^threads: controller-state doorway is called by: .*thread [0-9]+ .host. \([0-9]+ calls\)( \[[^]]*\])?, thread [0-9]+ .hostworker. \([0-9]+ calls\)" "$F"'
+check "the EndFrame4 doorway thread is written too" 'grep -qE "EndFrame4 doorway is called by: thread [0-9]+ .host. \(" "$F"'
 check "overlay tried to start and failed politely on a PC (no crash, game unaffected)" 'grep -q "overlay: init FAILED" "$F"'
 check "frames-per-second line is written" 'grep -q "^frames t=" "$F"'
 check "latest args are recorded as small numbers" 'grep -q "EndFrame4 latest args: [0-9]* 2 3 4 " "$F"'

@@ -59,6 +59,44 @@ Klass kPlayerLoco{"PlayerLocomotion", "ShovelTools", &kBehaviour,
 #include "fake_player_locomotion_fields.inc"
     }, {}, 0, false, false, 1056};
 
+// ---- the "ball and hoops" world (stage D7). Only visible after fake_set_shot_world(1), so the older tests keep seeing the old world.
+Klass kComponent{"Component", "UnityEngine", nullptr, {}, {}, 0, false, false, 24};
+Klass kRigidbody{"Rigidbody", "UnityEngine", &kComponent, {}, {}, 0, false, false, 24};
+Klass kTransform{"Transform", "UnityEngine", &kComponent, {}, {}, 0, false, false, 24};
+Klass kPhysics{"Physics", "UnityEngine", nullptr, {}, {}, 0, false, false, 16};
+Klass kTime{"Time", "UnityEngine", nullptr, {}, {}, 0, false, false, 16};
+Type tTransform{"UnityEngine.Transform", &kTransform};
+Klass kRimSync{"RimSync", "ShovelTools", &kBehaviour, {{"_rimTransform", &tTransform, 24, 0}, {"_bend", &tFloat, 32, 0}, {"_hoopHeight", &tFloat, 36, 0}}, {}, 0, false, false, 48};
+Klass kRimBend{"GymClassRimBend", "ShovelTools", &kBehaviour, {{"_rimPivot", &tTransform, 24, 0}, {"_bendAmount", &tFloat, 32, 0}, {"_isNet", &tBool, 36, 0}}, {}, 0, false, false, 48};
+Klass kSlider{"GymClassSlider", "ShovelTools", &kBehaviour, {{"_value", &tFloat, 24, 0}}, {}, 0, false, false, 32};
+Klass kBall{"BasketballBall", "ShovelTools", &kBehaviour, {{"_body", &tRB, 24, 0}, {"_isHeld", &tBool, 32, 0}, {"_lastShooterId", &tInt, 36, 0}}, {}, 0, false, false, 48};
+Klass kShotPrefs{"ShotPreferences", "ShovelTools", nullptr, {{"wristAngle", &tFloat, 16, 0}, {"throwPower", &tFloat, 20, 0}}, {}, 0, false, false, 32};
+Klass kPrimary{"PrimaryColor", "ShovelTools", nullptr, {{"r", &tFloat, 16, 0}}, {}, 0, false, false, 32};            // has "rim" inside a word: must NOT match
+Klass kFootball{"FootballBall", "ShovelTools", nullptr, {{"x", &tFloat, 16, 0}}, {}, 0, false, false, 32};            // another sport: must NOT match
+Klass kBaseball{"BaseballBat", "ShovelTools", nullptr, {{"x", &tFloat, 16, 0}}, {}, 0, false, false, 32};
+Klass kGrabBase{"GrabbableBase", "Autohand", &kBehaviour, {{"body", &tRB, 24, 0}, {"heldBy", &tOther, 32, 0}, {"throwPower", &tFloat, 40, 0}}, {}, 0, false, false, 64};
+Klass kGrabbable{"Grabbable", "Autohand", &kGrabBase, {{"jointBreakForce", &tFloat, 64, 0}}, {}, 0, false, false, 80};
+Klass kHandA{"Hand", "Autohand", &kBehaviour, {{"holdingObj", &tOther, 24, 0}}, {}, 0, false, false, 48};
+Klass kMenuHand{"HandMenu", "Autohand", nullptr, {{"x", &tFloat, 16, 0}}, {}, 0, false, false, 32};                 // "Hand..." but not in the explicit list
+// added after the REAL class names were checked (stage D7b): the ball's own physics class, an event delegate that must be skipped, a bot command,
+// and the network library (Normcore: "Normal.Realtime")
+Klass kMulticast{"MulticastDelegate", "System", nullptr, {}, {}, 0, false, false, 64};
+Klass kParamMass{"ParameterBasketballMass", "ShovelTools", &kMulticast, {}, {}, 0, false, false, 64};              // an event: 0 fields. Indexed, but never written out and never searched
+Klass kBallPhys{"BallPhysics", "ShovelTools", &kBehaviour, {{"_body", &tRB, 24, 0}, {"_drag", &tFloat, 32, 0}, {"_mass", &tFloat, 36, 0}, {"_inHand", &tBool, 40, 0}}, {}, 0, false, false, 48};
+Klass kACommand{"ACommand", "ShovelTools", nullptr, {}, {}, 0, false, false, 16};
+Klass kShotCmd{"PlayerShotCommand", "ShovelTools", &kACommand, {{"_shooterId", &tInt, 16, 0}}, {}, 0, false, false, 24};
+Klass kRealtime{"Realtime", "Normal.Realtime", &kBehaviour, {{"_connected", &tBool, 24, 0}, {"_clientId", &tInt, 28, 0}}, {}, 0, false, false, 48};
+Klass kRtView{"RealtimeView", "Normal.Realtime", &kBehaviour, {{"_ownerId", &tInt, 24, 0}, {"_viewId", &tInt, 28, 0}}, {}, 0, false, false, 48};
+Klass kRtTransform{"RealtimeTransform", "Normal.Realtime", &kBehaviour, {{"_ownedByMe", &tBool, 24, 0}}, {}, 0, false, false, 48};
+Klass kRtOther{"RealtimeVoice", "Normal.Realtime", &kBehaviour, {{"_x", &tInt, 24, 0}}, {}, 0, false, false, 48};     // another network class: not in the list, must not be written
+Image iShot{"IRL.GymFake", {&kRimSync, &kRimBend, &kSlider, &kBall, &kShotPrefs, &kPrimary, &kFootball, &kBaseball, &kParamMass, &kBallPhys, &kACommand, &kShotCmd}};
+Image iNet{"Normal.Realtime", {&kRealtime, &kRtView, &kRtTransform, &kRtOther}};
+Image iAuto{"Autohand.Runtime", {&kGrabBase, &kGrabbable, &kHandA, &kMenuHand}};
+Image iPhys{"UnityEngine.PhysicsModule", {&kRigidbody, &kPhysics}};
+Image iCoreEng{"UnityEngine.CoreModule", {&kTransform, &kComponent, &kTime}};
+bool gShotWorld = false;
+void* gAssembliesShot[8] = {nullptr};
+
 Image iGame{"Assembly-CSharp", {&kMove, &kSettings, &kBody, &kRemoveItem, &kRemoveMove, &kHelper, &kMenu, &kLocoBase, &kLoco, &kVertical, &kConstraints, &kPlayerLoco}};
 Image iPhoton{"Photon.Realtime", {&kNetMove}};
 Image iCore{"mscorlib", {&kObject}};
@@ -75,6 +113,18 @@ void init() {
     kLoco.methods = {mk("SetJumpHeight", 1, &tVoid, 0x3100), mk("SetMaxJumpSpeed", 1, &tVoid, 0x3200)};
     for (int i = 0; i < 70; ++i) kConstraints.fields.push_back({"_pad" + std::to_string(i), &tInt, static_cast<size_t>(16 + 4 * i), 0});
     kConstraints.methods = {mk("Clamp", 1, &tVoid, 0x3300)};
+    kRimSync.methods = {mk("Update", 0, &tVoid, 0x3500), mk("get_Bend", 0, &tFloat, 0x3510)};
+    kRimBend.methods = {mk("Bend", 1, &tVoid, 0x3520), mk("OnCollisionEnter", 1, &tVoid, 0x3530)};
+    kBall.methods = {mk("OnRelease", 1, &tVoid, 0x3540), mk("get_IsHeld", 0, &tBool, 0x3550)};
+    kBallPhys.methods = {mk("FixedUpdate", 0, &tVoid, 0x3580), mk("OnThrown", 1, &tVoid, 0x3590)};
+    kRealtime.methods = {mk("get_connected", 0, &tBool, 0x35a0)};
+    kRtView.methods = {mk("RequestOwnership", 0, &tVoid, 0x35b0), mk("get_isOwnedLocallySelf", 0, &tBool, 0x35c0)};
+    kGrabBase.methods = {mk("OnRelease", 1, &tVoid, 0x3560), mk("get_IsHeld", 0, &tBool, 0x3570)};
+    kRigidbody.methods = {mk("get_velocity", 0, &tVec3, 0x3600), mk("set_velocity", 1, &tVoid, 0x3610), mk("get_position", 0, &tVec3, 0x3620), mk("get_mass", 0, &tFloat, 0x3630),
+                          mk("AddForce", 1, &tVoid, 0x3640), mk("AddForce", 2, &tVoid, 0x3650), mk("MovePosition", 1, &tVoid, 0x3660)};
+    kTransform.methods = {mk("get_position", 0, &tVec3, 0x3700), mk("get_forward", 0, &tVec3, 0x3710)};
+    kComponent.methods = {mk("get_transform", 0, &tTransform, 0x3720)};
+    kPhysics.methods = {mk("get_gravity", 0, &tVec3, 0x3730)};
     kPlayerLoco.methods = {mk("SetForwardMaxSpeed", 1, &tVoid, 0x3400), mk("SetJumpHeightMultiplier", 1, &tVoid, 0x3410), mk("get_CurrentSpeed", 0, &tFloat, 0x3420), mk("Update", 0, &tVoid, 0x3430)};
     const unsigned char setterA[8] = {0x00, 0xac, 0x02, 0xbd, 0xc0, 0x03, 0x5f, 0xd6};     // str s0,[x0,#684] ; ret   (_forwardMaxSpeed)
     const unsigned char setterB[8] = {0x00, 0xdc, 0x02, 0xbd, 0xc0, 0x03, 0x5f, 0xd6};     // str s0,[x0,#732] ; ret   (_jumpHeightMultiplier)
@@ -135,7 +185,36 @@ __attribute__((visibility("default"))) void* fake_make_vertical() {
 }
 
 __attribute__((visibility("default"))) void* il2cpp_domain_get() { init(); return gDomainNull ? nullptr : &gDomain; }
-__attribute__((visibility("default"))) void** il2cpp_domain_get_assemblies(void*, size_t* n) { *n = 3; return gAssemblies; }
+__attribute__((visibility("default"))) void fake_set_shot_world(int on) {
+    gShotWorld = on != 0;
+    if (gShotWorld) { void* a[8] = {&iCore, &iGame, &iPhoton, &iShot, &iAuto, &iPhys, &iCoreEng, &iNet}; std::memcpy(gAssembliesShot, a, sizeof a); }
+}
+// running copies of the ball-and-hoops classes: 0 = RimSync, 1 = GymClassRimBend, 2 = BasketballBall, 3 = BallPhysics, 4 = Realtime, 5 = RealtimeView, 6 = RealtimeTransform.
+// `variant` 1 marks the ball as held.
+__attribute__((visibility("default"))) void* fake_make_shot_object(int which, int variant) {
+    Klass* k = which == 0 ? &kRimSync : (which == 1 ? &kRimBend : (which == 2 ? &kBall : (which == 3 ? &kBallPhys : (which == 4 ? &kRealtime : (which == 5 ? &kRtView : &kRtTransform)))));
+    unsigned char* o = static_cast<unsigned char*>(calloc(1, 48));
+    std::memcpy(o, &k, 8);
+    const uint64_t cached = reinterpret_cast<uint64_t>(o) + 0x40; std::memcpy(o + 16, &cached, 8);
+    const uint64_t ref = 0x7a00001000ULL + 16 * variant; std::memcpy(o + 24, &ref, 8);
+    if (which == 0) { const float bend = 0.25f * variant, h = 3.05f; std::memcpy(o + 32, &bend, 4); std::memcpy(o + 36, &h, 4); }
+    else if (which == 1) { const float bend = 0.5f + variant; std::memcpy(o + 32, &bend, 4); o[36] = 0; }
+    else if (which == 2) { o[32] = variant ? 1 : 0; const int id = 7 + variant; std::memcpy(o + 36, &id, 4); }
+    else if (which == 3) { const float drag = 0.05f * (variant + 1), mass = 0.62f; std::memcpy(o + 32, &drag, 4); std::memcpy(o + 36, &mass, 4); o[40] = variant ? 1 : 0; }
+    else if (which == 4) { o[24] = 1; const int cid = 3; std::memcpy(o + 28, &cid, 4); }                          // connected, client 3
+    else if (which == 5) { const int owner = 2 + variant, view = 100 + variant; std::memcpy(o + 24, &owner, 4); std::memcpy(o + 28, &view, 4); }
+    else { o[24] = 1; }
+    return o;
+}
+// the pretend icall table: only the Rigidbody velocity getter (with its full signature) is "found"
+__attribute__((visibility("default"))) void* il2cpp_resolve_icall(const char* name) {
+    if (std::string(name) == "UnityEngine.Rigidbody::get_velocity_Injected(UnityEngine.Vector3&)") return gCode + 0x3800;
+    return nullptr;
+}
+__attribute__((visibility("default"))) int fake_invoke_count = 0;       // how often the scan CALLED into the game through the optional functions (must stay 0)
+__attribute__((visibility("default"))) void* il2cpp_runtime_invoke(void*, void*, void**, void**) { ++fake_invoke_count; return nullptr; }
+__attribute__((visibility("default"))) void* il2cpp_class_get_method_from_name(void*, const char*, int) { ++fake_invoke_count; return nullptr; }
+__attribute__((visibility("default"))) void** il2cpp_domain_get_assemblies(void*, size_t* n) { if (gShotWorld) { *n = 8; return gAssembliesShot; } *n = 3; return gAssemblies; }
 __attribute__((visibility("default"))) void* il2cpp_assembly_get_image(void* a) { return a; }
 __attribute__((visibility("default"))) const char* il2cpp_image_get_name(void* i) { return static_cast<Image*>(i)->name.c_str(); }
 __attribute__((visibility("default"))) size_t il2cpp_image_get_class_count(void* i) { return static_cast<Image*>(i)->classes.size(); }

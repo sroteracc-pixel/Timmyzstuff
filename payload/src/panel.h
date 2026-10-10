@@ -65,6 +65,10 @@ const float kDistDefault = 1.15f;
 const float kSpeedMin = 1.1f, kSpeedMax = 5.0f, kSpeedStep = 0.1f;                 // Speed Boost, shown as 1.1x .. 5.0x
 const float kJumpMin = 1.1f,  kJumpMax = 5.0f,  kJumpStep = 0.1f;                  // Jump Boost (jump HEIGHT), 1.1x .. 5.0x
 const float kGravMin = 0.0f,  kGravMax = 90.0f, kGravStep = 5.0f;                  // Low / High Gravity in percent
+// Aimbot slider (page "Basketball"): max shot distance. These three numbers are the same as kCapMinM / kCapMaxM / kCapStepM in aimbot.h (a test checks it).
+const float kAimMin = 5.0f, kAimMax = 50.0f, kAimStep = 1.0f;                      // 5 m ... 50 m, 1 m per step; 50 is shown as "Unlimited"
+const float kAimDefault = 50.0f;
+std::string aimCapText(float capM);                                                // "Unlimited" or "23 m"
 
 // Everything the picture depends on.
 struct PanelState {
@@ -89,6 +93,11 @@ struct PanelState {
     int linkState = 0;              // 0 = waiting (no switch on yet), 1 = connected to the game's movement code, 2 = looking for the player, 3 = failed
     int scanState = 0;              // game-code scan: 0 not run, 1 running, 2 done, 3 failed
     int scanMatches = 0;            // how many interesting classes the scan wrote down
+
+    // ---- Basketball page (Aimbot). The switch is NEVER saved: every launch starts with it off. The distance IS saved. ----
+    bool aimOn = false;             // Aimbot switch
+    float aimCapM = kAimDefault;    // max shot distance, 5 .. 50 m (50 = Unlimited)
+    int aimLinkState = 0;           // 0 = the part that touches the game's ball does not exist yet (stage D7). Later stages use the other numbers.
 };
 
 // Clickable areas (in picture pixels), so a pointer can find what it points at.
@@ -109,12 +118,16 @@ enum HitId {
     HIT_TOGGLE_LOWGRAV = 43,
     HIT_TOGGLE_HIGHGRAV = 44,
     HIT_SCAN = 45,                  // "Scan game code" button on the Movement page
+    HIT_SLIDER_AIMCAP = 46,         // Basketball page: max shot distance
+    HIT_TOGGLE_AIM = 47,            // Basketball page: Aimbot switch
+    HIT_SCAN_SHOT = 48,             // Basketball page: "Scan ball and hoops" button
     HIT_COLOR0 = 60,                // 60 .. 69 = the 10 colours
 };
 struct HitRect { int id; float x, y, w, h; };
 
 const int kTabCount = 11;
 const int kTabMovement = 3;      // index of the "Movement" page
+const int kTabBasketball = 4;    // index of the "Basketball" page (the Aimbot lives here)
 const char* tabName(int i);
 
 // Paints the whole menu. `hits` (optional) receives the clickable areas.

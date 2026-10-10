@@ -121,6 +121,33 @@ int main() {
     pointer(1.56, sample(900, 528, 0.0f), nullptr);
     hookEndFrame4(16, game, 2, nullptr); sub = testSubmitBytes();
     std::printf("T7k after let go distance=%.2f panel z=%.3f\n", state().distance, F(sub, 64));
+    // stage D7: the Basketball page, through the real pointer path: tab, switch, slider, scan button; read back the way the payload does
+    {
+        std::printf("T7m default aimAsk on=%d cap=%.0f shotScan=%d\n", aimAsk().on ? 1 : 0, aimAsk().capM, takeShotScanRequest() ? 1 : 0);
+        tzpanel::PanelState tmp; tmp.tab = 4; std::vector<tzpanel::HitRect> hh; { tzpanel::Canvas cv(1024, 768); tzpanel::drawPanel(cv, tmp, &hh); }
+        auto at = [&](int id, float* x, float* y) { for (auto& r : hh) if (r.id == id) { *x = r.x + r.w / 2; *y = r.y + r.h / 2; return true; } return false; };
+        auto edge = [&](int id, bool left, float* x, float* y) { for (auto& r : hh) if (r.id == id) { *x = left ? r.x + 16 : r.x + r.w - 16; *y = r.y + r.h / 2; return true; } return false; };
+        float x = 0, y = 0; double t = 2.0;
+        auto click = [&](int id) { if (!at(id, &x, &y)) return false; pointer(t, sample(x, y, 0.0f), nullptr); t += 0.02; pointer(t, sample(x, y, 0.9f), nullptr); t += 0.02; pointer(t, sample(x, y, 0.0f), nullptr); t += 0.02; return true; };
+        click(tzpanel::HIT_TAB0 + 4);
+        std::printf("T7n tab=%d\n", state().tab);
+        click(tzpanel::HIT_TOGGLE_AIM);
+        std::printf("T7o aimAsk on=%d cap=%.0f\n", aimAsk().on ? 1 : 0, aimAsk().capM);
+        float lx, ly, rx, ry;                                      // drag the slider to the far left, let go
+        edge(tzpanel::HIT_SLIDER_AIMCAP, true, &lx, &ly); edge(tzpanel::HIT_SLIDER_AIMCAP, false, &rx, &ry);
+        pointer(t, sample(rx, ry, 0.0f), nullptr); t += 0.02; pointer(t, sample(rx, ry, 0.9f), nullptr); t += 0.02;
+        pointer(t, sample(lx, ly, 0.9f), nullptr); t += 0.02; pointer(t, sample(lx, ly, 0.0f), nullptr); t += 0.02;
+        std::printf("T7p aimAsk on=%d cap=%.0f\n", aimAsk().on ? 1 : 0, aimAsk().capM);
+        pointer(t, sample(lx, ly, 0.0f), nullptr); t += 0.02; pointer(t, sample(lx, ly, 0.9f), nullptr); t += 0.02;
+        pointer(t, sample(rx, ry, 0.9f), nullptr); t += 0.02; pointer(t, sample(rx, ry, 0.0f), nullptr); t += 0.02;
+        std::printf("T7q aimAsk on=%d cap=%.0f\n", aimAsk().on ? 1 : 0, aimAsk().capM);
+        click(tzpanel::HIT_SCAN_SHOT);
+        const bool a = takeShotScanRequest(), b = takeShotScanRequest(), c = takeScanRequest();
+        std::printf("T7r shotScan first=%d second=%d movementScan=%d scanState=%d\n", a ? 1 : 0, b ? 1 : 0, c ? 1 : 0, state().scanState);
+        click(tzpanel::HIT_TOGGLE_AIM);
+        std::printf("T7s aimAsk on=%d\n", aimAsk().on ? 1 : 0);
+        state().tab = 0; state().aimOn = false; state().aimCapM = 50; state().scanState = 0; markDirty();
+    }
     // the dot is not shown when pointing away; sample with invalid hands is harmless
     PointerSample none; std::memset(&none, 0, sizeof none);
     pr = pointer(1.4, none, nullptr);
@@ -164,6 +191,13 @@ check "letting go of the slider resizes the panel (1.5x)" 'grep -q "^T7g after l
 check "transparency slider reaches exactly 0.25" 'grep -q "^T7i transparency=0.25" <<<"$out"'
 check "distance slider: panel stays put while dragging" 'grep -q "^T7j during drag distance=2.00 panel z=-1.150" <<<"$out"'
 check "distance slider: panel moves to 2 m when let go" 'grep -q "^T7k after let go distance=2.00 panel z=-2.000" <<<"$out"'
+check "Basketball page: the Aimbot starts off at 50 (Unlimited) and no scan is waiting" 'grep -q "^T7m default aimAsk on=0 cap=50 shotScan=0" <<<"$out"'
+check "Basketball page: the sidebar entry opens it" 'grep -q "^T7n tab=4" <<<"$out"'
+check "Basketball page: the switch turns the aimbot on (read back through aimAsk)" 'grep -q "^T7o aimAsk on=1 cap=50" <<<"$out"'
+check "Basketball page: dragging the slider to the far left gives 5 m" 'grep -q "^T7p aimAsk on=1 cap=5$" <<<"$out"'
+check "Basketball page: dragging to the far right gives 50 m (Unlimited)" 'grep -q "^T7q aimAsk on=1 cap=50$" <<<"$out"'
+check "Basketball page: the scan button asks for ONE ball scan and no movement scan" 'grep -q "^T7r shotScan first=1 second=0 movementScan=0 scanState=1" <<<"$out"'
+check "Basketball page: the switch turns off again" 'grep -q "^T7s aimAsk on=0" <<<"$out"'
 check "no hand data: no dot" 'grep -q "^T7h onMenu=0" <<<"$out"'
 check "menu open: the game sees blanked buttons/triggers/sticks, connection byte kept" 'grep -q "^T8a open: buttons=0000 triggers=00 sticks=00 connected=ab tail=ab" <<<"$out"'
 check "just after closing: still blanked for a moment" 'grep -q "^T8b just closed (grace): buttons=00" <<<"$out"'

@@ -30,5 +30,11 @@ int main(int argc, char** argv) {
         n.speedOn = true; n.speedMul = 3.7f; n.jumpMul = 2.3f; n.gravityMode = 1; n.lowGravPct = 90; n.highGravPct = 35; n.hover = HIT_TOGGLE_JUMP; n.scanState = 2; n.linkState = 0;
         drawPanel(c, n, nullptr); save(argv[5], c);
     }
+    if (argc > 7) {   // Basketball page (Aimbot): off at Unlimited, then on at 23 m while the slider is dragged, with a scan running
+        PanelState a; a.tab = kTabBasketball;
+        drawPanel(c, a, nullptr); save(argv[6], c);
+        PanelState b; b.tab = kTabBasketball; b.aimOn = true; b.aimCapM = 23; b.dragSlider = HIT_SLIDER_AIMCAP; b.scanState = 1;
+        drawPanel(c, b, nullptr); save(argv[7], c);
+    }
     return 0;
 }

@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include "pointer.h"
+#include "aimbot.h"       // only to check that the menu and the aimbot rules use the same numbers
 using namespace tzpanel;
 
 static int passed = 0, failed = 0;
@@ -328,6 +329,84 @@ int main() {
         CHECK("the Scan button changes no movement setting", !sc.speedOn && !sc.jumpOn && sc.gravityMode == 0);
     }
 
+
+    std::printf("== Basketball page (Aimbot)\n");
+    {   PanelState m; Interaction mi; openMenu(mi, m);
+        click(mi, m, HIT_TAB0 + 4);
+        CHECK("the Basketball entry opens the Basketball page", m.tab == kTabBasketball);
+        const std::vector<HitRect> h = hitsFor(m);
+        CHECK("it has the Aimbot switch, the distance slider and the 'Scan ball and hoops' button", find(h, HIT_TOGGLE_AIM).id && find(h, HIT_SLIDER_AIMCAP).id && find(h, HIT_SCAN_SHOT).id);
+        CHECK("the Movement and Settings controls are not on this page", find(h, HIT_TOGGLE_SPEED).id == 0 && find(h, HIT_SCAN).id == 0 && find(h, HIT_SOUND).id == 0 && find(h, HIT_SLIDER_SPEED).id == 0);
+        bool inside = true, overlap = false;
+        for (size_t i = 0; i < h.size(); ++i) {
+            if (h[i].x < 0 || h[i].y < 0 || h[i].x + h[i].w > kWidth || h[i].y + h[i].h > kHeight) inside = false;
+            if (h[i].x >= 296 && h[i].id != HIT_CLOSE && h[i].y + h[i].h > 624) inside = false;
+            for (size_t j = i + 1; j < h.size(); ++j)
+                if (h[i].x < h[j].x + h[j].w && h[j].x < h[i].x + h[i].w && h[i].y < h[j].y + h[j].h && h[j].y < h[i].y + h[i].h) overlap = true;
+        }
+        CHECK("every control fits on the picture and ends above the footer", inside);
+        CHECK("no two controls overlap", !overlap);
+        PanelState fresh;
+        CHECK("the Aimbot starts OFF, at Unlimited (50)", !fresh.aimOn && !m.aimOn && fresh.aimCapM == 50.0f && m.aimCapM == 50.0f && fresh.aimLinkState == 0);
+        CHECK("the menu's slider numbers are the aimbot rules' numbers (5 m, 50 m, 1 m, default 50)", kAimMin == tzaim::kCapMinM && kAimMax == tzaim::kCapMaxM && kAimStep == tzaim::kCapStepM && kAimDefault == tzaim::kCapDefaultM);
+        {   bool same = true;
+            for (float v = 5.0f; v <= 50.0f; v += 0.1f) if (aimCapText(v) != tzaim::capLabel(v)) { same = false; std::printf("      differs at %.2f: '%s' vs '%s'\n", v, aimCapText(v).c_str(), tzaim::capLabel(v).c_str()); break; }
+            CHECK("the text on the page is the same as the aimbot's own label for every value (Unlimited at 50, '23 m' ...)", same); }
+        CHECK("labels: 5 -> '5 m', 23 -> '23 m', 49 -> '49 m', 50 -> 'Unlimited'", aimCapText(5) == "5 m" && aimCapText(23) == "23 m" && aimCapText(49) == "49 m" && aimCapText(50) == "Unlimited");
+
+        click(mi, m, HIT_TOGGLE_AIM);
+        CHECK("the Aimbot switch turns on", m.aimOn && !m.speedOn && !m.jumpOn && m.gravityMode == 0);
+        click(mi, m, HIT_TOGGLE_AIM);
+        CHECK("... and off again", !m.aimOn);
+
+        // dragging the slider: far left, far right, and every position on the way is a whole number between 5 and 50
+        const std::vector<HitRect> bh = hitsFor(m);
+        auto stepH = [&](float xx, float yy, float trig) { HandAim a[2]; a[1].valid = true; a[1].onPlane = true; a[1].x = xx; a[1].y = yy; a[1].trigger = trig; a[0].valid = false; a[0].trigger = 0; return mi.update(m, bh, a); };
+        const HitRect sr = find(bh, HIT_SLIDER_AIMCAP);
+        const float y0 = sr.y + sr.h / 2, x0 = sr.x + 16, x1 = sr.x + sr.w - 16;
+        bool allWhole = true; int seen = 0; float minSeen = 99, maxSeen = 0; std::set<int> values;
+        stepH(x0, y0, 0.0f); stepH(x0, y0, 0.9f);
+        for (int i = 0; i <= 400; ++i) { const float xx = x0 + (x1 - x0) * i / 400.0f; stepH(xx, y0, 0.9f); const float v = m.aimCapM; ++seen;
+            if (v != std::floor(v) || v < 5.0f || v > 50.0f) allWhole = false; if (v < minSeen) minSeen = v; if (v > maxSeen) maxSeen = v; values.insert((int)v); }
+        stepH(x1, y0, 0.0f);
+        CHECK("dragging from the far left to the far right only ever gives whole metres from 5 to 50", allWhole && minSeen == 5.0f && maxSeen == 50.0f);
+        CHECK("... and it passes through every one of the 46 positions (5, 6, ... 50)", values.size() == 46);
+        CHECK("... ends on 50 = Unlimited at the far right", m.aimCapM == 50.0f && aimCapText(m.aimCapM) == "Unlimited");
+        stepH(x0, y0, 0.0f); stepH(x0, y0, 0.9f); stepH(x0 - 40, y0, 0.9f); stepH(x0 - 40, y0, 0.0f);
+        CHECK("dragging past the far left stays at 5 m", m.aimCapM == 5.0f);
+        stepH(x0 + (x1 - x0) * 0.5f, y0, 0.0f); stepH(x0 + (x1 - x0) * 0.5f, y0, 0.9f); stepH(x0 + (x1 - x0) * 0.5f, y0, 0.0f);
+        CHECK("the middle of the slider is about 27-28 m", m.aimCapM >= 27.0f && m.aimCapM <= 28.0f);
+        CHECK("the slider changes no movement setting", !m.speedOn && !m.jumpOn && m.gravityMode == 0 && near(m.speedMul, 1.1f, 1e-4f) && m.lowGravPct == 0);
+
+        // the number on the page changes with the value
+        {   PanelState a2, b2; a2.tab = b2.tab = kTabBasketball; a2.aimCapM = 23; b2.aimCapM = 24;
+            Canvas ca(kWidth, kHeight), cb(kWidth, kHeight); drawPanel(ca, a2, nullptr); drawPanel(cb, b2, nullptr);
+            const HitRect r = find(hitsFor(a2), HIT_SLIDER_AIMCAP);
+            bool differs = false;
+            for (int yy = (int)r.y; yy < (int)(r.y + r.h) + 12 && !differs; ++yy)
+                for (int xx = (int)(r.x + r.w + 20); xx < (int)(r.x + r.w + 150) && !differs; ++xx)
+                    if (std::memcmp(ca.data() + (yy * kWidth + xx) * 4, cb.data() + (yy * kWidth + xx) * 4, 4) != 0) differs = true;
+            CHECK("the number next to the slider changes with the value (23 m vs 24 m)", differs); }
+
+        // the scan button of this page
+        PanelState sc; Interaction si; openMenu(si, sc); sc.tab = kTabBasketball;
+        const HitRect sb = find(hitsFor(sc), HIT_SCAN_SHOT);
+        const float bx = sb.x + sb.w / 2, by = sb.y + sb.h / 2;
+        step(si, sc, bx, by, 0.0f);
+        Outcome so = step(si, sc, bx, by, 0.9f);
+        CHECK("'Scan ball and hoops' asks for a BALL scan (not the movement scan) and shows 'scanning'", so.shotScanRequested && !so.scanRequested && sc.scanState == 1);
+        step(si, sc, bx, by, 0.0f); so = step(si, sc, bx, by, 0.9f);
+        CHECK("pressing it again while it is scanning does NOT start a second scan", !so.shotScanRequested && sc.scanState == 1);
+        step(si, sc, bx, by, 0.0f); sc.scanState = 3;
+        so = step(si, sc, bx, by, 0.9f);
+        CHECK("after a failed or finished scan it can be run again", so.shotScanRequested && sc.scanState == 1);
+        CHECK("the scan button changes no setting", !sc.aimOn && sc.aimCapM == 50.0f && !sc.speedOn);
+        // a running scan from the OTHER page also blocks this one (one scan at a time)
+        PanelState sd; Interaction sdi; openMenu(sdi, sd); sd.tab = kTabBasketball; sd.scanState = 1;
+        step(sdi, sd, bx, by, 0.0f); so = step(sdi, sd, bx, by, 0.9f);
+        CHECK("while the movement scan is running, this button does nothing", !so.shotScanRequested && !so.scanRequested);
+    }
+
     std::printf("== saved settings\n");
     {   PanelState a; a.sound = false; a.colorIndex = 5; a.scale = 1.25f; a.transparency = 0.20f; a.distance = 0.85f;
         const std::string txt = settingsToText(a);
@@ -348,6 +427,21 @@ int main() {
         CHECK("the exact end values are accepted", near(e.speedMul, 5.0f, 1e-4f) && near(e.jumpMul, 1.1f, 1e-4f) && e.lowGravPct == 90 && e.highGravPct == 0);
         PanelState o2; settingsFromText("speed=3.14\nlowgravity=47\n", o2);
         CHECK("a hand-edited value is snapped to a real step (3.1x, 45%)", near(o2.speedMul, 3.1f, 1e-3f) && o2.lowGravPct == 45);
+    }
+    {   PanelState a; a.aimCapM = 23; a.aimOn = true;
+        const std::string txt = settingsToText(a);
+        PanelState b; const bool ok = settingsFromText(txt, b);
+        CHECK("the aimbot distance is saved and comes back exactly (23 m)", ok && b.aimCapM == 23.0f && txt.find("aimdistance=23\n") != std::string::npos);
+        CHECK("the Aimbot SWITCH is never saved: it starts OFF next time", !b.aimOn && txt.find("aimon") == std::string::npos && txt.find("aimbot") == std::string::npos);
+        PanelState u; u.aimCapM = 50; CHECK("Unlimited (50) is saved as aimdistance=50", settingsToText(u).find("aimdistance=50\n") != std::string::npos);
+        PanelState g; settingsFromText("aimdistance=3\naimdistance=99\naimdistance=abc\n", g);
+        CHECK("out-of-range or garbage distances are ignored (stays Unlimited)", g.aimCapM == 50.0f);
+        PanelState e1, e2; settingsFromText("aimdistance=5\n", e1); settingsFromText("aimdistance=50\n", e2);
+        CHECK("the exact end values 5 and 50 are accepted", e1.aimCapM == 5.0f && e2.aimCapM == 50.0f);
+        PanelState o3; settingsFromText("aimdistance=23.6\n", o3);
+        CHECK("a hand-edited 23.6 is snapped to a whole metre (24)", o3.aimCapM == 24.0f);
+        PanelState old; const bool okOld = settingsFromText("sound=0\ncolor=2\nspeed=2.0\n", old);
+        CHECK("an older settings file without the aimbot line leaves the default (Unlimited)", okOld && old.aimCapM == 50.0f && !old.aimOn);
     }
     {   PanelState o; settingsFromText("transparency=0.60\n", o);
         CHECK("an old saved transparency of 0.60 is pulled down to the new maximum 0.25", near(o.transparency, 0.25f, 1e-4f)); }

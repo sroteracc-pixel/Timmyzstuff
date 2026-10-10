@@ -26,7 +26,9 @@
 #include <jni.h>
 #include <pthread.h>
 #include <fcntl.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -45,6 +47,7 @@
 #include "movement.h"     // the movement rules (stage D4)
 #include "il2cpp_scan.h"   // read-only scan of the game's code (stage D4)
 #include "game_link.h"     // the link that really changes speed / jump / gravity (stage D6)
+#include "aimbot.h"        // the Aimbot rules and maths (stage D7; the game part does not exist yet)
 #include "overlay.h"      // shows the menu picture in the headset (stage D2)  // counting doorways for ovrp_EndFrame4 / BeginFrame4 / WaitToBeginFrame
 
 #ifdef __ANDROID__
@@ -287,11 +290,43 @@ std::vector<MapRegion> readMaps() {
     return out;
 }
 
+// ---- stage D7: which thread calls our doorways? --------------------------------------------------------------------
+// The Aimbot must change the ball on the game's MAIN thread (Unity's functions are only safe there). The controller doorway is called by the
+// game every frame; if it is the game's main thread, that is the place to do the work. We only count here; the facts file says which thread it is.
+struct ThreadTally { std::atomic<int> tid[4]; std::atomic<unsigned long long> calls[4]; char name[4][20]; };
+ThreadTally gInputThreads, gFrameThreads;
+void tallyThread(ThreadTally& t) {
+    static thread_local int me = 0;
+    if (!me) me = static_cast<int>(syscall(SYS_gettid));
+    for (int i = 0; i < 4; ++i) {
+        int cur = t.tid[i].load(std::memory_order_relaxed);
+        if (cur == 0) {      // a thread we have not seen: write down its name NOW (a thread that ends later can no longer be asked)
+            char nm[20] = {0}; prctl(PR_GET_NAME, nm, 0, 0, 0);
+            int zero = 0;
+            if (t.tid[i].compare_exchange_strong(zero, -1)) { std::memcpy(t.name[i], nm, sizeof nm); t.tid[i].store(me); }
+            cur = t.tid[i].load(std::memory_order_relaxed);
+        }
+        if (cur == me) { t.calls[i].fetch_add(1, std::memory_order_relaxed); return; }
+    }
+}
+std::string describeTally(ThreadTally& t) {
+    std::string r;
+    for (int i = 0; i < 4; ++i) {
+        const int tid = t.tid[i].load();
+        if (tid <= 0) break;                                            // 0 = no more threads, -1 = a thread is being written down right now
+        char nm[21]; std::memcpy(nm, t.name[i], 20); nm[20] = 0;
+        char b[160]; std::snprintf(b, sizeof b, "%sthread %d '%s' (%llu calls)%s", i ? ", " : "", tid, nm, static_cast<unsigned long long>(t.calls[i].load()), tid == getpid() ? " [= the process's first thread]" : "");
+        r += b;
+    }
+    return r.empty() ? "(never called)" : r;
+}
+
 bool gWatchPatched[3] = {false, false, false};
 
 // The doorway for ovrp_EndFrame4 (index 0). Same counting as the asm stub, then the overlay code
 // (which adds our menu panel to the layer list while the menu is open) calls the real function.
 extern "C" int tzEndFrame4Hook(int frame, const void* const* layers, int n, void* extra) {
+    tallyThread(gFrameThreads);
     FrameWatch* w = frameWatch(0);
     *w->count = *w->count + 1;
     w->args[0] = static_cast<uint64_t>(static_cast<unsigned>(frame));
@@ -370,6 +405,7 @@ extern "C" int tzControllerState4Hook(unsigned int mask, void* out) {
     typedef int (*Fn)(unsigned int, void*);
     const Fn real = reinterpret_cast<Fn>(gInputReal);
     if (!real) return -1;
+    tallyThread(gInputThreads);
     return tzoverlay::filterControllerState(real(mask, out), out);
 }
 
@@ -521,8 +557,9 @@ bool il2cppForLink(tzscan::Api* api, std::string* why) {
     return true;
 }
 
-void* scanMain(void*) {
-    fact("--- scan requested from the menu at t=%.1f ---", secondsSinceStart());
+void* scanMain(void* arg) {
+    const tzscan::Topic topic = static_cast<tzscan::Topic>(reinterpret_cast<intptr_t>(arg));
+    fact("--- %s scan requested from the menu at t=%.1f ---", topic == tzscan::Topic::Shot ? "BALL AND HOOPS" : "movement", secondsSinceStart());
     bool ok = false; int matches = 0;
     uintptr_t base = 0;
     void* lib = openIl2cpp(&base);
@@ -537,9 +574,13 @@ void* scanMain(void*) {
         } else {
             job->options.libBase = base;
             job->options.brief = true;          // stage D5c: short report about the headset movement classes (keeps the facts file small enough to send)
+            if (topic == tzscan::Topic::Shot) {  // stage D7: balls, hoops, rims, shots. The facts file that reaches me is cut at about 265 KB, so this report has its own size budget.
+                job->options.topic = tzscan::Topic::Shot; job->options.brief = false;
+                job->options.maxLines = 2000; job->options.reservedLines = 450; job->options.maxBytes = 190000; job->options.reservedBytes = 45000;
+            }
             double deadline = job->options.maxSeconds + job->options.stallSeconds + 120.0;      // longer than the scan can honestly take
 #ifdef TZ_FAST_TEST
-            if (!std::getenv("TZ_SCAN_BRIEF")) job->options.brief = false;                         // PC test only: the full report unless asked otherwise
+            if (topic == tzscan::Topic::Movement && !std::getenv("TZ_SCAN_BRIEF")) job->options.brief = false;    // PC test only: the full report unless asked otherwise
             if (const char* e = std::getenv("TZ_SCAN_DEADLINE_S")) deadline = std::atof(e);      // PC test only: pretend the runtime hangs
             if (const char* e = std::getenv("TZ_SCAN_TEST_HANG_CHUNKS")) job->options.testHangAfterChunks = std::atoi(e);
             if (const char* e = std::getenv("TZ_SCAN_TEST_PIPE_BYTES")) job->options.testPipeBytes = static_cast<size_t>(std::atol(e));
@@ -570,11 +611,11 @@ void* scanMain(void*) {
     return nullptr;
 }
 
-void startScan() {
+void startScan(tzscan::Topic topic = tzscan::Topic::Movement) {
     bool expected = false;
     if (!gScanRunning.compare_exchange_strong(expected, true)) return;     // one scan at a time
     pthread_t t;
-    if (pthread_create(&t, nullptr, scanMain, nullptr) == 0) pthread_detach(t);
+    if (pthread_create(&t, nullptr, scanMain, reinterpret_cast<void*>(static_cast<intptr_t>(topic))) == 0) pthread_detach(t);
     else { gScanRunning.store(false); tzoverlay::setScanResult(false, 0); fact("scan: could not start the scan thread"); }
 }
 
@@ -609,7 +650,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D6: clickable menu + Movement page + update check + short scan + REAL game link for Speed Boost / Jump Boost / Low and High Gravity (Fly does not exist yet))");
+    fact("Timmyzstuff facts (stage D7b: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot switch and distance slider (the part that moves the ball is NOT built yet) + ball-and-hoops scan)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -800,8 +841,9 @@ void* probeMain(void*) {
         }
         // ---- stage D4: scan button + movement rules
         if (tzoverlay::takeScanRequest()) startScan();
+        if (tzoverlay::takeShotScanRequest()) startScan(tzscan::Topic::Shot);      // stage D7: the Basketball page's "Scan ball and hoops"
 #ifdef TZ_FAST_TEST
-        { static bool testScanDone = false; if (!testScanDone && now >= 2.0) { testScanDone = true; startScan(); } }     // PC test only: press "Scan" by itself
+        { static bool testScanDone = false; if (!testScanDone && now >= 2.0) { testScanDone = true; startScan(std::getenv("TZ_TEST_SHOT_SCAN") ? tzscan::Topic::Shot : tzscan::Topic::Movement); } }     // PC test only: press "Scan" by itself
 #endif
         {
             tzoverlay::MovementAsk ask = tzoverlay::movementAsk();
@@ -836,6 +878,18 @@ void* probeMain(void*) {
                 fact("t=%.0f %s", now, gLink.summary().c_str());
             }
         }
+        {   // ---- stage D7: the Aimbot switch and its distance. The part that touches the game's ball does not exist yet, so this only writes down what the menu asks.
+            tzoverlay::AimAsk aim = tzoverlay::aimAsk();
+#ifdef TZ_FAST_TEST
+            if (const char* e = std::getenv("TZ_TEST_AIM")) { float cap = 50; std::sscanf(e, "%f", &cap); aim.on = now >= 3.0; aim.capM = cap; }     // PC test only: "TZ_TEST_AIM=23" = switch on at 23 m from 3 s on
+#endif
+            static bool lastOn = false; static float lastCap = -1; static int aimLogs = 0; static double lastAimLog = -10;
+            if ((aim.on != lastOn || (aim.on && aim.capM != lastCap && now - lastAimLog > 1.0)) && aimLogs < 30) {
+                ++aimLogs; lastOn = aim.on; lastCap = aim.capM; lastAimLog = now;
+                fact("aimbot: menu asks aimbot=%s, max shot distance=%s  [stage D7: the part that moves the ball is not built yet, so nothing changes in the game]",
+                     aim.on ? "ON" : "off", tzaim::capLabel(aim.capM).c_str());
+            }
+        }
         tzoverlay::tick(now, fact);
         if (now >= nextBeat) {
             fact("t=%.0f still sampling (%ld samples, menu opened %d times, closed %d times)", now, samples, opens, closes);
@@ -846,6 +900,14 @@ void* probeMain(void*) {
                        tzoverlay::ready() ? 1 : 0, tzoverlay::visible() ? 1 : 0, (unsigned long long)st.withOverlay, st.lastRc, st.firstBadRc, st.broken ? 1 : 0); }
                 { const tzoverlay::InputStats is = tzoverlay::inputStats();
                   fact("input: block %s; game asked for controller state %llu times, %llu of them blanked", gInputPatched ? "installed" : "not installed", (unsigned long long)is.calls, (unsigned long long)is.masked); }
+                { static int threadLines = 0; static std::string lastIn, lastFr;
+                  const std::string in = describeTally(gInputThreads), fr = describeTally(gFrameThreads);
+                  // the call counts keep growing, so only write the line again when a NEW thread shows up (and never more than 6 times)
+                  auto names = [](const std::string& x) { std::string r; for (size_t i = 0; i < x.size(); ++i) { if (x[i] == '(') { while (i < x.size() && x[i] != ')') ++i; } else r += x[i]; } return r; };
+                  if ((names(in) != lastIn || names(fr) != lastFr) && threadLines < 6) {
+                      ++threadLines; lastIn = names(in); lastFr = names(fr);
+                      fact("threads: controller-state doorway is called by: %s | EndFrame4 doorway is called by: %s", in.c_str(), fr.c_str());
+                  } }
                 for (int i = 0; i < frameWatchCount(); ++i) lastCounts[i] = *frameWatch(i)->count;
                 lastBeatTime = now;
             }
@@ -854,6 +916,7 @@ void* probeMain(void*) {
         usleep(20 * 1000);                              // 50 samples per second
     }
     fact("summary: menu opened %d times, closed %d times", opens, closes);
+    fact("threads (final): controller-state doorway: %s | EndFrame4 doorway: %s", describeTally(gInputThreads).c_str(), describeTally(gFrameThreads).c_str());
     fact("%s", gLink.summary().c_str());
     for (int i = 0; i < frameWatchCount(); ++i)
         fact("frame watch %s: %s, %llu calls counted in total", frameWatch(i)->name, gWatchPatched[i] ? "installed" : "NOT installed (the plugin never saved that address)", static_cast<unsigned long long>(*frameWatch(i)->count));
@@ -875,7 +938,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D6: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link)");
+    logf_("payload loaded (stage D7b: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot page)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

@@ -69,7 +69,7 @@ float gCurX = 0, gCurY = 0;
 std::string gSettingsPath;
 int gPointerLogLines = 0;
 std::atomic<int64_t> gMaskUntilMs{0};
-std::atomic<bool> gScanRequested{false};
+std::atomic<bool> gScanRequested{false}, gShotScanRequested{false};
 std::atomic<uint64_t> gInputCalls{0}, gInputMasked{0};
 
 alignas(16) unsigned char gSubmitA[0x200];
@@ -327,6 +327,7 @@ PointerResult pointer(double now, const PointerSample& smp, LogFn log) {
     const bool wasCursor = gCursorOn;
     const tzpanel::Outcome o = gInteraction.update(gState, gHits, aims);
     if (o.scanRequested) { gScanRequested.store(true); if (log) log("pointer: Scan game code pressed"); }
+    if (o.shotScanRequested) { gShotScanRequested.store(true); if (log) log("pointer: Scan ball and hoops pressed"); }
     if (o.layoutCommitted) { gAppliedScale = gState.scale; gAppliedDistance = gState.distance; buildSubmit(); }
     if (o.saveNeeded) saveSettings(log);
     if (o.redraw) gDirty = true;
@@ -358,6 +359,7 @@ void setSettingsPath(const char* path, LogFn log) {
 }
 
 bool takeScanRequest() { return gScanRequested.exchange(false); }
+bool takeShotScanRequest() { return gShotScanRequested.exchange(false); }
 void setScanResult(bool ok, int matches) {
     std::lock_guard<std::mutex> g(gMutex);
     gState.scanState = ok ? 2 : 3; gState.scanMatches = matches; gDirty = true;
@@ -369,6 +371,11 @@ void setLinkState(int state) {
 MovementAsk movementAsk() {
     std::lock_guard<std::mutex> g(gMutex);
     return MovementAsk{gState.speedOn, gState.jumpOn, gState.gravityMode, gState.speedMul, gState.jumpMul, gState.lowGravPct, gState.highGravPct};
+}
+
+AimAsk aimAsk() {
+    std::lock_guard<std::mutex> g(gMutex);
+    return AimAsk{gState.aimOn, gState.aimCapM};
 }
 
 bool inputBlocked() { return gShow.load(std::memory_order_acquire) || nowMs() < gMaskUntilMs.load(std::memory_order_relaxed); }

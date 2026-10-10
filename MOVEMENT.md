@@ -1,4 +1,6 @@
-# Movement page (stage D6)
+# Movement page (stage D6, still the same in stage D7)
+
+Stage D7 only added the Basketball page with the Aimbot switch (see AIMBOT.md). Nothing about movement changed.
 
 ## What is real, what is not
 | Part | State |
@@ -6,7 +8,7 @@
 | Movement page in the menu (4 switches, 4 sliders with exact numbers, saved slider values) | Built, works on the headset |
 | The rules (off = original value back, no stacking, one gravity mode, Fly wins) | Built and tested on a PC (38 checks) |
 | "Scan game code" button | Works on the headset (stage D5c file) |
-| **Game link: finding the headset's player object and writing into it (Speed, Jump, Low / High Gravity)** | **Built in stage D6. Tested on a PC against a pretend game (77 link checks + a whole-payload run). NOT yet seen working in the real game.** |
+| **Game link: finding the headset's player object and writing into it (Speed, Jump, Low / High Gravity)** | **Built in stage D6 and SEEN WORKING on the headset** (your D6 facts file: it connected in about 2 seconds, every value it wrote was read back exactly, the game never wrote its own value over ours, and turning a switch off put the originals back exactly). You also said it worked great. |
 | **Fly** | **Does not exist yet.** The rules already have a "Fly is on" input so Fly will win over the boosts once it exists. |
 
 ## What the game link does (game_link.cpp)
@@ -30,10 +32,10 @@ Everything below was read from the real game by the stage D5c scan (names and ex
 - If the object disappears (new scene) the link notices, shows "looking..." in the menu and finds the new one by itself.
 - Every read and write goes through a "safe copy" (the kernel says "no" for a bad address instead of the game crashing).
 
-NOT verified (only the headset can tell): that writing these fields really changes the movement; that `_jumpHeightMultiplier` makes the
-jump 2x as HIGH at 2.0x (if the game uses it as launch speed the jump would be even higher - the facts file records the peak jump speed);
-how `_gravity` interacts with the jump arc; whether the game re-applies its config over our numbers (the facts file counts it);
-whether the online game notices or dislikes changed speeds.
+Seen on the headset (D6 facts file): the writes landed exactly and stayed (the game did not write back over them: 0 times), and the originals
+came back exactly. You reported that the speed, jump and gravity changes worked.
+NOT measured: that Jump x2.0 is exactly twice as HIGH (the facts file has no jump measurement that says so; you saw it work, nobody measured the height);
+how `_gravity` interacts with the jump arc in numbers; whether the online game notices or dislikes changed speeds (nothing in the files can tell).
 
 ## The rules (movement.cpp)
 - Everything starts OFF. Switches are never saved; slider values are saved.

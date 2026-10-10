@@ -53,6 +53,7 @@ bool sliderRange(int id, float* lo, float* hi, float* step) {
     case HIT_SLIDER_SPEED: *lo = kSpeedMin; *hi = kSpeedMax; *step = kSpeedStep; return true;
     case HIT_SLIDER_JUMP:  *lo = kJumpMin;  *hi = kJumpMax;  *step = kJumpStep;  return true;
     case HIT_SLIDER_LOWGRAV: case HIT_SLIDER_HIGHGRAV: *lo = kGravMin; *hi = kGravMax; *step = kGravStep; return true;
+    case HIT_SLIDER_AIMCAP: *lo = kAimMin; *hi = kAimMax; *step = kAimStep; return true;
     default: return false;
     }
 }
@@ -66,6 +67,7 @@ float& sliderValue(PanelState& s, int id) {
     case HIT_SLIDER_JUMP: return s.jumpMul;
     case HIT_SLIDER_LOWGRAV: return s.lowGravPct;
     case HIT_SLIDER_HIGHGRAV: return s.highGravPct;
+    case HIT_SLIDER_AIMCAP: return s.aimCapM;
     default: return dummy;
     }
 }
@@ -75,6 +77,13 @@ float snapSlider(int id, float v) {
     v = lo + std::round((v - lo) / step) * step;
     v = std::round(v * 1000.0f) / 1000.0f;            // no 1.4000001 style leftovers: the shown value is the exact value
     return v < lo ? lo : (v > hi ? hi : v);
+}
+
+std::string aimCapText(float capM) {
+    if (capM >= kAimMax - 0.5f) return "Unlimited";
+    char b[24];
+    std::snprintf(b, sizeof b, "%d m", static_cast<int>(std::lround(capM)));
+    return b;
 }
 
 // ---------------------------------------------------------------------------------- Canvas
@@ -539,6 +548,60 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
             c.textCentered(kFontSmall, bx + bw / 2, by + bh / 2 + 7, busy ? "Scanning..." : "Scan game code", busy ? grey : white);
             if (hits) hits->push_back({HIT_SCAN, bx, by, bw, bh});
         }
+    } else if (s.tab == kTabBasketball) {
+        float y = cy0 + 66;
+        // ---- Aimbot card: switch + "max shot distance" slider
+        {
+            const float ry = y, rh = 112;
+            const bool on = s.aimOn, hvT = s.hover == HIT_TOGGLE_AIM;
+            c.fillRoundRect(rx, ry, rw, rh, 16, card);
+            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, on ? withA(accentHi, 0.7f) : cardEdge);
+            c.text(kFontLabel, rx + 22, ry + 32, "Aimbot", on ? white : rgba(222, 222, 234));
+            c.text(kFontTiny, rx + 22 + c.textWidth(kFontLabel, "Aimbot") + 16, ry + 31, "the ball goes in the hoop you aim at", dimGrey);
+            const float tw = 66, th = 32, tx = rx + rw - tw - 22, ty0 = ry + 14;
+            c.fillRoundRect(tx, ty0, tw, th, th / 2, on ? accent : rgba(58, 58, 74));
+            c.strokeRoundRect(tx, ty0, tw, th, th / 2, hvT ? 2.2f : 1.4f, on ? accentHi : (hvT ? withA(accentHi, 0.9f) : rgba(84, 84, 104)));
+            c.fillCircle(on ? tx + tw - th / 2 : tx + th / 2, ty0 + th / 2, th / 2 - 4, rgba(250, 250, 255));
+            if (hits) hits->push_back({HIT_TOGGLE_AIM, tx - 14, ry + 4, tw + 28, 52});
+            // max shot distance slider (5 m ... 50 m, 50 = Unlimited)
+            c.text(kFontSmall, rx + 22, ry + 62, "Max shot distance", grey);
+            const std::string label = aimCapText(s.aimCapM);
+            float lo, hi, step; sliderRange(HIT_SLIDER_AIMCAP, &lo, &hi, &step);
+            const float sx0 = rx + 26, sx1 = rx + rw - 168, sy = ry + 84;      // shorter than on the Movement page: the word "Unlimited" is wide
+            const float t = clamp01((s.aimCapM - lo) / (hi - lo)), kx = sx0 + (sx1 - sx0) * t;
+            const bool hot = s.dragSlider == HIT_SLIDER_AIMCAP || s.hover == HIT_SLIDER_AIMCAP;
+            c.fillRoundRect(sx0, sy - 5, sx1 - sx0, 10, 5, rgba(14, 14, 20));
+            c.strokeRoundRect(sx0, sy - 5, sx1 - sx0, 10, 5, 1.2f, rgba(52, 52, 68));
+            if (kx - sx0 > 1) c.fillRoundRectGradient(sx0, sy - 5, std::max(10.0f, kx - sx0), 10, 5, on ? accentHi : rgba(110, 110, 130), on ? accent : rgba(84, 84, 104));
+            if (hot) c.glowRoundRect(kx - 10, sy - 10, 20, 20, 10, 10, withA(accentHi, 0.7f));
+            c.fillCircle(kx, sy, hot ? 13.5f : 11.5f, rgba(250, 250, 255));
+            c.strokeCircle(kx, sy, hot ? 13.5f : 11.5f, 3, on ? (hot ? accentHi : accent) : rgba(120, 120, 140));
+            c.text(kFontLabel, rx + rw - 22 - c.textWidth(kFontLabel, label), sy + 8, label, on ? accentHi : grey);
+            c.text(kFontTiny, rx + 22 + c.textWidth(kFontSmall, "Max shot distance") + 14, ry + 61,
+                   s.aimCapM >= kAimMax - 0.5f ? "no limit: it works from anywhere" : "farther than this: your throw is left alone", dimGrey);
+            if (hits) hits->push_back({HIT_SLIDER_AIMCAP, sx0 - 16, ry + 66, sx1 - sx0 + 32, 34});
+            y += rh + 8;
+        }
+        // ---- game link + scan button (the part that touches the game's ball does not exist yet)
+        {
+            const float ry = y, rh = 72;
+            c.fillRoundRect(rx, ry, rw, rh, 16, card);
+            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, cardEdge);
+            c.fillCircle(rx + 28, ry + 26, 7, rgba(150, 150, 170));
+            c.text(kFontLabel, rx + 46, ry + 32, "Game link: not built yet", white);
+            const char* note =
+                s.scanState == 1 ? "Scanning the game's code... this can take about a minute." :
+                s.scanState == 2 ? "Scan done. Press Get facts in the patcher and send me the file." :
+                s.scanState == 3 ? "Scan failed. Press Get facts in the patcher and send me the file." :
+                "The switch does not change the game yet. Press Scan, then Get facts.";
+            c.text(kFontTiny, rx + 22, ry + 63, note, grey);
+            const float bw = 214, bh = 36, bx = rx + rw - bw - 18, by = ry + 8;
+            const bool hv = s.hover == HIT_SCAN_SHOT, busy = s.scanState == 1;
+            c.fillRoundRectGradient(bx, by, bw, bh, 13, busy ? rgba(48, 48, 60) : (hv ? accentHi : accent), busy ? rgba(38, 38, 50) : accentLo);
+            c.strokeRoundRect(bx, by, bw, bh, 13, 1.4f, busy ? rgba(70, 70, 88) : accentHi);
+            c.textCentered(kFontSmall, bx + bw / 2, by + bh / 2 + 7, busy ? "Scanning..." : "Scan ball and hoops", busy ? grey : white);
+            if (hits) hits->push_back({HIT_SCAN_SHOT, bx, by, bw, bh});
+        }
     } else {
         const float ry = cy0 + 78, rh = 120;
         c.fillRoundRect(rx, ry, rw, rh, 18, card);
@@ -579,9 +642,9 @@ void drawCursor(Canvas& c, float x, float y, const PanelState& s, bool pressed) 
 
 // ---------------------------------------------------------------------------------- saved settings
 std::string settingsToText(const PanelState& s) {
-    char b[320];
-    std::snprintf(b, sizeof b, "sound=%d\ncolor=%d\nscale=%.2f\ntransparency=%.2f\ndistance=%.2f\nspeed=%.1f\njump=%.1f\nlowgravity=%.0f\nhighgravity=%.0f\n",
-                  s.sound ? 1 : 0, s.colorIndex, s.scale, s.transparency, s.distance, s.speedMul, s.jumpMul, s.lowGravPct, s.highGravPct);
+    char b[360];
+    std::snprintf(b, sizeof b, "sound=%d\ncolor=%d\nscale=%.2f\ntransparency=%.2f\ndistance=%.2f\nspeed=%.1f\njump=%.1f\nlowgravity=%.0f\nhighgravity=%.0f\naimdistance=%.0f\n",
+                  s.sound ? 1 : 0, s.colorIndex, s.scale, s.transparency, s.distance, s.speedMul, s.jumpMul, s.lowGravPct, s.highGravPct, s.aimCapM);
     return b;
 }
 bool settingsFromText(const std::string& text, PanelState& s) {
@@ -596,8 +659,8 @@ bool settingsFromText(const std::string& text, PanelState& s) {
         else if (key == "color") { const long v = std::strtol(val.c_str(), &e, 10); if (e != val.c_str() && v >= 0 && v < kColorCount) { s.colorIndex = static_cast<int>(v); any = true; } }
         else if (key == "scale") { const float f = std::strtof(val.c_str(), &e); if (e != val.c_str() && f >= kScaleMin - 1e-4f && f <= kScaleMax + 1e-4f) { s.scale = snapSlider(HIT_SLIDER_SIZE, f); any = true; } }
         else if (key == "transparency") { const float f = std::strtof(val.c_str(), &e); if (e != val.c_str() && f >= 0.0f && f <= 1.0f) { s.transparency = snapSlider(HIT_SLIDER_ALPHA, f); any = true; } }   // an older, higher saved value is pulled down to the new maximum
-        else if (key == "speed" || key == "jump" || key == "lowgravity" || key == "highgravity") {
-            const int id = key == "speed" ? HIT_SLIDER_SPEED : key == "jump" ? HIT_SLIDER_JUMP : key == "lowgravity" ? HIT_SLIDER_LOWGRAV : HIT_SLIDER_HIGHGRAV;
+        else if (key == "speed" || key == "jump" || key == "lowgravity" || key == "highgravity" || key == "aimdistance") {
+            const int id = key == "speed" ? HIT_SLIDER_SPEED : key == "jump" ? HIT_SLIDER_JUMP : key == "lowgravity" ? HIT_SLIDER_LOWGRAV : key == "highgravity" ? HIT_SLIDER_HIGHGRAV : HIT_SLIDER_AIMCAP;
             float lo, hi, step; sliderRange(id, &lo, &hi, &step);
             const float f = std::strtof(val.c_str(), &e);
             if (e != val.c_str() && f >= lo - 1e-3f && f <= hi + 1e-3f) { sliderValue(s, id) = snapSlider(id, f); any = true; }
