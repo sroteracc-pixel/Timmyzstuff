@@ -57,6 +57,8 @@ struct Api {
     void* (*runtime_invoke)(void* method, void* obj, void** params, void** exc) = nullptr;
     void* (*class_get_method_from_name)(void* klass, const char* name, int argsCount) = nullptr;
     void* (*resolve_icall)(const char* name) = nullptr;
+    // optional, stage D8: "is the calling thread known to the game's runtime?" (null result = no, the thread must not call into the game)
+    void* (*thread_current)() = nullptr;
 };
 
 // Looks the functions up in an already loaded libil2cpp.so. `missing` lists required ones that were not found.
@@ -112,9 +114,13 @@ struct ClassInfo {
     bool unityObject = false;
     std::vector<FieldInfo> fields;    // the class's OWN instance fields (not static, not inherited)
     const FieldInfo* field(const char* name) const;
+    void* klass() const { return reinterpret_cast<void*>(static_cast<uintptr_t>(~klassInv)); }     // the class pointer (stage D8: needed to look up methods)
 };
 // Looks the class up by namespace + name in the game's own code. The calling thread is attached to the runtime for the call.
 ClassInfo findClass(const Api& api, const char* ns, const char* name);
+
+// stage D8: the raw class handle of ANY class (the engine's UnityEngine.Rigidbody too) by namespace + name; nullptr (and `error` filled) when there is none.
+void* findClassHandle(const Api& api, const char* ns, const char* name, std::string* error);
 
 struct Copy { uintptr_t addr = 0; std::vector<unsigned char> bytes; };
 struct CopySearch {

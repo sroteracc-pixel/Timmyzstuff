@@ -615,6 +615,7 @@ bool loadApi(void* lib, Api* out, std::string* missing) {
     want(out->runtime_invoke, "il2cpp_runtime_invoke");
     want(out->class_get_method_from_name, "il2cpp_class_get_method_from_name");
     want(out->resolve_icall, "il2cpp_resolve_icall");
+    want(out->thread_current, "il2cpp_thread_current");
     return ok;
 }
 
@@ -676,6 +677,34 @@ ClassInfo findClass(const Api& api, const char* ns, const char* name) {
     }
     ci.found = true;
     return ci;
+}
+
+void* findClassHandle(const Api& api, const char* ns, const char* name, std::string* error) {
+    const std::string wantNs = ns ? ns : "", wantName = name ? name : "";
+    const std::string full = wantNs.empty() ? wantName : wantNs + "." + wantName;
+    void* domain = api.domain_get ? api.domain_get() : nullptr;
+    if (!domain) { if (error) *error = "the game's runtime is not ready yet (no domain)"; return nullptr; }
+    void* thread = api.thread_attach ? api.thread_attach(domain) : nullptr;
+    struct Detach { const Api& a; void* t; ~Detach() { if (t && a.thread_detach) a.thread_detach(t); } } detach{api, thread};
+    size_t asmCount = 0;
+    void** assemblies = api.domain_get_assemblies(domain, &asmCount);
+    if (!assemblies || asmCount == 0) { if (error) *error = "no assemblies reported"; return nullptr; }
+    for (size_t a = 0; a < asmCount; ++a) {
+        void* image = api.assembly_get_image(assemblies[a]);
+        if (!image) continue;
+        const size_t count = api.image_get_class_count(image);
+        for (size_t i = 0; i < count; ++i) {
+            void* k = api.image_get_class(image, i);
+            if (!k) continue;
+            const char* cn = api.class_get_name(k);
+            if (!cn || wantName != cn) continue;
+            const char* kns = api.class_get_namespace(k);
+            if (wantNs != (kns ? kns : "")) continue;
+            return k;
+        }
+    }
+    if (error) *error = "the class " + full + " does not exist in this game";
+    return nullptr;
 }
 
 CopySearch findCopies(const ClassInfo& cls, int maxCopies, int maxSeconds, int stallSeconds, int testHangAfterChunks, int testPollMicros) {

@@ -368,6 +368,13 @@ void setLinkState(int state) {
     std::lock_guard<std::mutex> g(gMutex);
     if (gState.linkState != state) { gState.linkState = state; gDirty = true; }
 }
+void setAimInfo(int state, const char* headline, const char* lastShot) {
+    const std::string h = headline ? headline : "", l = lastShot ? lastShot : "";
+    std::lock_guard<std::mutex> g(gMutex);
+    if (gState.aimLinkState != state || gState.aimHeadline != h || gState.aimLastShot != l) {
+        gState.aimLinkState = state; gState.aimHeadline = h; gState.aimLastShot = l; gDirty = true;
+    }
+}
 MovementAsk movementAsk() {
     std::lock_guard<std::mutex> g(gMutex);
     return MovementAsk{gState.speedOn, gState.jumpOn, gState.gravityMode, gState.speedMul, gState.jumpMul, gState.lowGravPct, gState.highGravPct};
