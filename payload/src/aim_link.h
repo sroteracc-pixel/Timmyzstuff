@@ -19,6 +19,10 @@
 //     5. It watches the ball fly and writes ONE report per shot into the facts file: what it saw, what it did, where the ball really went,
 //        whether it scored. That report is how the next stage gets fixed, whatever went wrong.
 //
+//   Stage D9 adds a second mode, BANK: instead of aiming straight at the ring it works out a launch that hits the FRONT of the backboard and bounces into the ring
+//   (maths in bank.cpp, game reads in aim_bank.cpp). Only one of the two modes is ever active. When a bank shot is not possible the throw is left exactly as it was thrown
+//   and the menu says "Bank unavailable: <why>" - it never turns into a direct shot.
+//
 //   What is NOT proven (nothing here has run in the real game yet - the PC tests use a pretend game):
 //     * that the release timers behave as I read them; that the ball's physics body takes the new speed and the game does not put its own speed back;
 //     * that the engine calls (Rigidbody.get_velocity / set_velocity / get_position ...) work from here; that the hoop positions kept in the ball are the real rings;
@@ -33,6 +37,7 @@
 #include <vector>
 
 #include "aimbot.h"
+#include "bank.h"
 #include "il2cpp_scan.h"
 #include "safe_copy.h"
 
@@ -70,6 +75,7 @@ struct Counters {
     unsigned long long errors = 0;      // engine calls that threw an error in the game
     unsigned long long overridden = 0;  // the game changed the speed we set
     unsigned long long scored = 0, missed = 0;     // what the game said about watched shots (_shotMade)
+    unsigned long long bankAimed = 0, bankUnavailable = 0, bankScored = 0, bankMissed = 0;   // stage D9 (Bank mode): bank shots set / shots where a bank shot was not possible / results
 };
 
 class AimLink {
@@ -82,6 +88,9 @@ public:
     // The menu's Aimbot switch and max shot distance (5 ... 50 m; 50 = Unlimited). Cheap; called often.
     // `holdY` = the menu's "Hold Y to aim" switch: the throw is only changed when the Y button (left Touch controller) is held as you let go of the ball.
     void setAsk(bool on, float capM, bool holdY = false);
+    // stage D9: the same with the mode: 0 off, 1 Direct (aim straight at the ring), 2 Bank (hit the backboard first). Only one mode can be on.
+    void setAsk(int mode, float capM, bool holdY);
+    int mode() const { return mode_.load(); }
 
     // The real Y button, as seen right now. Called by the menu's thread (about 50 times a second) and by the controller doorway (about 185 times a second).
     // Cheap, never waits, ignored while the switch is off. `fromDoorway` only tells the facts file which of the two saw it.
@@ -121,6 +130,33 @@ private:
         void *mGetVel = nullptr, *mSetVel = nullptr, *mGetPos = nullptr, *mGetDrag = nullptr, *mGetUseGravity = nullptr,
              *mGetGravity = nullptr, *mGetFixedDt = nullptr, *mGmInstance = nullptr, *mGmOwned = nullptr;
     };
+    // ---- stage D9 (Bank mode): everything the bank needs from the game, found on the link thread the first time Bank mode is on. Every piece has a name for the facts file.
+    struct BankLayout {
+        bool ok = false;
+        std::string why;                           // why it cannot be used
+        tzscan::ClassInfo props, goal, gman;       // BasketballProperties (the ball's physics settings), BasketballGoal (hoop + backboard), BasketballGoalManager (the list of goals)
+        int bProps = -1, bAssistGoal = -1, bAssistTime = -1, bAngDrag = -1;                       // in the ball: _properties, _assistInGoal, _lastBankAssistInTime, _originalAngularDrag
+        int pCollider = -1, pBaseMat = -1, pRuntimeMat = -1, pRtBounce = -1, pRtStatic = -1, pRtDyn = -1;       // in the ball properties
+        int gRimT = -1, gBoardT = -1, gNormal = -1, gSize = -1, gOffset = -1, gRimRadius = -1;    // in a goal
+        int mgGoals = -1;                          // in the goal manager: the list of goals
+        void* klassCollider = nullptr;             // UnityEngine.Collider (its System.Type object is made fresh when needed)
+        std::vector<std::string> combineNames, ccdNames;     // the engine's PhysicMaterialCombine / CollisionDetectionMode value names in order (so the numbers are looked up, not remembered)
+        void *mGoalRim = nullptr, *mGoalBoard = nullptr, *mGmanInstance = nullptr;
+        void *mTPos = nullptr, *mTScale = nullptr, *mTChildCount = nullptr, *mTGetChild = nullptr, *mCTransform = nullptr;
+        void *mGetComp = nullptr, *mGetCompKids = nullptr, *mGetCompParent = nullptr;
+        void *mCBounds = nullptr, *mCMaterial = nullptr, *mSRadius = nullptr;
+        void *mMBounce = nullptr, *mMDyn = nullptr, *mMStat = nullptr, *mMBounceCombine = nullptr, *mMFrictionCombine = nullptr;
+        void *mRAngVel = nullptr, *mRAngDrag = nullptr, *mRMass = nullptr, *mRInertia = nullptr, *mRCcd = nullptr, *mPBounceThr = nullptr;
+    };
+    // One backboard as measured from the game (kept for the next shots). Game thread only.
+    struct BoardInfo {
+        uintptr_t goal = 0, collider = 0;
+        bool built = false;
+        tzaim::Vec3 centre, n;                     // the middle of the FRONT face; the direction from the face towards the court
+        tzaim::Vec3 cBounds;                       // where the collider's box was when it was measured (to notice a moved / replaced board)
+        float halfW = 0, halfH = 0, thick = 0;
+        std::string how;                           // where the numbers came from (for the facts file)
+    };
     enum Phase { IDLE = 0, WAIT = 1, WATCH = 2 };
     struct Sample { int steps = 0; tzaim::Vec3 pos, vel; tzaim::Pose pred; };
     struct Shot {
@@ -136,6 +172,7 @@ private:
         // watching
         int steps = 0; bool havePrev = false; tzaim::Vec3 prevPos; double prevT = 0;
         std::vector<Sample> samples; int nextSample = 0;
+        std::vector<int> sampleAt;                  // the steps at which the flight is compared with the maths (empty = the standard list; Bank mode: around the touch with the board)
         bool crossed = false; float crossMiss = 0, crossT = 0; tzaim::Vec3 crossPos;
         float closest = 1e9f; int closestStep = 0;
         int madeFlag = -1;                           // _shotMade at the end: -1 unknown, 0 no, 1 yes
@@ -150,6 +187,16 @@ private:
         bool vKnown = false; int vState = -1;        // the game's vertical state number (0 = on the floor); vKnown = it could be read
         int jumpPressed = 0, locoState = -1;         // report only: bit 1 left jump pressed, bit 2 right jump pressed; the game's locomotion state number
         std::string vWhy;                            // when it could not be read
+        // stage D9 (Bank mode)
+        int mode = 1;                                // the mode at the moment of the release: 1 Direct, 2 Bank
+        bool bankTried = false, bankOk = false;      // a bank plan was tried / a bank shot was worked out
+        std::string bankWhy;                         // when not possible: the reason ("too close to the backboard")
+        tzbank::Plan plan; tzbank::Scene scene;      // the bank plan and the numbers it was worked out from
+        tzaim::Vec3 ring;                            // the ring centre the plan uses (the game's own GetRimCenter)
+        float minB = 1e9f; int minBStep = 0; tzaim::Vec3 minBPos;          // watching: the closest the ball centre came to the board's front plane
+        struct Trace { int step; tzaim::Vec3 pos, vel, spin; bool haveSpin; };
+        std::vector<Trace> trace;                    // watching: position / speed / spin on the steps around the touch with the board
+        float assistTime0 = 0, assistTime1 = 0; uintptr_t assistGoal0 = 0, assistGoal1 = 0;     // the game's own bank assist (fields of the ball) before / after
     };
 
     static void* threadMain(void* self);
@@ -188,6 +235,22 @@ private:
     std::string gameFlags();
     void setLast(const std::string& text);
     void killEngine(const std::string& why);
+    bool callInt(void* method, uintptr_t self, int* out);
+    uintptr_t callObjArg(void* method, uintptr_t self, void* arg0);                // one argument: a game object itself, or a pointer to an int
+    bool callBounds(void* method, uintptr_t self, tzaim::Vec3* centre, tzaim::Vec3* extents);
+
+    // ---- stage D9 (Bank mode), aim_bank.cpp
+    bool resolveBankLayout(std::string* why, bool* transient);                    // link thread
+    void bankPrepare(double now);                                                 // game thread, idle ticks: measures the backboards before the first shot
+    void bankShot(Shot& s, const std::string& head, const std::string& hoopTxt, const unsigned char* ballBytes, const tzaim::Vec3& pos, const tzaim::Vec3& vel, float elevDeg);
+    bool bankListGoals(std::vector<uintptr_t>* out, std::string* why);
+    bool bankGoalFor(const tzaim::Vec3& hoop, uintptr_t* goal, tzaim::Vec3* ring, std::string* why);
+    bool bankBoardFor(uintptr_t goal, const tzaim::Vec3& ring, BoardInfo** out, std::string* why);
+    uintptr_t bankFindCollider(uintptr_t goal, uintptr_t boardT, const tzaim::Vec3& expectCentre, const tzaim::Vec3& size, bool* strict, tzaim::Vec3* cOut, tzaim::Vec3* eOut, std::string* how);
+    bool bankMaterial(uintptr_t collider, float* bounce, float* dyn, float* stat, int* bounceCombine, int* frictionCombine, std::string* note);
+    void bankWatchStep(Shot& s, int stepNow, const tzaim::Vec3& pos);
+    std::string bankResultText(const Shot& s) const;
+    void bankUnavailable(Shot& s, const std::string& head, const std::string& reason, const std::string& detail);
 
     Config cfg_;
     Layout L_;                                   // written once by the link thread, then read-only (published by layoutReady_)
@@ -195,6 +258,11 @@ private:
     tzscan::CopyPipe pipeGame_, pipeLink_;       // one pipe per thread (a pipe is not shared between the two)
     bool pipesOk_ = false;
     std::atomic<bool> on_{false};
+    std::atomic<int> mode_{0};                   // 0 off, 1 Direct, 2 Bank (on_ is true for both)
+    BankLayout B_;                               // written once by the link thread, then read-only (published by bankReady_)
+    std::atomic<bool> bankReady_{false}, bankTried_{false};
+    double nextBankLayoutAt_ = 0; int bankLayoutTries_ = 0;       // under mu_
+    std::string bankFailWhy_;                    // under mu_: why Bank mode cannot be used (shown in the menu)
     std::atomic<float> capM_{50.0f};
     std::atomic<bool> holdY_{false};
     // The Y button has two readers ([0] the menu's thread, [1] the controller doorway). Each keeps its latest reading and when it was made (the link's clock).
@@ -219,6 +287,8 @@ private:
         int excRun = 0, fastTries = 0;
         bool engineChecked = false;
         int bindNotes = 0, releaseNotes = 0;
+        std::vector<BoardInfo> boards;             // stage D9: backboards measured so far
+        double nextBankPrep = 0; int bankPrepNotes = 0, bankShotNotes = 0;
     } g_;
     std::vector<unsigned char> bcmBuf_, ballBuf_, gmBuf_, locoBuf_;
     // reports from the game thread to the facts file
@@ -232,7 +302,8 @@ private:
     int layoutTries_ = 0, searches_ = 0, emptySearches_ = 0;
     std::atomic<int> notes_{0};
     std::atomic<unsigned long long> calls_{0}, ticks_{0}, releases_{0}, shotLike_{0}, aimed_{0}, tooFar_{0}, wrongDir_{0}, noHoop_{0}, notShot_{0}, noSolution_{0}, refused_{0}, notHoldingY_{0}, yUnknown_{0},
-                                    yReads_{0}, yHeld_{0}, yReadsDoor_{0}, yHeldDoor_{0}, errors_{0}, overridden_{0}, scored_{0}, missed_{0};
+                                    yReads_{0}, yHeld_{0}, yReadsDoor_{0}, yHeldDoor_{0}, errors_{0}, overridden_{0}, scored_{0}, missed_{0},
+                                    bankAimed_{0}, bankUnavail_{0}, bankScored_{0}, bankMissed_{0};
     std::atomic<int> shotSeq_{0};
     std::atomic<double> onSinceAtomic_{-1};
     std::string engineDeadWhy_;                  // under mu_

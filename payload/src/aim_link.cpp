@@ -113,10 +113,16 @@ void AimLink::stop() {
 
 void* AimLink::threadMain(void* self) { static_cast<AimLink*>(self)->loop(); return nullptr; }
 
-void AimLink::setAsk(bool on, float capM, bool holdY) {
+void AimLink::setAsk(bool on, float capM, bool holdY) { setAsk(on ? 1 : 0, capM, holdY); }
+
+void AimLink::setAsk(int mode, float capM, bool holdY) {
+    if (mode < 0 || mode > 2) mode = 0;
+    const bool on = mode != 0;
     capM_.store(capM);
     const bool yWas = holdY_.exchange(holdY);
+    const int modeWas = mode_.exchange(mode);
     const bool was = on_.exchange(on);
+    const char* name = mode == 2 ? "BANK" : "Direct";
     if (on && !was) {
         onSinceAtomic_.store(nowSec());
         {
@@ -124,12 +130,20 @@ void AimLink::setAsk(bool on, float capM, bool holdY) {
             failed_ = false; failReason_.clear(); engineDeadWhy_.clear();
             if (!layoutReady_.load()) { nextLayoutAt_ = 0; layoutTries_ = 0; }
             nextSearchAt_ = 0;
+            if (mode == 2 && !bankReady_.load()) { nextBankLayoutAt_ = 0; bankLayoutTries_ = 0; bankFailWhy_.clear(); }
         }
         if (engineDead_.exchange(false)) resetExc_.store(true);
         if (!bound_.load()) { fastFailed_.store(false); needBcm_.store(false); }
-        say("aim: switch turned ON, max shot distance %s, hold Y to aim: %s", tzaim::capLabel(capM).c_str(), holdY ? "ON" : "off");
+        say("aim: switch turned ON (%s mode), max shot distance %s, hold Y to aim: %s", name, tzaim::capLabel(capM).c_str(), holdY ? "ON" : "off");
     } else if (!on && was) {
         say("aim: switch turned OFF");
+    } else if (on && modeWas != mode) {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (mode == 2 && !bankReady_.load()) { nextBankLayoutAt_ = 0; bankLayoutTries_ = 0; bankFailWhy_.clear(); }
+            lastText_.clear();
+        }
+        say("aim: mode changed to %s", name);
     } else if (on && yWas != holdY) {
         say("aim: 'hold Y to aim' turned %s", holdY ? "ON" : "off");
     }
@@ -185,6 +199,12 @@ std::string AimLink::headline() const {
     if (!why.empty()) return "FAILED: " + why;
     if (!layoutReady_.load()) return "looking at the game's code ...";
     if (!bound_.load()) return "looking for your ball control ...";
+    if (mode_.load() == 2) {
+        if (bankReady_.load()) return "Bank: connected - waiting for your shot";
+        std::lock_guard<std::mutex> lock(mu_);
+        if (!bankFailWhy_.empty()) return "Bank unavailable: " + bankFailWhy_;
+        return "Bank: looking at the game's backboard code ...";
+    }
     return "connected - waiting for your shot";
 }
 
@@ -197,6 +217,7 @@ Counters AimLink::counters() const {
     c.yReadsProbe = yReads_.load(); c.yHeldProbe = yHeld_.load(); c.yReadsDoorway = yReadsDoor_.load(); c.yHeldDoorway = yHeldDoor_.load();
     c.tooFar = tooFar_.load(); c.wrongDirection = wrongDir_.load(); c.noHoop = noHoop_.load(); c.notAShot = notShot_.load(); c.noSolution = noSolution_.load(); c.refused = refused_.load();
     c.errors = errors_.load(); c.overridden = overridden_.load(); c.scored = scored_.load(); c.missed = missed_.load();
+    c.bankAimed = bankAimed_.load(); c.bankUnavailable = bankUnavail_.load(); c.bankScored = bankScored_.load(); c.bankMissed = bankMissed_.load();
     return c;
 }
 
@@ -206,10 +227,12 @@ std::string AimLink::summary() const {
     const int ui = uiState();
     if (ui == 1) state = "connected"; else if (ui == 2) state = "looking"; else if (ui == 3) state = "FAILED";
     std::string why = ui == 3 ? failReason() : std::string();
-    return fmt("aim: link %s%s%s | doorway calls %llu, used %llu | releases %llu, shot-like %llu, AIMED %llu (scored %llu, missed %llu, game changed our speed %llu) | left alone: too far %llu, wrong direction %llu, Y not held %llu, Y unreadable %llu, no hoop %llu, no solution %llu, not a shot %llu, other %llu | engine errors %llu | Y button reads: menu thread %llu (held in %llu), doorway %llu (held in %llu)",
+    const char* modeName = mode_.load() == 2 ? "BANK" : (mode_.load() == 1 ? "Direct" : "off");
+    // (the original D8c fields keep their order; the stage D9 fields are at the end)
+    return fmt("aim: link %s%s%s | doorway calls %llu, used %llu | releases %llu, shot-like %llu, AIMED %llu (scored %llu, missed %llu, game changed our speed %llu) | left alone: too far %llu, wrong direction %llu, Y not held %llu, Y unreadable %llu, no hoop %llu, no solution %llu, not a shot %llu, other %llu | engine errors %llu | Y button reads: menu thread %llu (held in %llu), doorway %llu (held in %llu) | mode %s | BANK shots %llu (scored %llu, missed %llu), Bank unavailable %llu",
                state, why.empty() ? "" : ": ", why.c_str(), calls_.load(), c.ticks, c.releases, c.shotLike, c.aimed, c.scored, c.missed, c.overridden,
                c.tooFar, c.wrongDirection, c.notHoldingY, c.yUnknown, c.noHoop, c.noSolution, c.notAShot, c.refused, c.errors,
-               c.yReadsProbe, c.yHeldProbe, c.yReadsDoorway, c.yHeldDoorway);
+               c.yReadsProbe, c.yHeldProbe, c.yReadsDoorway, c.yHeldDoorway, modeName, c.bankAimed, c.bankScored, c.bankMissed, c.bankUnavailable);
 }
 
 // ---------------------------------------------------------------- the link thread: layout and the memory search
@@ -223,6 +246,22 @@ void AimLink::loop() {
                 std::lock_guard<std::mutex> lock(mu_);
                 if (!layoutReady_.load() && !failed_ && now >= nextLayoutAt_) doLayout = true;
                 else if (layoutReady_.load() && !failed_ && needBcm_.load() && fastFailed_.load() && !bound_.load() && now >= nextSearchAt_ && now - lastSearchEnd_ >= cfg_.minSearchGapSeconds) doSrch = true;
+            }
+            bool doBank = false;
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                if (layoutReady_.load() && !failed_ && mode_.load() == 2 && !bankReady_.load() && now >= nextBankLayoutAt_) doBank = true;
+            }
+            if (doBank) {
+                std::string why; bool transient = false;
+                if (resolveBankLayout(&why, &transient)) { bankReady_.store(true, std::memory_order_release); std::lock_guard<std::mutex> lock(mu_); bankFailWhy_.clear(); }
+                else {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    ++bankLayoutTries_;
+                    bankFailWhy_ = why;
+                    if (transient) { nextBankLayoutAt_ = nowSec() + cfg_.retrySoonSeconds + std::min(12.0, bankLayoutTries_ * 2.0); if (bankLayoutTries_ == 1 || bankLayoutTries_ % 10 == 0) queue("aim: BANK not ready yet (" + why + ") - trying again in a few seconds"); }
+                    else { nextBankLayoutAt_ = 1e18; queue("aim: BANK cannot be used: " + why); }
+                }
             }
             if (doLayout) {
                 std::string why; bool transient = false;
@@ -582,13 +621,14 @@ void AimLink::onGameThread() {
 
     if (g_.phase == WAIT) tickWait(now);
     else if (g_.phase == WATCH) tickWatch(now);
+    else if (mode_.load(std::memory_order_relaxed) == 2 && bankReady_.load(std::memory_order_acquire)) bankPrepare(now);       // idle: measure the backboards ahead of the first shot
 }
 
 void AimLink::startShot(double now, int hand, uintptr_t ballPtr) {
     if (g_.phase != IDLE) finishShot("a new release started", now);
     g_.shot = Shot();
     Shot& s = g_.shot;
-    s.id = shotSeq_.fetch_add(1) + 1; s.hand = hand; s.tEdge = now;
+    s.id = shotSeq_.fetch_add(1) + 1; s.hand = hand; s.tEdge = now; s.mode = mode_.load() == 2 ? 2 : 1;
     s.ball = plausiblePtr(ballPtr) ? ballPtr : (now - g_.lastBallT < 2.0 ? g_.lastBall : 0);
     releases_.fetch_add(1);
     readY(s, now);                                                  // the Y button at THIS moment (the moment of the release)
@@ -717,6 +757,7 @@ void AimLink::tickWait(double now) {
                           s.id, handText(s.hand).c_str(), dt * 1000.0, fv(pos).c_str(), static_cast<double>(speed),
                           static_cast<double>(elev), static_cast<double>(s.unheld), static_cast<double>(gmag), static_cast<double>(drag), static_cast<double>(fdt), useGrav ? "yes" : "NO", physNote.c_str(),
                           gameFlags().c_str(), yText(s, yCanRead).c_str(), jumpText(s).c_str(), s.holdY ? "ON" : "off", s.nHoops, tzaim::capLabel(cap).c_str());
+    if (s.mode == 2) head += " | mode: BANK (hit the backboard first)";
     s.hoopPos = s.hoops[d.hoop];
     const std::string hoopTxt = fmt("%s at %s, %.1f m away along the floor, %.0f degrees off your throw direction", kHoopNames[s.hoopSlot[d.hoop]], fv(s.hoopPos).c_str(), static_cast<double>(d.distanceM), static_cast<double>(d.angleDeg));
     s.predStart = vel;
@@ -741,6 +782,8 @@ void AimLink::tickWait(double now) {
         refused_.fetch_add(1); s.why = "the ball does not use the engine's gravity, so the flight cannot be worked out";
         queue(head + " | decision: LEFT ALONE - " + s.why);
         setLast(fmt("shot #%d: not aimed - unusual ball physics", s.id));
+    } else if (s.mode == 2) {
+        bankShot(s, head, hoopTxt, bb, pos, vel, elev);                    // stage D9: Bank mode (never falls back to the direct solver)
     } else {
         tzaim::SolveParams sp; sp.minEntryDeg = 45.0f; sp.preferredLaunchDeg = elev; sp.minLaunchDeg = 35.0f; sp.maxLaunchDeg = 80.0f; sp.maxSpeed = 60.0f;
         s.sol = tzaim::solveFlight(pos, s.hoopPos, sp, s.model);
@@ -783,6 +826,7 @@ void AimLink::tickWatch(double now) {
     const bool moved = std::memcmp(&pos, &s.prevPos, sizeof pos) != 0;                // the physics body only moves once per physics step
     if (moved) {
         ++s.steps;
+        if (s.mode == 2) bankWatchStep(s, s.steps, pos);                       // stage D9: closest approach to the board, speeds around the touch
         if (!s.crossed && s.prevPos.y >= s.hoopPos.y && pos.y < s.hoopPos.y) {          // came down through the ring's height
             const float k = (s.prevPos.y - s.hoopPos.y) / (s.prevPos.y - pos.y);
             s.crossPos = Vec3{s.prevPos.x + (pos.x - s.prevPos.x) * k, s.hoopPos.y, s.prevPos.z + (pos.z - s.prevPos.z) * k};
@@ -791,11 +835,18 @@ void AimLink::tickWatch(double now) {
         }
         const float dd = distV(pos, s.hoopPos);
         if (dd < s.closest) { s.closest = dd; s.closestStep = s.steps; }
-        if (s.nextSample < kNumSamples && s.steps >= kSampleSteps[s.nextSample]) {
+        const int nSamples = s.sampleAt.empty() ? kNumSamples : static_cast<int>(s.sampleAt.size());
+        auto sampleStep = [&](int i) { return s.sampleAt.empty() ? kSampleSteps[i] : s.sampleAt[static_cast<size_t>(i)]; };
+        if (s.nextSample < nSamples && s.steps >= sampleStep(s.nextSample)) {
             Sample sm; sm.steps = s.steps; sm.pos = pos;
             Vec3 v;
             if (callVec3(L_.mGetVel, s.rb, &v)) sm.vel = v;
             sm.pred = tzaim::stepsAfter(s.pos0, s.predStart, s.steps, s.model);
+            if (s.mode == 2 && s.applied && s.bankOk && s.steps >= s.plan.sim.contactStep && static_cast<size_t>(s.steps) < s.plan.sim.path.size() && s.steps >= 1) {
+                // after the touch with the board the prediction is the bank maths' own flight (position from its path, speed from two steps of it)
+                const Vec3 a = s.plan.sim.path[static_cast<size_t>(s.steps) - 1], b = s.plan.sim.path[static_cast<size_t>(s.steps)];
+                sm.pred.pos = b; sm.pred.vel = Vec3{(b.x - a.x) / s.model.dt, (b.y - a.y) / s.model.dt, (b.z - a.z) / s.model.dt};
+            }
             if (s.applied && s.samples.empty()) {
                 const float diff = distV(sm.vel, sm.pred.vel);
                 s.overrideDiff = diff;
@@ -828,6 +879,11 @@ void AimLink::finishShot(const char* why, double now) {
         s.madeFlag = -1;
         if (L_.bShotMade >= 0 && readObj(ballBuf_.data(), s.ball, static_cast<size_t>(L_.ball.size)) && liveObj(ballBuf_.data(), L_.ball.klassInv, L_.ball.unityObject)) s.madeFlag = ballBuf_[static_cast<size_t>(L_.bShotMade)] ? 1 : 0;
         if (s.madeFlag == 1) scored_.fetch_add(1); else if (s.madeFlag == 0 && s.crossed) missed_.fetch_add(1);
+        if (s.mode == 2 && s.applied) {
+            if (s.madeFlag == 1) bankScored_.fetch_add(1); else if (s.madeFlag == 0 && s.crossed) bankMissed_.fetch_add(1);
+            if (B_.bAssistTime >= 0) s.assistTime1 = rdF(ballBuf_.data(), B_.bAssistTime);
+            if (B_.bAssistGoal >= 0) s.assistGoal1 = rdP(ballBuf_.data(), B_.bAssistGoal);
+        }
         std::string r = fmt("aim: SHOT #%d result (%s): watched %.1f s = %d physics steps | ", s.id, why, now - s.tApply, s.steps);
         if (s.crossed) r += fmt("came down through the ring height after %.2f s at %s = %.3f m from the hoop centre (ring radius %.4f m, ball radius about 0.12 m) | ", static_cast<double>(s.crossT), fv(s.crossPos).c_str(), static_cast<double>(s.crossMiss), 0.2286);
         else r += "never came down through the ring height | ";
@@ -840,8 +896,9 @@ void AimLink::finishShot(const char* why, double now) {
                 sl += fmt(" [step %d: pos %s err %.2f m, vel %s err %.2f m/s]", sm.steps, fv(sm.pos).c_str(), static_cast<double>(distV(sm.pos, sm.pred.pos)), fv(sm.vel).c_str(), static_cast<double>(distV(sm.vel, sm.pred.vel)));
             queue(sl);
         }
+        if (s.mode == 2) { const std::string bt = bankResultText(s); if (!bt.empty()) queue(bt); }
         const char* ver = s.madeFlag == 1 ? "SCORED" : (s.madeFlag == 0 ? "missed" : "result unknown");
-        if (s.applied) setLast(fmt("shot #%d: AIMED from %.0f m - %s, %.2f m off centre", s.id, static_cast<double>(s.dec.distanceM), ver, static_cast<double>(s.crossed ? s.crossMiss : s.closest)));
+        if (s.applied) setLast(fmt("shot #%d: %s from %.0f m - %s, %.2f m off centre", s.id, s.mode == 2 ? "BANK" : "AIMED", static_cast<double>(s.dec.distanceM), ver, static_cast<double>(s.crossed ? s.crossMiss : s.closest)));
     }
     g_.phase = IDLE;
 }

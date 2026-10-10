@@ -65,7 +65,8 @@ void setAimInfo(int state, const char* headline, const char* lastShot);
 struct MovementAsk { bool speedOn, jumpOn; int gravityMode; float speed, jump, lowPct, highPct; };
 MovementAsk movementAsk();
 // What the Basketball page asks for right now (taken under the menu's lock). `capM` is 5 .. 50; 50 means "Unlimited".
-struct AimAsk { bool on; float capM; bool holdY; };
+// `on` = the Direct Aimbot, `bank` = Aimbot Bank (stage D9). The menu never turns both on; if both were ever on, the caller treats it as "neither" (nothing is guessed).
+struct AimAsk { bool on; float capM; bool holdY; bool bank; };
 AimAsk aimAsk();
 
 // True while the menu is open, and for a moment after it closes. The input doorway uses this to hide

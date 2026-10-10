@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -15,11 +16,14 @@ namespace {
 struct Klass;
 struct Type { std::string name; Klass* klass; };
 struct Field { std::string name; Type* type; size_t offset; int flags; };
-struct Method { uint64_t methodPointer; std::string name; unsigned params; Type* ret; uint32_t flags; int id; };
+struct Method { uint64_t methodPointer; std::string name; unsigned params; Type* ret; uint32_t flags; int id; std::vector<Type*> ptypes; };
 struct Klass { std::string name, ns; Klass* parent; std::vector<Field> fields; std::vector<Method*> methods; int valueSize; bool isValue, isEnum; int instanceSize; };
-struct Image { std::string name; std::vector<Klass*> classes; };
+struct Image { std::string name; std::vector<Klass*> classes; std::vector<Klass*> original; };
 
-enum { M_NONE = 0, M_RB_GETVEL, M_RB_SETVEL, M_RB_GETPOS, M_RB_GETDRAG, M_RB_GETUSEGRAV, M_PH_GETGRAV, M_TM_FIXEDDT, M_GM_INSTANCE, M_GM_OWNED };
+enum { M_NONE = 0, M_RB_GETVEL, M_RB_SETVEL, M_RB_GETPOS, M_RB_GETDRAG, M_RB_GETUSEGRAV, M_PH_GETGRAV, M_TM_FIXEDDT, M_GM_INSTANCE, M_GM_OWNED,
+       // stage D9 (Bank mode)
+       M_TR_POS, M_TR_SCALE, M_TR_CHILDCOUNT, M_TR_GETCHILD, M_CO_TRANSFORM, M_CO_GETCOMP_STR, M_CO_GETCOMP, M_CO_GETKIDS, M_CO_GETPARENT, M_COL_BOUNDS, M_COL_MATERIAL, M_SPH_RADIUS,
+       M_MAT_BOUNCE, M_MAT_DYN, M_MAT_STAT, M_MAT_BCOMB, M_MAT_FCOMB, M_RB_ANGVEL, M_RB_ANGDRAG, M_RB_MASS, M_RB_INERTIA, M_RB_CCD, M_PH_BOUNCETHR, M_GOAL_RIM, M_GOAL_BOARD, M_GMAN_INSTANCE2 };
 
 Klass kEnumState{"EGameState", "ShovelTools.GameManager", nullptr, {}, {}, 4, true, true, 4};
 Klass kOther{"OtherThing", "Game", nullptr, {}, {}, 0, false, false, 32};
@@ -32,21 +36,37 @@ Klass kPhysics{"Physics", "UnityEngine", nullptr, {}, {}, 0, false, false, 16};
 Klass kTime{"Time", "UnityEngine", nullptr, {}, {}, 0, false, false, 16};
 Type tRB{"UnityEngine.Rigidbody", &kRigidbody};
 Klass kBall, kBcm, kGm, kLoco;
+// stage D9 (Bank mode): the engine's Transform / Collider / SphereCollider / PhysicMaterial and the game's goal classes
+Klass kTransform{"Transform", "UnityEngine", &kComponent, {}, {}, 0, false, false, 32};
+Klass kCollider{"Collider", "UnityEngine", &kComponent, {}, {}, 0, false, false, 32};
+Klass kSphere{"SphereCollider", "UnityEngine", &kCollider, {}, {}, 0, false, false, 32};
+Klass kPhysMat{"PhysicMaterial", "UnityEngine", nullptr, {}, {}, 0, false, false, 32};
+Klass kCombine{"PhysicMaterialCombine", "UnityEngine", nullptr, {}, {}, 4, true, true, 4};
+Klass kCcd{"CollisionDetectionMode", "UnityEngine", nullptr, {}, {}, 4, true, true, 4};
+Klass kProps, kGoal, kGman;
+Type tTransform{"UnityEngine.Transform", &kTransform}, tSphere{"UnityEngine.SphereCollider", &kSphere}, tPhysMat{"UnityEngine.PhysicMaterial", &kPhysMat},
+     tProps{"ShovelTools.BasketballProperties", &kProps}, tGoal{"ShovelTools.BasketballGoal", &kGoal}, tGman{"ShovelTools.BasketballGoalManager", &kGman},
+     tGoalList{"System.Collections.Generic.List<ShovelTools.BasketballGoal>", &kOther},
+     tSystemType{"System.Type", &kOther}, tString{"System.String", &kOther}, tCombineE{"UnityEngine.PhysicMaterialCombine", &kCombine}, tCcdE{"UnityEngine.CollisionDetectionMode", &kCcd},
+     tColliderObj{"UnityEngine.Collider", &kCollider};
+std::map<Klass*, Type*> gKlassTypes;               // il2cpp_class_get_type
+std::map<Type*, unsigned char*> gTypeObjects;      // il2cpp_type_get_object
 Klass kEnumVert{"LocomotionVerticalState", "", nullptr, {}, {}, 4, true, true, 4};      // the player's vertical state (FLOOR, JUMPING, FALLING, GRABBING): a nested enum, so no namespace
 Type tBall{"ShovelTools.Basketball", &kBall}, tBcm{"ShovelTools.BallControlManager", &kBcm}, tLoco{"ShovelTools.PlayerLocomotion", &kLoco},
      tVert{"ShovelTools.PlayerLocomotion.LocomotionVerticalState", &kEnumVert};
 
 char gCode[0x1000];
-Method* mk(const char* n, unsigned p, Type* r, int id, uint32_t fl = 0) { return new Method{reinterpret_cast<uint64_t>(gCode) + 0x100 + static_cast<uint64_t>(id) * 16, n, p, r, fl, id}; }
+Method* mk(const char* n, unsigned p, Type* r, int id, uint32_t fl = 0) { return new Method{reinterpret_cast<uint64_t>(gCode) + 0x100 + static_cast<uint64_t>(id) * 16, n, p, r, fl, id, {}}; }
 
-Image iGame{"Assembly-CSharp", {&kBall, &kBcm, &kGm, &kLoco, &kEnumVert}};
-Image iPhys{"UnityEngine.PhysicsModule", {&kRigidbody, &kPhysics}};
-Image iCore{"UnityEngine.CoreModule", {&kComponent, &kTime}};
-Image iMscorlib{"mscorlib", {}};
+Image iGame{"Assembly-CSharp", {&kBall, &kBcm, &kGm, &kLoco, &kEnumVert, &kProps, &kGoal, &kGman}, {}};
+Image iPhys{"UnityEngine.PhysicsModule", {&kRigidbody, &kPhysics, &kCollider, &kSphere, &kPhysMat, &kCombine, &kCcd}, {}};
+Image iCore{"UnityEngine.CoreModule", {&kComponent, &kTime, &kTransform}, {}};
+Image iMscorlib{"mscorlib", {}, {}};
 void* gAssemblies[4] = {&iMscorlib, &iGame, &iPhys, &iCore};
 int gDomain = 1;
 bool gInit = false;
 
+void buildMethods();
 void buildFields() {       // called for every new scenario, so a scenario that breaks a class does not spoil the next one
     kBall.fields = {{"_currFrameVelocity", &tVec3, 24, 0}, {"playerNetworked", &tOther, 64, 0}, {"_rigidbody", &tRB, 72, 0}, {"_wasShot", &tBool, 80, 0}, {"_shotMade", &tBool, 81, 0},
          {"_ballControlManager", &tBcm, 144, 0}, {"_hoopsLength", &tInt, 164, 0}, {"_northHoopPosition", &tVec3, 180, 0}, {"_southHoopPosition", &tVec3, 192, 0},
@@ -59,21 +79,60 @@ void buildFields() {       // called for every new scenario, so a scenario that 
     kLoco.fields = {{"_isLeftJumpPressed", &tBool, 240, 0}, {"_isRightJumpPressed", &tBool, 241, 0}, {"_locomotionState", &tInt, 812, 0}, {"_locomotionVerticalState", &tVert, 828, 0}};
     kGm.fields = {{"User", &tOther, 392, 0}, {"_playerBallControlManager", &tBcm, 408, 0}, {"_isInCompetitionMode", &tBool, 480, 0}, {"_isGMMode", &tBool, 760, 0}, {"_isSolo", &tBool, 761, 0},
          {"_isNBA", &tBool, 762, 0}, {"_gameState", &tState, 856, 0}};
+    // stage D9: new ball fields at the END of the list (tests that remove fields by number keep working); the goal classes (names, types, positions from the real lobby facts file)
+    kBall.fields.push_back({"_properties", &tProps, 264, 0}); kBall.fields.push_back({"_originalAngularDrag", &tFloat, 356, 0});
+    kBall.fields.push_back({"_lastBankAssistInTime", &tFloat, 364, 0}); kBall.fields.push_back({"_assistInGoal", &tGoal, 368, 0});
+    kProps.fields = {{"_basketballRigidbody", &tRB, 88, 0}, {"_basketballCollider", &tSphere, 96, 0}, {"_basketballPhysicMaterial", &tPhysMat, 104, 0}, {"_runtimePhysicMaterial", &tPhysMat, 128, 0},
+                     {"_runtimeStaticFriction", &tFloat, 136, 0}, {"_runtimeDynamicFriction", &tFloat, 140, 0}, {"_runtimeBounciness", &tFloat, 144, 0}};
+    kGoal.fields = {{"_rimCenter", &tTransform, 24, 0}, {"_rimYOffset", &tFloat, 32, 0}, {"_rimBankYOffset", &tFloat, 36, 0}, {"_rimRadius", &tFloat, 40, 0}, {"_backboardCenter", &tTransform, 48, 0},
+                    {"_backboardNormal", &tVec3, 56, 0}, {"_bankGridRows", &tInt, 68, 0}, {"_bankGridCols", &tInt, 72, 0}, {"_bankShotBoundsSize", &tVec3, 76, 0}, {"_bankShotBoundsOffset", &tVec3, 88, 0},
+                    {"_backboardSize", &tVec3, 100, 0}, {"_backboardOffset", &tVec3, 112, 0}};
+    kGman.fields = {{"_goals", &tGoalList, 24, 0}, {"_instance", &tGman, 0, 0x10}};
+    kCombine.fields = {{"value__", &tInt, 0, 0}, {"Average", &tCombineE, 0, 0x56}, {"Multiply", &tCombineE, 0, 0x56}, {"Minimum", &tCombineE, 0, 0x56}, {"Maximum", &tCombineE, 0, 0x56}};
+    kCcd.fields = {{"value__", &tInt, 0, 0}, {"Discrete", &tCcdE, 0, 0x56}, {"Continuous", &tCcdE, 0, 0x56}, {"ContinuousDynamic", &tCcdE, 0, 0x56}, {"ContinuousSpeculative", &tCcdE, 0, 0x56}};
 }
 
 void init() {
     if (gInit) return;
     gInit = true;
+    for (Image* im : {&iGame, &iPhys, &iCore}) im->original = im->classes;
     kBall.name = "Basketball"; kBall.ns = "ShovelTools"; kBall.parent = &kBehaviour; kBall.instanceSize = 408;
     kBcm.name = "BallControlManager"; kBcm.ns = "ShovelTools"; kBcm.parent = &kBehaviour; kBcm.instanceSize = 424;
     kGm.name = "GameManager"; kGm.ns = "ShovelTools"; kGm.parent = &kBehaviour; kGm.instanceSize = 864;
     kLoco.name = "PlayerLocomotion"; kLoco.ns = "ShovelTools"; kLoco.parent = &kBehaviour; kLoco.instanceSize = 1056;
+    kProps.name = "BasketballProperties"; kProps.ns = "ShovelTools"; kProps.parent = &kBehaviour; kProps.instanceSize = 176;
+    kGoal.name = "BasketballGoal"; kGoal.ns = "ShovelTools"; kGoal.parent = &kBehaviour; kGoal.instanceSize = 128;
+    kGman.name = "BasketballGoalManager"; kGman.ns = "ShovelTools"; kGman.parent = &kBehaviour; kGman.instanceSize = 40;
     buildFields();
+    buildMethods();
+}
+
+void buildMethods() {          // (also rebuilt for every scenario: a scenario that hides a method must not spoil the next one)
     kRigidbody.methods = {mk("get_velocity", 0, &tVec3, M_RB_GETVEL), mk("set_velocity", 1, &tVoid, M_RB_SETVEL), mk("get_position", 0, &tVec3, M_RB_GETPOS),
                           mk("get_drag", 0, &tFloat, M_RB_GETDRAG), mk("get_useGravity", 0, &tBool, M_RB_GETUSEGRAV)};
     kPhysics.methods = {mk("get_gravity", 0, &tVec3, M_PH_GETGRAV, 0x10)};
     kTime.methods = {mk("get_fixedDeltaTime", 0, &tFloat, M_TM_FIXEDDT, 0x10)};
     kGm.methods = {mk("get_Instance", 0, &tVoid, M_GM_INSTANCE, 0x10), mk("GetOwnedBallControlManager", 0, &tVoid, M_GM_OWNED)};
+    // stage D9
+    kRigidbody.methods.push_back(mk("get_angularVelocity", 0, &tVec3, M_RB_ANGVEL)); kRigidbody.methods.push_back(mk("get_angularDrag", 0, &tFloat, M_RB_ANGDRAG));
+    kRigidbody.methods.push_back(mk("get_mass", 0, &tFloat, M_RB_MASS)); kRigidbody.methods.push_back(mk("get_inertiaTensor", 0, &tVec3, M_RB_INERTIA));
+    kRigidbody.methods.push_back(mk("get_collisionDetectionMode", 0, &tCcdE, M_RB_CCD));
+    kPhysics.methods.push_back(mk("get_bounceThreshold", 0, &tFloat, M_PH_BOUNCETHR, 0x10));
+    kTransform.methods = {mk("get_position", 0, &tVec3, M_TR_POS), mk("get_lossyScale", 0, &tVec3, M_TR_SCALE), mk("get_childCount", 0, &tInt, M_TR_CHILDCOUNT), mk("GetChild", 1, &tTransform, M_TR_GETCHILD)};
+    kTransform.methods[3]->ptypes = {&tInt};
+    {   // the string overload comes FIRST on purpose: a lookup by name and argument count alone would pick the wrong one
+        Method* a = mk("GetComponent", 1, &tColliderObj, M_CO_GETCOMP_STR); a->ptypes = {&tString};
+        Method* b = mk("GetComponent", 1, &tColliderObj, M_CO_GETCOMP); b->ptypes = {&tSystemType};
+        Method* c = mk("GetComponentInChildren", 1, &tColliderObj, M_CO_GETKIDS); c->ptypes = {&tSystemType};
+        Method* d = mk("GetComponentInParent", 1, &tColliderObj, M_CO_GETPARENT); d->ptypes = {&tSystemType};
+        kComponent.methods = {a, mk("get_transform", 0, &tTransform, M_CO_TRANSFORM), b, c, d};
+    }
+    kCollider.methods = {mk("get_bounds", 0, &tVoid, M_COL_BOUNDS), mk("get_sharedMaterial", 0, &tPhysMat, M_COL_MATERIAL)};
+    kSphere.methods = {mk("get_radius", 0, &tFloat, M_SPH_RADIUS)};
+    kPhysMat.methods = {mk("get_bounciness", 0, &tFloat, M_MAT_BOUNCE), mk("get_dynamicFriction", 0, &tFloat, M_MAT_DYN), mk("get_staticFriction", 0, &tFloat, M_MAT_STAT),
+                        mk("get_bounceCombine", 0, &tCombineE, M_MAT_BCOMB), mk("get_frictionCombine", 0, &tCombineE, M_MAT_FCOMB)};
+    kGoal.methods = {mk("GetRimCenter", 0, &tVec3, M_GOAL_RIM), mk("GetBackboardCenterPosition", 0, &tVec3, M_GOAL_BOARD)};
+    kGman.methods = {mk("get_Instance", 0, &tGman, M_GMAN_INSTANCE2, 0x10)};
 }
 
 // ---------------------------------------------------------------- the pretend world
@@ -106,6 +165,202 @@ unsigned char* makeObject(Klass* k, int size) {
 unsigned char gBox[16][48];
 int gBoxNext = 0;
 unsigned char* box() { unsigned char* b = gBox[gBoxNext++ & 15]; std::memset(b, 0, 48); return b; }
+
+// ---------------------------------------------------------------- stage D9: the pretend backboards (two goals), the ball's collider and materials, and the physics of a ball hitting a board
+// The ball hits an axis-aligned box (the board's collider). Rigid-body maths with a full 3x3 contact matrix (a different way of writing it than bank.cpp, on purpose).
+struct Node { unsigned char* parent = nullptr; std::vector<unsigned char*> kids; double pos[3] = {0, 0, 0}, scale[3] = {1, 1, 1}; unsigned char* col = nullptr; };
+struct Col { unsigned char* node = nullptr; bool sphere = false, physical = true; double c[3] = {0, 0, 0}, h[3] = {0, 0, 0}, radius = 0; unsigned char* mat = nullptr; int goal = -1, kind = 0; };   // kind 1 = board, 2 = pole
+struct Mat { double bounce = 0, dyn = 0.6, stat = 0.6; int bcomb = 0, fcomb = 0; };
+struct Bank {
+    std::map<unsigned char*, Node> nodes; std::map<unsigned char*, Col> cols; std::map<unsigned char*, Mat> mats;
+    unsigned char *gman = nullptr, *list = nullptr, *props = nullptr, *ballNode = nullptr, *ballCol = nullptr, *ballMat = nullptr, *boardMat = nullptr;
+    unsigned char *goal[2] = {nullptr, nullptr}, *root[2] = {nullptr, nullptr}, *rim[2] = {nullptr, nullptr}, *board[2] = {nullptr, nullptr}, *boardCol[2] = {nullptr, nullptr}, *poleCol[2] = {nullptr, nullptr};
+    double ring[2][3] = {{0, 3.1, 12.66}, {0, 3.1, -12.66}};
+    double ringDataDy = 0, boardDataDy = 0;
+    double w[3] = {0, 0, 0}, relSpin[3] = {0, 0, 0}, angDrag = 0.05, mass = 0.6, kappa = 0.4, bounceThr = 2.0;
+    int ccd = 0;
+    bool hideManager = false;
+    // what happened to the last throw (the test reads it)
+    int boardContacts = 0, poleContacts = 0, rimTouchSteps = 0, firstContactStep = 0;
+    double contactPos[3] = {0, 0, 0}, vInN = 0, vOutN = 0, eUsed = 0, muUsed = 0, apprUsed = 0;
+};
+Bank Bk;
+
+double ballRadius() {
+    auto c = Bk.cols.find(Bk.ballCol);
+    auto n = Bk.nodes.find(Bk.ballNode);
+    if (c == Bk.cols.end() || n == Bk.nodes.end()) return 0.12;
+    return c->second.radius * std::max(std::fabs(n->second.scale[0]), std::max(std::fabs(n->second.scale[1]), std::fabs(n->second.scale[2])));
+}
+double dot3(const double a[3], const double b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+void cross3(const double a[3], const double b[3], double o[3]) { o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0]; }
+// x = K^-1 b (3x3, Cramer's rule)
+bool solve3(const double K[9], const double b[3], double x[3]) {
+    const double det = K[0] * (K[4] * K[8] - K[5] * K[7]) - K[1] * (K[3] * K[8] - K[5] * K[6]) + K[2] * (K[3] * K[7] - K[4] * K[6]);
+    if (std::fabs(det) < 1e-18) return false;
+    double m[9];
+    for (int c = 0; c < 3; ++c) {
+        for (int i = 0; i < 9; ++i) m[i] = K[i];
+        for (int r = 0; r < 3; ++r) m[r * 3 + c] = b[r];
+        x[c] = (m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6])) / det;
+    }
+    return true;
+}
+int combPriority(int value) {      // the engine's rule: Average < Minimum < Multiply < Maximum (by NAME, the numbers are the enum's order here)
+    const std::string& nm = kCombine.fields[1 + static_cast<size_t>(value)].name;
+    return nm == "Average" ? 0 : (nm == "Minimum" ? 1 : (nm == "Multiply" ? 2 : 3));
+}
+double mixRule(int ca, double a, int cb, double b) {
+    const int p = std::max(combPriority(ca), combPriority(cb));
+    return p == 0 ? 0.5 * (a + b) : (p == 1 ? std::min(a, b) : (p == 2 ? a * b : std::max(a, b)));
+}
+// closest point of a box to p; false when p is inside
+bool ballVsBox(const double p[3], const Col& bx, double n[3], double* dist) {
+    double d[3];
+    for (int i = 0; i < 3; ++i) { const double q = std::max(bx.c[i] - bx.h[i], std::min(bx.c[i] + bx.h[i], p[i])); d[i] = p[i] - q; }
+    const double l = std::sqrt(dot3(d, d));
+    if (l < 1e-9) return false;
+    for (int i = 0; i < 3; ++i) n[i] = d[i] / l;
+    *dist = l;
+    return true;
+}
+// the bounce of the ball (velocity W.v, spin Bk.w) off a surface with this normal (pointing out of the surface towards the ball). Returns false when the ball is not approaching.
+bool bounceOff(const Col& bx, const double n[3]) {
+    const double r = ballRadius(), m = Bk.mass, I = Bk.kappa * m * r * r;
+    const double rc[3] = {-r * n[0], -r * n[1], -r * n[2]};
+    double wxr[3]; cross3(Bk.w, rc, wxr);
+    const double u[3] = {W.v[0] + wxr[0], W.v[1] + wxr[1], W.v[2] + wxr[2]};
+    const double un = dot3(u, n);
+    if (un >= 0) return false;
+    Mat bm; { auto it = Bk.mats.find(Bk.ballMat); if (it != Bk.mats.end()) bm = it->second; }
+    Mat wm; if (bx.mat) { auto it = Bk.mats.find(bx.mat); if (it != Bk.mats.end()) wm = it->second; }
+    const double eMix = mixRule(bm.bcomb, bm.bounce, wm.bcomb, wm.bounce), mu = mixRule(bm.fcomb, bm.dyn, wm.fcomb, wm.dyn);
+    const double e = -un > Bk.bounceThr ? eMix : 0.0;
+    const double du[3] = {-e * un * n[0] - u[0], -e * un * n[1] - u[1], -e * un * n[2] - u[2]};      // stick: tangential contact speed -> 0, normal -> -e * un
+    double K[9];
+    for (int a = 0; a < 3; ++a) for (int b = 0; b < 3; ++b) K[a * 3 + b] = (a == b ? 1.0 / m + r * r / I : 0.0) - rc[a] * rc[b] / I;
+    double J[3];
+    if (!solve3(K, du, J)) return false;
+    const double jn = dot3(J, n);
+    double jt[3] = {J[0] - jn * n[0], J[1] - jn * n[1], J[2] - jn * n[2]};
+    const double jtl = std::sqrt(dot3(jt, jt));
+    if (jtl > mu * jn && jtl > 1e-12) { for (int i = 0; i < 3; ++i) J[i] = jn * n[i] + (mu * jn / jtl) * jt[i]; }       // slides: the friction cone limits the sideways impulse
+    const double vinN = dot3(W.v, n);
+    for (int i = 0; i < 3; ++i) W.v[i] += J[i] / m;
+    double rxj[3]; cross3(rc, J, rxj);
+    for (int i = 0; i < 3; ++i) Bk.w[i] += rxj[i] / I;
+    if (bx.kind == 1) {
+        if (Bk.boardContacts == 0) { Bk.firstContactStep = static_cast<int>(W.stepsSinceRelease); Bk.vInN = vinN; Bk.vOutN = dot3(W.v, n); Bk.eUsed = e; Bk.muUsed = mu; Bk.apprUsed = -un; for (int i = 0; i < 3; ++i) Bk.contactPos[i] = W.p[i]; }
+        ++Bk.boardContacts;
+    } else if (bx.kind == 2) ++Bk.poleContacts;
+    return true;
+}
+// discrete: the contacts found at the START of the step (the ball is checked where the last step left it) change the velocity, then the ball moves
+void discreteContacts() {
+    const double r = ballRadius();
+    for (auto& kv : Bk.cols) {
+        const Col& bx = kv.second;
+        if (!bx.physical || bx.sphere) continue;
+        double n[3], d;
+        if (ballVsBox(W.p, bx, n, &d) && d < r && dot3(W.v, n) < 0) bounceOff(bx, n);
+    }
+}
+// continuous: the exact moment of the touch inside the step
+void moveContinuous() {
+    const double r = ballRadius();
+    double dx[3] = {W.v[0] * W.fdt, W.v[1] * W.fdt, W.v[2] * W.fdt};
+    const int N = 400;
+    for (int s = 0; s <= N; ++s) {
+        const double f = static_cast<double>(s) / N;
+        const double pt[3] = {W.p[0] + dx[0] * f, W.p[1] + dx[1] * f, W.p[2] + dx[2] * f};
+        for (auto& kv : Bk.cols) {
+            const Col& bx = kv.second;
+            if (!bx.physical || bx.sphere) continue;
+            double n[3], d;
+            if (!(ballVsBox(pt, bx, n, &d) && d < r && dot3(W.v, n) < 0)) continue;
+            double lo = s == 0 ? 0.0 : static_cast<double>(s - 1) / N, hi = f;
+            for (int it = 0; it < 40; ++it) {
+                const double mid = 0.5 * (lo + hi);
+                const double q[3] = {W.p[0] + dx[0] * mid, W.p[1] + dx[1] * mid, W.p[2] + dx[2] * mid};
+                double n2[3], d2;
+                if (ballVsBox(q, bx, n2, &d2) && d2 < r) hi = mid; else lo = mid;
+            }
+            for (int i = 0; i < 3; ++i) W.p[i] += dx[i] * hi;
+            double n3[3], d3;
+            if (ballVsBox(W.p, bx, n3, &d3)) bounceOff(bx, n3);
+            for (int i = 0; i < 3; ++i) W.p[i] += W.v[i] * W.fdt * (1.0 - hi);
+            return;
+        }
+    }
+    for (int i = 0; i < 3; ++i) W.p[i] += dx[i];
+}
+void countRim() {            // the ring itself is not solid in this pretend world; the test only wants to know whether the ball would have touched it
+    const double r = ballRadius();
+    for (int g = 0; g < 2; ++g) {
+        const double dh = std::sqrt((W.p[0] - Bk.ring[g][0]) * (W.p[0] - Bk.ring[g][0]) + (W.p[2] - Bk.ring[g][2]) * (W.p[2] - Bk.ring[g][2]));
+        const double dd = std::sqrt((dh - 0.2286) * (dh - 0.2286) + (W.p[1] - Bk.ring[g][1]) * (W.p[1] - Bk.ring[g][1]));
+        if (dd < r + 0.01) { ++Bk.rimTouchSteps; return; }
+    }
+}
+unsigned char* mkRaw(size_t size) { unsigned char* o = static_cast<unsigned char*>(calloc(1, size)); gAllocated.push_back(o); gAllocatedSize.push_back(static_cast<int>(size)); return o; }
+unsigned char* mkNode(const double p[3], unsigned char* parent) {
+    unsigned char* o = makeObject(&kTransform, 32);
+    Node& n = Bk.nodes[o]; n.parent = parent; for (int i = 0; i < 3; ++i) n.pos[i] = p[i];
+    if (parent) Bk.nodes[parent].kids.push_back(o);
+    return o;
+}
+unsigned char* mkBox(unsigned char* node, const double c[3], const double h[3], unsigned char* mat, int goal, int kind) {
+    unsigned char* o = makeObject(&kCollider, 32);
+    Col& k = Bk.cols[o]; k.node = node; k.sphere = false; for (int i = 0; i < 3; ++i) { k.c[i] = c[i]; k.h[i] = h[i]; } k.mat = mat; k.goal = goal; k.kind = kind;
+    Bk.nodes[node].col = o;
+    return o;
+}
+unsigned char* mkMat(double bounce, double dyn, double stat, int bcomb, int fcomb) {
+    unsigned char* o = makeObject(&kPhysMat, 32);
+    Mat& m = Bk.mats[o]; m.bounce = bounce; m.dyn = dyn; m.stat = stat; m.bcomb = bcomb; m.fcomb = fcomb;
+    return o;
+}
+void putPtr(unsigned char* o, int off, const void* p) { const uint64_t v = reinterpret_cast<uint64_t>(p); std::memcpy(o + off, &v, 8); }
+// Two hoops like the real lobby: rings at (0, 3.1, +-12.66). Board: 1.83 x 1.07 x 0.05 m, its front face 0.38 m behind the ring centre, its centre 0.35 m above it.
+void buildBank(int boardPlace) {
+    Bk = Bank();
+    const double kZero[3] = {0, 0, 0};
+    Bk.ballMat = mkMat(0.8, 0.5, 0.5, 0, 0);          // bounce 0.8, friction 0.5, both "Average"
+    Bk.boardMat = mkMat(0.6, 0.4, 0.4, 3, 0);         // bounce 0.6 mixed by "Maximum", friction 0.4 "Average"  -> the pair bounces 0.8 and rubs 0.45
+    Bk.ballNode = mkNode(kZero, nullptr); Bk.nodes[Bk.ballNode].scale[0] = Bk.nodes[Bk.ballNode].scale[1] = Bk.nodes[Bk.ballNode].scale[2] = 0.24;
+    { Bk.ballCol = makeObject(&kSphere, 32); Col& k = Bk.cols[Bk.ballCol]; k.node = Bk.ballNode; k.sphere = true; k.physical = false; k.radius = 0.5; k.mat = Bk.ballMat; Bk.nodes[Bk.ballNode].col = Bk.ballCol; }
+    Bk.props = makeObject(&kProps, 176);
+    putPtr(Bk.props, 88, W.rb); putPtr(Bk.props, 96, Bk.ballCol); putPtr(Bk.props, 104, Bk.ballMat); putPtr(Bk.props, 128, Bk.ballMat);
+    setF(Bk.props, 136, 0.5f); setF(Bk.props, 140, 0.5f); setF(Bk.props, 144, 0.8f);
+    putPtr(W.ball, 264, Bk.props); setF(W.ball, 356, 0.05f); setF(W.ball, 364, -1.0f);
+    Bk.list = mkRaw(32); { unsigned char* arr = mkRaw(32 + 16); const uint64_t two = 2; std::memcpy(arr + 24, &two, 8); putPtr(Bk.list, 0, &kOther); putPtr(Bk.list, 16, arr); const int sz = 2; std::memcpy(Bk.list + 24, &sz, 4);
+                          for (int g = 0; g < 2; ++g) {
+        const double s = g == 0 ? 1.0 : -1.0;
+        const double ringP[3] = {0, 3.1, 12.66 * s};
+        for (int i = 0; i < 3; ++i) Bk.ring[g][i] = ringP[i];
+        const double rootP[3] = {0, 0, ringP[2] + s * 0.6};
+        Bk.root[g] = mkNode(rootP, nullptr);
+        const double boardC[3] = {0, ringP[1] + 0.35, ringP[2] + s * (0.38 + 0.025)};
+        const double boardH[3] = {0.915, 0.535, 0.025};
+        Bk.rim[g] = mkNode(ringP, Bk.root[g]);
+        const double rimH[3] = {0.25, 0.01, 0.25};                                    // a thin plate under the ring: a collider that is NOT the board
+        Bk.cols[mkBox(Bk.rim[g], ringP, rimH, nullptr, g, 3)].physical = false;       // (a trigger: it has a size and a place, but the ball flies through it)
+        const double poleC[3] = {0, 1.75, ringP[2] + s * 0.62}, poleH[3] = {0.1, 1.75, 0.1};
+        unsigned char* poleN = mkNode(poleC, Bk.root[g]);
+        Bk.poleCol[g] = mkBox(poleN, poleC, poleH, nullptr, g, 2);
+        Bk.board[g] = mkNode(boardC, Bk.root[g]);
+        if (boardPlace == 0) Bk.boardCol[g] = mkBox(Bk.board[g], boardC, boardH, Bk.boardMat, g, 1);                       // on the _backboardCenter object itself
+        else if (boardPlace == 1) { unsigned char* glass = mkNode(boardC, Bk.board[g]); Bk.boardCol[g] = mkBox(glass, boardC, boardH, Bk.boardMat, g, 1); }   // on a child of it
+        else { unsigned char* sib = mkNode(boardC, Bk.root[g]); Bk.boardCol[g] = mkBox(sib, boardC, boardH, Bk.boardMat, g, 1); }                           // on a sibling object
+        Bk.goal[g] = makeObject(&kGoal, 128);
+        putPtr(Bk.goal[g], 24, Bk.rim[g]); setF(Bk.goal[g], 40, 0.2286f); putPtr(Bk.goal[g], 48, Bk.board[g]);
+        setV(Bk.goal[g], 56, 0, 0, -s); setV(Bk.goal[g], 100, 1.83, 1.07, 0.05); setV(Bk.goal[g], 112, 0, 0, 0);
+        putPtr(arr, 32 + 8 * g, Bk.goal[g]);
+        Bk.nodes[Bk.root[g]].col = nullptr;
+    } }
+    Bk.gman = makeObject(&kGman, 40);
+    putPtr(Bk.gman, 24, Bk.list);
+}
 }  // namespace
 
 extern "C" {
@@ -115,6 +370,8 @@ extern "C" {
 EXPORT void fake_aim_create(int withHoops) {
     init();
     buildFields();
+    buildMethods();
+    for (Image* im : {&iGame, &iPhys, &iCore}) im->classes = im->original;
     for (size_t i = 0; i < gAllocated.size(); ++i) { std::memset(gAllocated[i], 0, static_cast<size_t>(gAllocatedSize[i])); free(gAllocated[i]); }
     gAllocated.clear(); gAllocatedSize.clear();
     W = World();
@@ -130,6 +387,8 @@ EXPORT void fake_aim_create(int withHoops) {
     setF(W.ball, 304, 0.2286f); setF(W.ball, 352, 0.11f);
     setF(W.bcm, 200, 12.33f); setF(W.bcm, 204, 5.0f);
     const int st = 3; std::memcpy(W.gm + 856, &st, 4); W.gm[760] = 1;
+    gTypeObjects.clear();
+    buildBank(0);
 }
 EXPORT void* fake_aim_object(int which) { return which == 0 ? W.gm : (which == 1 ? W.bcm : (which == 2 ? W.ball : W.rb)); }
 EXPORT void fake_aim_set(const char* key, double a, double b, double c) {
@@ -159,6 +418,7 @@ EXPORT void fake_aim_hold(double x, double y, double z) {
     W.p[0] = x; W.p[1] = y; W.p[2] = z; W.v[0] = W.v[1] = W.v[2] = 0; W.held = true; W.released = false;
     setF(W.ball, 388, 0.0f); W.ball[80] = 0; W.ball[81] = 0;
     setV(W.ball, 316, x, y, z);
+    Bk.boardContacts = Bk.poleContacts = Bk.rimTouchSteps = Bk.firstContactStep = 0; Bk.w[0] = Bk.w[1] = Bk.w[2] = 0;
 }
 // you let go: hand 1 = left, 2 = right, 3 = both. `throwVelocity` is what the player's throw gives the ball.
 EXPORT void fake_aim_release(int hand, double vx, double vy, double vz) {
@@ -169,6 +429,7 @@ EXPORT void fake_aim_release(int hand, double vx, double vy, double vz) {
     setF(W.bcm, 384, static_cast<float>(W.time));
     setV(W.bcm, 388, vx, vy, vz);
     W.ball[80] = 1;
+    for (int i = 0; i < 3; ++i) Bk.w[i] = Bk.relSpin[i];
 }
 // one physics step (Unity's order: gravity, then drag, then move)
 EXPORT void fake_aim_step() {
@@ -181,7 +442,11 @@ EXPORT void fake_aim_step() {
     const double qy = W.p[1];
     if (W.useGravity) W.v[1] -= W.gravity * W.fdt;
     const double damp = 1.0 - W.drag * W.fdt;
-    for (int i = 0; i < 3; ++i) { W.v[i] *= damp; W.p[i] += W.v[i] * W.fdt; }
+    for (int i = 0; i < 3; ++i) W.v[i] *= damp;
+    { const double wd = 1.0 - Bk.angDrag * W.fdt; for (int i = 0; i < 3; ++i) Bk.w[i] *= wd; }
+    if (Bk.ccd == 1 || Bk.ccd == 2) moveContinuous();
+    else { discreteContacts(); for (int i = 0; i < 3; ++i) W.p[i] += W.v[i] * W.fdt; }
+    countRim();
     if (W.p[1] < 0.12) { W.p[1] = 0.12; W.v[1] = 0; W.v[0] *= 0.5; W.v[2] *= 0.5; }       // the floor
     if (W.unheldMode == 0) setF(W.ball, 388, getF(W.ball, 388) + static_cast<float>(W.fdt));
     setV(W.ball, 316, W.p[0], W.p[1], W.p[2]);
@@ -202,6 +467,70 @@ EXPORT void* fake_aim_extra_gm(int kind) {
     unsigned char* g = makeObject(&kGm, 864);
     if (kind == 1) { unsigned char* b2 = makeObject(&kBcm, 424); const uint64_t p = reinterpret_cast<uint64_t>(b2); std::memcpy(g + 408, &p, 8); }
     return g;
+}
+
+// ---- stage D9: knobs and readings of the pretend backboards
+EXPORT void fake_bank_set(const char* key, double a, double b, double c) {
+    const std::string k = key;
+    (void)b; (void)c;
+    auto setMat = [&](unsigned char* m, double bounce, double fr) { Mat& mm = Bk.mats[m]; if (bounce >= 0) mm.bounce = bounce; if (fr >= 0) { mm.dyn = fr; mm.stat = fr; } };
+    if (k == "board_e") setMat(Bk.boardMat, a, -1);
+    else if (k == "board_mu") setMat(Bk.boardMat, -1, a);
+    else if (k == "ball_e") { setMat(Bk.ballMat, a, -1); setF(Bk.props, 144, static_cast<float>(a)); }
+    else if (k == "ball_mu") { setMat(Bk.ballMat, -1, a); setF(Bk.props, 140, static_cast<float>(a)); setF(Bk.props, 136, static_cast<float>(a)); }
+    else if (k == "board_bcomb") Bk.mats[Bk.boardMat].bcomb = static_cast<int>(a);
+    else if (k == "board_fcomb") Bk.mats[Bk.boardMat].fcomb = static_cast<int>(a);
+    else if (k == "ball_bcomb") Bk.mats[Bk.ballMat].bcomb = static_cast<int>(a);
+    else if (k == "ball_fcomb") Bk.mats[Bk.ballMat].fcomb = static_cast<int>(a);
+    else if (k == "ccd") Bk.ccd = static_cast<int>(a);
+    else if (k == "ang_drag") Bk.angDrag = a;
+    else if (k == "kappa") Bk.kappa = a;
+    else if (k == "bounce_threshold") Bk.bounceThr = a;
+    else if (k == "release_spin") { Bk.relSpin[0] = a; Bk.relSpin[1] = b; Bk.relSpin[2] = c; }
+    else if (k == "ball_scale") { Node& n = Bk.nodes[Bk.ballNode]; n.scale[0] = n.scale[1] = n.scale[2] = a; }
+    else if (k == "rebuild") buildBank(static_cast<int>(a));                      // 0: board collider on the _backboardCenter object, 1: on its child, 2: on a sibling
+    else if (k == "no_board_collider") { for (int g = 0; g < 2; ++g) { Bk.cols.erase(Bk.boardCol[g]); for (auto& kv : Bk.nodes) if (kv.second.col == Bk.boardCol[g]) kv.second.col = nullptr; } }
+    else if (k == "destroy_board_collider") { for (int g = 0; g < 2; ++g) { const uint64_t z = 0; std::memcpy(Bk.boardCol[g] + 16, &z, 8); } }
+    else if (k == "board_no_material") { for (int g = 0; g < 2; ++g) Bk.cols[Bk.boardCol[g]].mat = nullptr; }
+    else if (k == "board_material_gone") { const uint64_t z = 0; std::memcpy(Bk.boardMat + 16, &z, 8); }
+    else if (k == "wrong_size_collider") { for (int g = 0; g < 2; ++g) { Col& cc = Bk.cols[Bk.boardCol[g]]; for (int i = 0; i < 3; ++i) cc.h[i] *= a; } }
+    else if (k == "flip_normal") { for (int g = 0; g < 2; ++g) { float z = getF(Bk.goal[g], 64); setF(Bk.goal[g], 64, -z); } }
+    else if (k == "ring_data_dy") Bk.ringDataDy = a;
+    else if (k == "board_data_dy") Bk.boardDataDy = a;
+    else if (k == "board_size_data") { for (int g = 0; g < 2; ++g) setV(Bk.goal[g], 100, a, b, c); }
+    else if (k == "hide_manager") Bk.hideManager = a != 0;
+    else if (k == "goal_list_size") { const int sz = static_cast<int>(a); std::memcpy(Bk.list + 24, &sz, 4); }
+    else if (k == "goal_list_null") putPtr(Bk.gman, 24, nullptr);
+    else if (k == "ball_collider_null") putPtr(Bk.props, 96, nullptr);
+    else if (k == "props_null") putPtr(W.ball, 264, nullptr);
+    else if (k == "destroy_ball_collider") { const uint64_t z = 0; std::memcpy(Bk.ballCol + 16, &z, 8); }
+    else if (k == "rb_mass") Bk.mass = a;
+    else if (k == "assist_time") setF(W.ball, 364, static_cast<float>(a));
+}
+// hide one engine / game method (a game that was updated or stripped): every class that has a method with this name loses it
+EXPORT void fake_bank_hide(const char* method) {
+    Klass* all[] = {&kRigidbody, &kPhysics, &kTransform, &kCollider, &kSphere, &kPhysMat, &kComponent, &kGoal, &kGman};
+    for (Klass* k : all) for (size_t i = 0; i < k->methods.size();) { if (k->methods[i]->name == method) k->methods.erase(k->methods.begin() + static_cast<long>(i)); else ++i; }
+}
+// change a class of the pretend game: action 0 = remove the field, 1 = give the field the wrong type (an int), 2 = remove the whole class from the game
+EXPORT void fake_bank_field(const char* klass, const char* field, int action) {
+    Klass* all[] = {&kBall, &kProps, &kGoal, &kGman, &kBcm, &kRigidbody, &kTransform, &kCollider, &kSphere, &kPhysMat, &kCombine, &kCcd};
+    for (Klass* k : all) {
+        if (k->name != klass) continue;
+        if (action == 2) { for (Image* im : {&iGame, &iPhys, &iCore}) for (size_t i = 0; i < im->classes.size();) { if (im->classes[i] == k) im->classes.erase(im->classes.begin() + static_cast<long>(i)); else ++i; } return; }
+        for (size_t i = 0; i < k->fields.size(); ++i) if (k->fields[i].name == field) {
+            if (action == 0) k->fields.erase(k->fields.begin() + static_cast<long>(i)); else k->fields[i].type = &tInt;
+            return;
+        }
+    }
+}
+EXPORT void fake_bank_state(double* out) {
+    out[0] = Bk.boardContacts; out[1] = Bk.poleContacts; out[2] = Bk.rimTouchSteps; out[3] = Bk.firstContactStep;
+    out[4] = Bk.contactPos[0]; out[5] = Bk.contactPos[1]; out[6] = Bk.contactPos[2];
+    out[7] = Bk.vInN; out[8] = Bk.vOutN; out[9] = Bk.eUsed; out[10] = Bk.muUsed; out[11] = Bk.apprUsed; out[12] = ballRadius();
+}
+EXPORT void* fake_bank_object(int which, int goal) {      // 0 goal, 1 goal manager, 2 board collider, 3 board node, 4 props
+    switch (which) { case 0: return Bk.goal[goal & 1]; case 1: return Bk.gman; case 2: return Bk.boardCol[goal & 1]; case 3: return Bk.board[goal & 1]; default: return Bk.props; }
 }
 
 // ---- the runtime functions the link uses
@@ -243,11 +572,26 @@ EXPORT int il2cpp_class_value_size(void* k, unsigned* align) { if (align) *align
 EXPORT void* il2cpp_thread_current() { return &gDomain; }
 EXPORT void* il2cpp_resolve_icall(const char*) { return nullptr; }
 
-EXPORT void* il2cpp_class_get_method_from_name(void* k, const char* name, int argc) {
-    Klass* c = static_cast<Klass*>(k);
-    for (Method* m : c->methods) if (m->name == name && static_cast<int>(m->params) == argc) return m;
+EXPORT void* il2cpp_class_get_method_from_name(void* k, const char* name, int argc) {     // like the real runtime: this class first, then its parents
+    for (Klass* c = static_cast<Klass*>(k); c; c = c->parent)
+        for (Method* m : c->methods) if (m->name == name && static_cast<int>(m->params) == argc) return m;
     return nullptr;
 }
+EXPORT void* il2cpp_object_get_class(void* o) { void* k = nullptr; std::memcpy(&k, o, 8); return k; }
+EXPORT void* il2cpp_class_get_type(void* k) {
+    static bool filled = false;
+    if (!filled) { filled = true; for (Type* t : {&tTransform, &tSphere, &tPhysMat, &tProps, &tGoal, &tGman, &tColliderObj, &tCombineE, &tCcdE, &tRB, &tBall, &tBcm}) if (t->klass) gKlassTypes[t->klass] = t; }
+    auto it = gKlassTypes.find(static_cast<Klass*>(k));
+    return it == gKlassTypes.end() ? nullptr : static_cast<void*>(it->second);
+}
+EXPORT void* il2cpp_type_get_object(void* t) {
+    auto it = gTypeObjects.find(static_cast<Type*>(t));
+    if (it != gTypeObjects.end()) return it->second;
+    unsigned char* o = makeObject(&kOther, 48);
+    gTypeObjects[static_cast<Type*>(t)] = o;
+    return o;
+}
+EXPORT void* il2cpp_method_get_param(void* m, unsigned i) { Method* mm = static_cast<Method*>(m); return i < mm->ptypes.size() ? static_cast<void*>(mm->ptypes[i]) : nullptr; }
 
 EXPORT void* il2cpp_runtime_invoke(void* method, void* obj, void** params, void** exc) {
     ++W.invokes;
@@ -255,6 +599,14 @@ EXPORT void* il2cpp_runtime_invoke(void* method, void* obj, void** params, void*
     if (W.throwAll) { if (exc) *exc = &gDomain; return nullptr; }
     auto bad = [&]() -> void* { if (exc) *exc = &gDomain; return nullptr; };
     auto boxVec = [&](double x, double y, double z) -> void* { unsigned char* b = box(); setV(b, 16, x, y, z); return b; };
+    auto nodeOf = [&](void* o) -> Node* { auto it = Bk.nodes.find(static_cast<unsigned char*>(o)); return it == Bk.nodes.end() ? nullptr : &it->second; };
+    auto transformOf = [&](void* o) -> unsigned char* {          // Component.transform: a Transform is its own transform, a collider's is the object it sits on, a goal's is its root
+        unsigned char* p = static_cast<unsigned char*>(o);
+        if (nodeOf(p)) return p;
+        auto c = Bk.cols.find(p); if (c != Bk.cols.end()) return c->second.node;
+        for (int g = 0; g < 2; ++g) if (p == Bk.goal[g]) return Bk.root[g];
+        return nullptr;
+    };
     switch (m->id) {
     case M_RB_GETVEL: if (obj != W.rb || W.rbDestroyed) return bad(); return boxVec(W.v[0], W.v[1], W.v[2]);
     case M_RB_GETPOS: if (obj != W.rb || W.rbDestroyed) return bad(); return boxVec(W.p[0], W.p[1], W.p[2]);
@@ -270,6 +622,59 @@ EXPORT void* il2cpp_runtime_invoke(void* method, void* obj, void** params, void*
     case M_TM_FIXEDDT: { unsigned char* b = box(); setF(b, 16, static_cast<float>(W.fdt)); return b; }
     case M_GM_INSTANCE: return W.getInstanceNull ? nullptr : W.gm;
     case M_GM_OWNED: if (obj != W.gm) return bad(); return W.getOwnedNull ? nullptr : W.bcm;
+    // ---- stage D9
+    case M_RB_ANGVEL: if (obj != W.rb) return bad(); return boxVec(Bk.w[0], Bk.w[1], Bk.w[2]);
+    case M_RB_ANGDRAG: { if (obj != W.rb) return bad(); unsigned char* b = box(); setF(b, 16, static_cast<float>(Bk.angDrag)); return b; }
+    case M_RB_MASS: { if (obj != W.rb) return bad(); unsigned char* b = box(); setF(b, 16, static_cast<float>(Bk.mass)); return b; }
+    case M_RB_INERTIA: { if (obj != W.rb) return bad(); const double r = ballRadius(), I = Bk.kappa * Bk.mass * r * r; return boxVec(I, I, I); }
+    case M_RB_CCD: { if (obj != W.rb) return bad(); unsigned char* b = box(); const int v = Bk.ccd; std::memcpy(b + 16, &v, 4); return b; }
+    case M_PH_BOUNCETHR: { unsigned char* b = box(); setF(b, 16, static_cast<float>(Bk.bounceThr)); return b; }
+    case M_TR_POS: {
+        Node* n = nodeOf(obj); if (!n) return bad();
+        double dy = 0; for (int g = 0; g < 2; ++g) if (obj == Bk.board[g]) dy = Bk.boardDataDy;
+        return boxVec(n->pos[0], n->pos[1] + dy, n->pos[2]);
+    }
+    case M_TR_SCALE: { Node* n = nodeOf(obj); if (!n) return bad(); return boxVec(n->scale[0], n->scale[1], n->scale[2]); }
+    case M_TR_CHILDCOUNT: { Node* n = nodeOf(obj); if (!n) return bad(); unsigned char* b = box(); const int v = static_cast<int>(n->kids.size()); std::memcpy(b + 16, &v, 4); return b; }
+    case M_TR_GETCHILD: {
+        Node* n = nodeOf(obj); if (!n || !params) return bad();
+        const int idx = *static_cast<const int*>(params[0]);
+        if (idx < 0 || idx >= static_cast<int>(n->kids.size())) return bad();
+        return n->kids[static_cast<size_t>(idx)];
+    }
+    case M_CO_TRANSFORM: { unsigned char* t = transformOf(obj); if (!t) return bad(); return t; }
+    case M_CO_GETCOMP_STR: return bad();                       // the (string) overload: the wrong one for a Type argument
+    case M_CO_GETCOMP: case M_CO_GETKIDS: case M_CO_GETPARENT: {
+        unsigned char* t = transformOf(obj); if (!t || !params) return bad();
+        auto ty = gTypeObjects.find(&tColliderObj);
+        if (ty == gTypeObjects.end() || params[0] != ty->second) return nullptr;      // some other kind of component: none
+        if (m->id == M_CO_GETCOMP) return nodeOf(t)->col;
+        if (m->id == M_CO_GETPARENT) { for (unsigned char* x = t; x; x = nodeOf(x)->parent) if (nodeOf(x)->col) return nodeOf(x)->col; return nullptr; }
+        std::vector<unsigned char*> stack{t};              // children: this object first, then its children one after the other
+        while (!stack.empty()) { unsigned char* x = stack.back(); stack.pop_back(); Node* nx = nodeOf(x); if (nx->col) return nx->col; for (size_t i = nx->kids.size(); i > 0; --i) stack.push_back(nx->kids[i - 1]); }
+        return nullptr;
+    }
+    case M_COL_BOUNDS: {
+        auto it = Bk.cols.find(static_cast<unsigned char*>(obj)); if (it == Bk.cols.end()) return bad();
+        unsigned char* b = box(); const Col& c = it->second;
+        if (c.sphere) { setV(b, 16, 0, 0, 0); const double rr = ballRadius(); setV(b, 28, rr, rr, rr); }
+        else { setV(b, 16, c.c[0], c.c[1], c.c[2]); setV(b, 28, c.h[0], c.h[1], c.h[2]); }
+        return b;
+    }
+    case M_COL_MATERIAL: { auto it = Bk.cols.find(static_cast<unsigned char*>(obj)); if (it == Bk.cols.end()) return bad(); return it->second.mat; }
+    case M_SPH_RADIUS: { auto it = Bk.cols.find(static_cast<unsigned char*>(obj)); if (it == Bk.cols.end() || !it->second.sphere) return bad(); unsigned char* b = box(); setF(b, 16, static_cast<float>(it->second.radius)); return b; }
+    case M_MAT_BOUNCE: case M_MAT_DYN: case M_MAT_STAT: case M_MAT_BCOMB: case M_MAT_FCOMB: {
+        auto it = Bk.mats.find(static_cast<unsigned char*>(obj)); if (it == Bk.mats.end()) return bad();
+        unsigned char* b = box(); const Mat& mm = it->second;
+        if (m->id == M_MAT_BOUNCE) setF(b, 16, static_cast<float>(mm.bounce));
+        else if (m->id == M_MAT_DYN) setF(b, 16, static_cast<float>(mm.dyn));
+        else if (m->id == M_MAT_STAT) setF(b, 16, static_cast<float>(mm.stat));
+        else { const int v = m->id == M_MAT_BCOMB ? mm.bcomb : mm.fcomb; std::memcpy(b + 16, &v, 4); }
+        return b;
+    }
+    case M_GOAL_RIM: { int g = -1; for (int i = 0; i < 2; ++i) if (obj == Bk.goal[i]) g = i; if (g < 0) return bad(); return boxVec(Bk.ring[g][0], Bk.ring[g][1] + Bk.ringDataDy, Bk.ring[g][2]); }
+    case M_GOAL_BOARD: { int g = -1; for (int i = 0; i < 2; ++i) if (obj == Bk.goal[i]) g = i; if (g < 0) return bad(); const Node& n = Bk.nodes[Bk.board[g]]; return boxVec(n.pos[0], n.pos[1] + Bk.boardDataDy, n.pos[2]); }
+    case M_GMAN_INSTANCE2: return Bk.hideManager ? nullptr : Bk.gman;
     }
     return bad();
 }

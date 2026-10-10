@@ -154,6 +154,15 @@ int main() {
         setAimInfo(0, "", "");
         click(tzpanel::HIT_TOGGLE_AIM);
         std::printf("T7s aimAsk on=%d\n", aimAsk().on ? 1 : 0);
+        std::printf("T7x default bank=%d\n", aimAsk().bank ? 1 : 0);
+        click(tzpanel::HIT_TOGGLE_AIMBANK);
+        std::printf("T7y after the Bank click on=%d bank=%d\n", aimAsk().on ? 1 : 0, aimAsk().bank ? 1 : 0);
+        click(tzpanel::HIT_TOGGLE_AIM);
+        std::printf("T7z after the Aimbot click on=%d bank=%d\n", aimAsk().on ? 1 : 0, aimAsk().bank ? 1 : 0);
+        click(tzpanel::HIT_TOGGLE_AIMBANK);
+        std::printf("T7zb after the second Bank click on=%d bank=%d\n", aimAsk().on ? 1 : 0, aimAsk().bank ? 1 : 0);
+        click(tzpanel::HIT_TOGGLE_AIMBANK);
+        std::printf("T7zc both off again on=%d bank=%d\n", aimAsk().on ? 1 : 0, aimAsk().bank ? 1 : 0);
         state().tab = 0; state().aimOn = false; state().aimCapM = 50; state().scanState = 0; markDirty();
     }
     // the dot is not shown when pointing away; sample with invalid hands is harmless
@@ -210,6 +219,11 @@ check "Basketball page: clicking 'Hold Y to aim' turns it off and changes nothin
 check "Basketball page: clicking it again turns it back on" 'grep -q "^T7v holdY after second click=1" <<<"$out"'
 check "Basketball page: the game part can show its state and last shot in the menu" 'grep -q "^T7w aimLinkState=1 head=.connected - waiting for your shot. last=.shot #1: AIMED from 14 m - SCORED, 0.03 m off centre." <<<"$out"'
 check "Basketball page: the switch turns off again" 'grep -q "^T7s aimAsk on=0" <<<"$out"'
+check "Basketball page: Aimbot Bank starts off" 'grep -q "^T7x default bank=0" <<<"$out"'
+check "Basketball page: the Bank switch turns Bank on (read back through aimAsk), the Aimbot stays off" 'grep -q "^T7y after the Bank click on=0 bank=1" <<<"$out"'
+check "Basketball page: the Aimbot switch turns the Aimbot on and Bank off (one mode at a time)" 'grep -q "^T7z after the Aimbot click on=1 bank=0" <<<"$out"'
+check "Basketball page: the Bank switch turns Bank on and the Aimbot off" 'grep -q "^T7zb after the second Bank click on=0 bank=1" <<<"$out"'
+check "Basketball page: ... and Bank turns off again" 'grep -q "^T7zc both off again on=0 bank=0" <<<"$out"'
 check "no hand data: no dot" 'grep -q "^T7h onMenu=0" <<<"$out"'
 check "menu open: the game sees blanked buttons/triggers/sticks, connection byte kept" 'grep -q "^T8a open: buttons=0000 triggers=00 sticks=00 connected=ab tail=ab" <<<"$out"'
 check "just after closing: still blanked for a moment" 'grep -q "^T8b just closed (grace): buttons=00" <<<"$out"'

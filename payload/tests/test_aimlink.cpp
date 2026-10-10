@@ -198,7 +198,7 @@ int main(int, char** argv) {
     {
         Rig r; r.start(); r.link->setAsk(true, 50);               // 50 = Unlimited
         r.connect(); r.run(0.5);
-        throwFrom(0, 1.6, 12.66 - 44.0, 0, 12.66, 50, 15.0, 0.0);      // 44 m from the north hoop, thrown far too weakly
+        throwFrom(-44.0, 1.6, 12.66, 0, 12.66, 50, 15.0, 0.0);        // 44 m from the north hoop (from the side: from behind the other hoop its backboard would block the ball), thrown far too weakly
         r.run(8.0); r.settle(0.2);
         double s[10]; state(s);
         CHECK("44 m with Unlimited: aimed and scored", r.link->counters().aimed == 1 && s[8] == 1);

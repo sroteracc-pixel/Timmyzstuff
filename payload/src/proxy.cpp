@@ -670,7 +670,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D8c: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot (switch, distance slider, FIRST VERSION of the part that really aims the ball - not yet proven in the real game) + ball-and-hoops scan)");
+    fact("Timmyzstuff facts (stage D9: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot (switch, distance slider, Hold Y) and the new AIMBOT BANK mode (bank shots off the backboard - FIRST VERSION, not yet proven in the real game) + ball-and-hoops scan)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -910,14 +910,21 @@ void* probeMain(void*) {
 #ifdef TZ_FAST_TEST
             if (const char* e = std::getenv("TZ_TEST_AIM")) { float cap = 50; std::sscanf(e, "%f", &cap); aim.on = now >= 3.0; aim.capM = cap; const char* y = std::getenv("TZ_TEST_AIM_Y"); aim.holdY = y && y[0] == '1'; }     // PC test only: "TZ_TEST_AIM=23" = switch on at 23 m from 3 s on ("hold Y to aim" off unless TZ_TEST_AIM_Y=1)
 #endif
-            gAim.setAsk(aim.on, aim.capM, aim.holdY);
-            const int aimUi = aim.on ? gAim.uiState() : 0;
-            tzoverlay::setAimInfo(aimUi, aim.on ? gAim.headline().c_str() : "", gAim.lastShotText().c_str());
-            static bool lastOn = false, lastHoldY = true; static float lastCap = -1; static int aimLogs = 0; static double lastAimLog = -10;
-            if ((aim.on != lastOn || (aim.on && aim.holdY != lastHoldY) || (aim.on && aim.capM != lastCap && now - lastAimLog > 1.0)) && aimLogs < 30) {
-                ++aimLogs; lastOn = aim.on; lastCap = aim.capM; lastHoldY = aim.holdY; lastAimLog = now;
-                fact("aimbot: menu asks aimbot=%s, max shot distance=%s, hold Y to aim=%s  [stage D8c: when ON, a throw that the rules accept (and, with 'hold Y to aim' ON, while Y is held) gets a new launch speed; the link reports every throw below]",
-                     aim.on ? "ON" : "off", tzaim::capLabel(aim.capM).c_str(), aim.holdY ? "ON" : "off");
+#ifdef TZ_FAST_TEST
+            if (std::getenv("TZ_TEST_AIM") && std::getenv("TZ_TEST_AIM_BANK") && now >= 3.0) { aim.bank = std::getenv("TZ_TEST_AIM_BANK")[0] == '1'; aim.on = !aim.bank; }       // PC test only: "TZ_TEST_AIM_BANK=1" = Aimbot Bank instead of the Direct Aimbot
+#endif
+            // stage D9: one mode at a time. The menu never turns both switches on; if both were on, NEITHER is used (nothing is guessed).
+            const int aimMode = (aim.bank && !aim.on) ? 2 : ((aim.on && !aim.bank) ? 1 : 0);
+            gAim.setAsk(aimMode, aim.capM, aim.holdY);
+            const bool aimAny = aimMode != 0;
+            const int aimUi = aimAny ? gAim.uiState() : 0;
+            tzoverlay::setAimInfo(aimUi, aimAny ? gAim.headline().c_str() : "", gAim.lastShotText().c_str());
+            static int lastMode = 0; static bool lastHoldY = true; static float lastCap = -1; static int aimLogs = 0; static double lastAimLog = -10;
+            if ((aimMode != lastMode || (aimAny && aim.holdY != lastHoldY) || (aimAny && aim.capM != lastCap && now - lastAimLog > 1.0)) && aimLogs < 30) {
+                ++aimLogs; lastMode = aimMode; lastCap = aim.capM; lastHoldY = aim.holdY; lastAimLog = now;
+                fact("aimbot: menu asks aimbot=%s, max shot distance=%s, hold Y to aim=%s  [stage D9: when ON, a throw that the rules accept (and, with 'hold Y to aim' ON, while Y is held) gets a new launch speed; the link reports every throw below]%s",
+                     aimMode == 1 ? "ON (Direct)" : (aimMode == 2 ? "ON (BANK)" : "off"), tzaim::capLabel(aim.capM).c_str(), aim.holdY ? "ON" : "off",
+                     (aim.on && aim.bank) ? " | BOTH switches were on: neither is used" : (aimMode == 2 ? " | BANK = off the front of the backboard first, or 'Bank unavailable' and the throw is left exactly as thrown (never a direct shot)" : ""));
             }
             // the game part's own numbers: whenever its state changes and then every 20 seconds while the switch is on (never more than 60 lines)
             // ... and also whenever a throw was judged as a shot or its flight ended (the numbers change then)
@@ -978,7 +985,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D8c: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot with game link)");
+    logf_("payload loaded (stage D9: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot with game link)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

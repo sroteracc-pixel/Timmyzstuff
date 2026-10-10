@@ -616,6 +616,10 @@ bool loadApi(void* lib, Api* out, std::string* missing) {
     want(out->class_get_method_from_name, "il2cpp_class_get_method_from_name");
     want(out->resolve_icall, "il2cpp_resolve_icall");
     want(out->thread_current, "il2cpp_thread_current");
+    want(out->object_get_class, "il2cpp_object_get_class");
+    want(out->class_get_type, "il2cpp_class_get_type");
+    want(out->type_get_object, "il2cpp_type_get_object");
+    want(out->method_get_param, "il2cpp_method_get_param");
     return ok;
 }
 

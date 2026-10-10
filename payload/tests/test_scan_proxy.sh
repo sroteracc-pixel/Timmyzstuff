@@ -8,7 +8,7 @@ pass=0; failn=0
 check() { if eval "$2"; then pass=$((pass+1)); echo "  PASS  $1"; else failn=$((failn+1)); echo "  FAIL  $1"; fi; }
 
 g++ -std=c++17 -shared -fPIC -fvisibility=hidden -I"$HERE/fake_jni" -I"$HERE/../src" -I"$HERE/../../menu/src" -DTZ_FAST_TEST \
-  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/movement.cpp" "$HERE/../src/game_link.cpp" "$HERE/../src/aimbot.cpp" "$HERE/../src/aim_link.cpp" "$HERE/../src/il2cpp_scan.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" "$HERE/../../menu/src/menu_input.cpp" \
+  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/movement.cpp" "$HERE/../src/game_link.cpp" "$HERE/../src/aimbot.cpp" "$HERE/../src/aim_link.cpp" "$HERE/../src/aim_bank.cpp" "$HERE/../src/bank.cpp" "$HERE/../src/il2cpp_scan.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" "$HERE/../../menu/src/menu_input.cpp" \
   -ldl -pthread -Wl,--version-script="$HERE/../exports.map" -o "$W/libmain.so" || exit 2
 echo 'extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void*, void*) { return 0x00010006; }' > "$W/orig.cpp"
 g++ -shared -fPIC "$W/orig.cpp" -o "$W/libmain_orig.so"
@@ -90,7 +90,7 @@ check "scan wrote a field hit and a type hit" 'grep -q "^scan: field-hit Game.Ga
 check "scan finished OK" 'grep -q "^--- scan finished: ok ---" "$F" && grep -q "^scan: DONE" "$F"'
 check "the index and the full detail of the important class are written" 'grep -q "^scan: index Game.MobilePlayerLocomotion" "$F" && grep -q "^scan: CLASS Game.MobilePlayerLocomotion" "$F" && grep -q "method SetJumpHeight(1) : System.Void rva=" "$F"'
 check "the running copy was found in memory and its values written" 'grep -q "^scan: live Game.MobilePlayerLocomotion #1 size=80" "$F" && grep -q "^scan:   live _maxSpeed = 4.25 " "$F" && grep -q "^scan:   live _jumpHeight = 1.5 " "$F"'
-check "the facts header says stage D8" 'head -1 "$F" | grep -q "stage D8"'
+check "the facts header says stage D9" 'head -1 "$F" | grep -q "stage D9"'
 check "no memory addresses written (no 0x)" '! grep -q "0x" "$F"'
 check "progress lines for every step are written" 'grep -q "^scan: step 3 of 6" "$F" && grep -q "^scan: step 4 done" "$F" && grep -q "^scan: step 5 done: 4 class" "$F" && grep -q "^scan: step 6 of 6" "$F"'
 check "the memory search line tells the pipe size and trouble count" 'grep -q "^scan: memory search read .* copy pipe=[0-9]* bytes (chunk [0-9]* KB); .*copy trouble=0" "$F"'
@@ -199,9 +199,9 @@ echo "== stage D7: the Aimbot switch is on at 23 m, then at Unlimited (pretend m
 runscan aim TZ_SAMPLE_MS=7000 TZ_TEST_AIM=23 "HOST_WAIT_LINE=aimbot: menu asks aimbot=ON"
 F10="$W/aim.txt"
 check "game still starts (65542)" '[[ "$out_last" == *"RESULT=65542"* ]]'
-check "the facts say what the Aimbot page asks (stage D8 text)" 'grep -q "^aimbot: menu asks aimbot=ON, max shot distance=23 m, hold Y to aim=off  \[stage D8c: when ON, a throw that the rules accept .*gets a new launch speed; the link reports every throw below\]" "$F10"'
+check "the facts say what the Aimbot page asks (stage D8 text)" 'grep -q "^aimbot: menu asks aimbot=ON (Direct), max shot distance=23 m, hold Y to aim=off  \[stage D9: when ON, a throw that the rules accept .*gets a new launch speed; the link reports every throw below\]" "$F10"'
 check "the Aimbot does not wake the movement link (no link lines)" '! grep -q "^link: " "$F10" && ! grep -q "^movement: " "$F10"'
 runscan aim50 TZ_SAMPLE_MS=7000 TZ_TEST_AIM=50 "HOST_WAIT_LINE=aimbot: menu asks aimbot=ON"
-check "at 50 the facts say Unlimited" 'grep -q "^aimbot: menu asks aimbot=ON, max shot distance=Unlimited, hold Y to aim=off " "$W/aim50.txt"'
+check "at 50 the facts say Unlimited" 'grep -q "^aimbot: menu asks aimbot=ON (Direct), max shot distance=Unlimited, hold Y to aim=off " "$W/aim50.txt"'
 
 echo; echo "passed: $pass  failed: $failn"; [ "$failn" -eq 0 ]

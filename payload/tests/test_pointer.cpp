@@ -364,6 +364,22 @@ int main() {
             CHECK("clicking it turns it off, asks for a save (it is a setting), and changes nothing else", !m.aimHoldY && jo.saveNeeded && !m.aimOn && m.aimCapM == 50.0f && !m.speedOn && !m.jumpOn);
             click(mi, m, HIT_TOGGLE_AIMY);
             CHECK("... and on again", m.aimHoldY); }
+        // stage D9: Aimbot Bank. Only one aimbot mode can be on at a time.
+        CHECK("the page has the 'Aimbot Bank' switch, and it starts OFF", find(h, HIT_TOGGLE_AIMBANK).id != 0 && !fresh.aimBank && !m.aimBank);
+        {   const HitRect br = find(hitsFor(m), HIT_TOGGLE_AIMBANK); const float bx = br.x + br.w / 2, by = br.y + br.h / 2;
+            step(mi, m, bx, by, 0.0f); const Outcome bo = step(mi, m, bx, by, 0.9f); step(mi, m, bx, by, 0.0f);
+            CHECK("clicking Aimbot Bank turns it on; it is not saved (an effect, like the Aimbot) and nothing else changes", m.aimBank && !m.aimOn && !bo.saveNeeded && m.aimHoldY && m.aimCapM == 50.0f && !m.speedOn && !m.jumpOn && m.gravityMode == 0);
+            click(mi, m, HIT_TOGGLE_AIM);
+            CHECK("turning the Aimbot on turns Aimbot Bank OFF in the same click", m.aimOn && !m.aimBank);
+            click(mi, m, HIT_TOGGLE_AIMBANK);
+            CHECK("turning Aimbot Bank on turns the Aimbot OFF in the same click", m.aimBank && !m.aimOn);
+            click(mi, m, HIT_TOGGLE_AIMBANK);
+            CHECK("clicking Aimbot Bank again: both are off", !m.aimBank && !m.aimOn);
+            unsigned lcg = 12345; bool never = true; int flips = 0;
+            for (int i = 0; i < 300; ++i) { lcg = lcg * 1103515245u + 12345u; const int id = ((lcg >> 16) & 1) ? HIT_TOGGLE_AIM : HIT_TOGGLE_AIMBANK; click(mi, m, id); if (m.aimOn && m.aimBank) never = false; if (m.aimOn || m.aimBank) ++flips; }
+            CHECK("300 clicks on the two switches in a random order: the two are NEVER on together", never && flips > 100);
+            if (m.aimOn) click(mi, m, HIT_TOGGLE_AIM); if (m.aimBank) click(mi, m, HIT_TOGGLE_AIMBANK);
+            CHECK("(both off again)", !m.aimOn && !m.aimBank); }
 
         // dragging the slider: far left, far right, and every position on the way is a whole number between 5 and 50
         const std::vector<HitRect> bh = hitsFor(m);
@@ -439,6 +455,8 @@ int main() {
         PanelState b; const bool ok = settingsFromText(txt, b);
         CHECK("the aimbot distance is saved and comes back exactly (23 m)", ok && b.aimCapM == 23.0f && txt.find("aimdistance=23\n") != std::string::npos);
         CHECK("the Aimbot SWITCH is never saved: it starts OFF next time", !b.aimOn && txt.find("aimon") == std::string::npos && txt.find("aimbot") == std::string::npos);
+        { PanelState bk; bk.aimBank = true; const std::string bt = settingsToText(bk); PanelState b2; settingsFromText(bt, b2);
+          CHECK("the Aimbot Bank SWITCH is never saved either: it starts OFF next time", !b2.aimBank && bt.find("bank") == std::string::npos); }
         PanelState u; u.aimCapM = 50; CHECK("Unlimited (50) is saved as aimdistance=50", settingsToText(u).find("aimdistance=50\n") != std::string::npos);
         PanelState g; settingsFromText("aimdistance=3\naimdistance=99\naimdistance=abc\n", g);
         CHECK("out-of-range or garbage distances are ignored (stays Unlimited)", g.aimCapM == 50.0f);

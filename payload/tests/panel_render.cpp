@@ -45,5 +45,13 @@ int main(int argc, char** argv) {
         b.aimLastShot = "shot #1: not aimed - 31 m is farther than your 20 m limit and some more words that cannot fit";
         drawPanel(c, b, nullptr); save(argv[9], c);
     }
+    if (argc > 11) {   // stage D9: Aimbot Bank switch on (the Aimbot switch is off), connected, and a shot where the bank shot was not possible
+        PanelState a; a.tab = kTabBasketball; a.aimBank = true; a.aimLinkState = 1; a.aimCapM = 30;
+        a.aimHeadline = "Bank: connected - waiting for your shot"; a.aimLastShot = "shot #2: BANK from 7 m - SCORED, 0.04 m off centre";
+        drawPanel(c, a, nullptr); save(argv[10], c);
+        PanelState b; b.tab = kTabBasketball; b.aimBank = true; b.aimLinkState = 1; b.hover = HIT_TOGGLE_AIMBANK;
+        b.aimHeadline = "Bank: connected - waiting for your shot"; b.aimLastShot = "shot #3: Bank unavailable - too close to the backboard";
+        drawPanel(c, b, nullptr); save(argv[11], c);
+    }
     return 0;
 }

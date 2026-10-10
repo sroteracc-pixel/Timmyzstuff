@@ -1,4 +1,96 @@
-# Aimbot (stage D8c - it works; now it only activates while you hold Y)
+# Aimbot + Aimbot Bank (stage D9)
+
+**Stage D9 adds a second switch, "Aimbot Bank"** (Menu -> Basketball). The first Aimbot (direct shots) is **unchanged**. Read the "Aimbot Bank (stage D9)" part right below first,
+then the older parts (D8c) for the direct Aimbot.
+
+## Aimbot Bank (stage D9)
+
+**Short version:** with **Aimbot Bank** ON and **Y held** when you let go of the ball, the mod works out a throw that hits the **front of the backboard**, bounces off it, and **drops into the hoop**.
+If a bank shot is **not possible** from where you stand, it does **not** shoot a direct shot for you. Your throw stays exactly as you threw it, and the Basketball page shows **"Bank unavailable - <reason>"** in amber.
+
+**Honest status: the whole thing was tested only on a PC against a PRETEND game. It has never run in your real game.** Everything below says which numbers come from the real game (the mod reads them while you play) and which are untested guesses.
+
+### The rules of the two switches
+- **Only one Aimbot mode at a time.** Turning Aimbot Bank ON turns the direct Aimbot OFF, and the other way round. They can also both be OFF. (Tested: 300 clicks on the two switches in random order - they were never ON together.)
+- Both start **OFF** every time the game starts (never saved, on purpose, same as before).
+- **Max shot distance** and **Hold Y to aim** work for **both** modes. (For Bank, the distance is measured to the hoop, the same as for the direct Aimbot.)
+- Dribbles, drops and flat passes are ignored in Bank mode too (not shots, no calculation, no "Bank unavailable").
+
+### Nothing is guessed - the mod reads these from the game at the moment of the shot
+The mod measures all of this in the real game while you play, and writes it into the facts file (`bank inputs` line) so I can check it:
+| What | Where it comes from |
+|---|---|
+| Backboard position, direction it faces, width and height | the game's `BasketballGoal` object (`_backboardCenter`, `_backboardNormal`, `_backboardSize`, `_backboardOffset`) and the board's own collider box. The mod only trusts the collider if its size and place match the board. |
+| Ring centre and ring radius | the game's `_rimCenter` and `_rimRadius` (your lobby file: radius 0.2286 m, hoops at (0, 3.1, +-12.66)) |
+| Ball size | the radius of the ball's own collider times its scale |
+| Gravity, air drag, physics step | read from the engine (as in D8) |
+| Bounciness and friction of the ball AND the board | the physics materials of the ball and the board, **mixed the way the engine mixes them** (average / minimum / multiply / maximum, found by name at run time). If the board has no material, the engine's default (0.6 / 0.6) is used and the facts file says so. |
+| Ball spin | read from the ball's body (or assumed zero if it cannot be read - the file says "assumed") |
+| The game's own number for the bounce | `BasketballProperties` runtime values, written as a cross-check (`bank cross-check`) |
+
+### How the bank shot is chosen
+1. It tries about 150 flight times. For each one it works out where on the board the ball must touch, so that after the bounce (bounciness, friction and spin included) it falls through the middle of the ring.
+2. It simulates every candidate **step by step the way the engine moves the ball** (gravity, drag, move), including the ball being wider than its centre (it checks that the ball's whole surface stays clear of the rim until the ball is below the ring).
+3. It throws a candidate away if any of these is true (each has a plain-words reason, shown in the menu and the file):
+   - the ball would not hit the **front** of the board, or would hit within 8 cm of the board's edge, or would reach the ring without touching the board at all;
+   - it would hit the board gently (below 1.2 m/s or below 1.15 times the engine's bounce threshold) so it might not bounce;
+   - it needs a launch faster than 26 m/s, a launch angle outside 25-85 degrees, or a lob more than 4.5 m above the ring;
+   - it comes down into the ring flatter than 40 degrees, or touches the rim (needs 1.2 cm spare);
+   - you are standing so far sideways that the ball would meet the board at more than 70 degrees sideways;
+   - it only works if the bounce is exactly right: it is run 8 more times with a slightly different bounce/friction, and at least 60 % of them must still score.
+4. Of the candidates that survive it picks the best-scoring one: most spare room at the rim, holds up best when the bounce is a little different, steeper entry, lower speed, lower arc, and a small preference for a launch angle like the one you threw. It then sets the ball's speed (once, then reads it back to check) - same way as the direct Aimbot.
+5. The whole calculation takes about 2-6 ms on a PC (the headset is slower). It has a time limit (6 ms once something good is found, 36 ms at most); if it runs out with nothing solid, it says "ran out of time working it out (try again)" - that is different from "impossible". (When my computer was very busy, one test hit this limit once, so on a slow headset it can happen. If you see it often, tell me.)
+
+### When it shows "Bank unavailable"
+The reason is written next to it. Examples:
+- **too close to the backboard** (less than about 0.9 m from the board's front)
+- **you are behind the backboard**
+- **angle too sideways to reach the board**
+- **no safe bank shot from this spot** (with the main blocker, for example "the ball would reach the ring without touching the board", "the lob would go too high", "it needs a launch faster than the limit", "it is too sensitive to small differences in the bounce")
+- **ran out of time working it out (try again)** (the calculation hit its time limit; the throw is left alone)
+- **I cannot measure the backboard / I cannot find that hoop's goal / the game's backboard code is not ready yet** (the mod could not read the real game's data - then it never guesses)
+In all of these the throw is **left exactly as you threw it**. There is no direct-shot fallback. (In the PC tests, a far shot of about 12.8 m was "unavailable" and its throw stayed untouched.)
+
+**Where you see it.** In the **menu** (Basketball page, amber line: "shot #7: Bank unavailable - too close to the backboard") and in the **facts file**.
+I did **not** add a floating message in the game view: the overlay only exists while the menu is open, and a floating panel would block the game's input. If you want that, tell me and we decide how.
+
+### What was VERIFIED (on the PC, against a pretend game with my own independent physics)
+- The two switches: only one ON at a time, in every order, with fast taps, with Y; the direct Aimbot is unchanged (all old tests still pass: 13 older test files).
+- The bank maths: **324 checks**, including 300 random scenes (bounce 0.35-0.9, friction 0-0.7, ball radius 0.10-0.15 m, spin, physics step 1/60-1/90 s, from the wing to 1.5 m from the baseline): 232 plans found, 68 refusals, **no plan came within 18.8 mm of the rim**, solve time 1.7 ms on average (worst 6 ms).
+- The game-reading part (`aim_bank.cpp`, **243 checks**) against a pretend `libil2cpp`: it finds the goal, the board, the materials; bank shots from most spots 3-11 m in front of **both** hoops hit the board once, did not touch the pole or the rim, and scored; every "unavailable" case leaves the throw alone; the test mode says WOULD BANK and changes nothing.
+- Memory and thread checks (AddressSanitizer / ThreadSanitizer) on the new code.
+
+### What I could NOT verify (guesses - any can make the first real test fail)
+1. **The real backboard.** I read it from the game's fields and its collider, but I have never seen your real game's numbers. The first shot's `bank inputs` line shows what it measured: board centre, normal, width, height, and how it was found ("by the board's own collider" / "from the fields only").
+2. **The real bounce.** Whether the real engine mixes the materials like I do, and whether the game changes the ball's speed itself when it hits the board (some games add their own "bank assist" - the report prints `_lastBankAssistInTime` and `_assistInGoal` before and after, and "THE GAME CHANGED OUR SPEED" if it overrides us).
+3. **Spin.** Real throws have backspin. If the mod cannot read it, it assumes none and the file says "(assumed)". Spin changes the bounce, so shots may land a little off.
+4. **The size of the real error.** The pretend game uses my own physics, so it agrees with my maths by construction. The real game may bounce differently, and then the ball goes in a different spot. That is why each bank shot writes `MEASURED BOUNCE` (speed into the board vs out, versus what the plan used) and flight samples around the touch - they let me correct the numbers.
+5. **The rim.** I use the ring radius from the game and treat the rim wire as very thin, keeping 1.2 cm spare. If the real rim is thicker, close shots may clip it.
+6. **Network.** Online, the other players' game may not see the bounce the same way. Same warning as at the end of this file.
+7. **Y button, ceiling, official matches:** same open points as for the direct Aimbot below.
+
+### Bank test plan - try it from several positions (the hoop you throw at is the one you aim at)
+Do these with **Aimbot Bank ON, Hold Y to aim ON**, and hold **Y** while you let go. After each shot read the amber/white "last shot" line on the Basketball page.
+1. **Straight in front, about 6 m from the board** (middle of the court, facing the hoop). Expected: "BANK from ~6 m - hits the board ~0 m off centre". The ball should touch the front of the board once, then drop in.
+2. **Left wing, about 45 degrees, 6-8 m.** Expected: bank shot, touching the board on the side you are on.
+3. **Right wing, about 45 degrees, 6-8 m.** The same, mirrored.
+4. **Farther back, 9-11 m, straight on.** Expected: a higher arc, still a bank. If it says "Bank unavailable", write down the reason - that is useful data.
+5. **Near the baseline, to the side of the board, about 11 m from the hoop.** Expected: probably "Bank unavailable - angle too sideways ..." and your throw untouched. Both answers are fine, please tell me what you got.
+6. **Very close, under 1 m from the board.** Expected: "Bank unavailable - too close to the backboard".
+7. **Far, 12 m or more.** Expected: "Bank unavailable" (needs too much speed or lob). Your throw must stay your throw.
+8. **Behind the board** (behind the hoop). Expected: "Bank unavailable - you are behind the backboard".
+9. **Y not held:** shoot once or twice without Y. Expected: "not aimed - hold Y to aim", your own throw.
+10. **Switching:** turn Aimbot Bank ON -> the direct Aimbot switch must turn OFF. Turn the direct Aimbot ON -> Bank turns OFF. Then shoot a direct shot: it must work as before (no board touch needed).
+11. **Distance limit:** set Max shot distance to 8 m and shoot a bank shot from 12 m: it must be "not aimed" (farther than your limit).
+12. **Movement** still works (speed, jump, gravity).
+13. Press **Get facts** and send me the file, plus for each shot: where you stood (rough), what you SAW (touched the board? where did it go?), and what the last-shot line said.
+
+**What I need back:** the facts file lines starting `aim: SHOT #n bank inputs`, `bank cross-check`, `bank check` (it has `MEASURED BOUNCE`) and `decision: BANK SHOT`. The summary line ends with `BANK shots N (scored N, missed N), Bank unavailable N`.
+If a bank shot goes wrong, **tell me the position and what the ball did** (missed the board? hit it too low/high? bounced too far? hit the rim?). The measured bounce and flight samples tell me which number to fix.
+
+---
+
+# Aimbot (direct shots) - stage D8c: it works; it only activates while you hold Y
 
 **Short version:** the Aimbot has a real connection to the game's ball. When you let go of a ball **while holding Y**, it works out the speed that makes the ball fall into the hoop
 you are aiming at, and sets that speed on the ball. If you are not holding Y, or the hoop is farther than your "Max shot distance", it does nothing and your throw stays exactly as you threw it.

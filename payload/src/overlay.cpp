@@ -382,7 +382,7 @@ MovementAsk movementAsk() {
 
 AimAsk aimAsk() {
     std::lock_guard<std::mutex> g(gMutex);
-    return AimAsk{gState.aimOn, gState.aimCapM, gState.aimHoldY};
+    return AimAsk{gState.aimOn, gState.aimCapM, gState.aimHoldY, gState.aimBank};
 }
 
 bool inputBlocked() { return gShow.load(std::memory_order_acquire) || nowMs() < gMaskUntilMs.load(std::memory_order_relaxed); }

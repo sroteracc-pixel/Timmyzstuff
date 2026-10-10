@@ -572,6 +572,7 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
             c.strokeRoundRect(tx, ty0, tw, th, th / 2, hvT ? 2.2f : 1.4f, on ? accentHi : (hvT ? withA(accentHi, 0.9f) : rgba(84, 84, 104)));
             c.fillCircle(on ? tx + tw - th / 2 : tx + th / 2, ty0 + th / 2, th / 2 - 4, rgba(250, 250, 255));
             if (hits) hits->push_back({HIT_TOGGLE_AIM, tx - 14, ry + 4, tw + 28, 52});
+            const bool slOn = s.aimOn || s.aimBank;       // the distance limit works for both modes
             // max shot distance slider (5 m ... 50 m, 50 = Unlimited)
             c.text(kFontSmall, rx + 22, ry + 62, "Max shot distance", grey);
             const std::string label = aimCapText(s.aimCapM);
@@ -581,14 +582,29 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
             const bool hot = s.dragSlider == HIT_SLIDER_AIMCAP || s.hover == HIT_SLIDER_AIMCAP;
             c.fillRoundRect(sx0, sy - 5, sx1 - sx0, 10, 5, rgba(14, 14, 20));
             c.strokeRoundRect(sx0, sy - 5, sx1 - sx0, 10, 5, 1.2f, rgba(52, 52, 68));
-            if (kx - sx0 > 1) c.fillRoundRectGradient(sx0, sy - 5, std::max(10.0f, kx - sx0), 10, 5, on ? accentHi : rgba(110, 110, 130), on ? accent : rgba(84, 84, 104));
+            if (kx - sx0 > 1) c.fillRoundRectGradient(sx0, sy - 5, std::max(10.0f, kx - sx0), 10, 5, slOn ? accentHi : rgba(110, 110, 130), slOn ? accent : rgba(84, 84, 104));
             if (hot) c.glowRoundRect(kx - 10, sy - 10, 20, 20, 10, 10, withA(accentHi, 0.7f));
             c.fillCircle(kx, sy, hot ? 13.5f : 11.5f, rgba(250, 250, 255));
-            c.strokeCircle(kx, sy, hot ? 13.5f : 11.5f, 3, on ? (hot ? accentHi : accent) : rgba(120, 120, 140));
-            c.text(kFontLabel, rx + rw - 22 - c.textWidth(kFontLabel, label), sy + 8, label, on ? accentHi : grey);
+            c.strokeCircle(kx, sy, hot ? 13.5f : 11.5f, 3, slOn ? (hot ? accentHi : accent) : rgba(120, 120, 140));
+            c.text(kFontLabel, rx + rw - 22 - c.textWidth(kFontLabel, label), sy + 8, label, slOn ? accentHi : grey);
             c.text(kFontTiny, rx + 22 + c.textWidth(kFontSmall, "Max shot distance") + 14, ry + 61,
                    s.aimCapM >= kAimMax - 0.5f ? "no limit: it works from anywhere" : "farther than this: your throw is left alone", dimGrey);
             if (hits) hits->push_back({HIT_SLIDER_AIMCAP, sx0 - 16, ry + 66, sx1 - sx0 + 32, 34});
+            y += rh + 8;
+        }
+        // ---- stage D9: "Aimbot Bank" switch (the ball hits the front of the backboard first). Only one of the two Aimbot switches can be on.
+        {
+            const float ry = y, rh = 60;
+            const bool on = s.aimBank, hvT = s.hover == HIT_TOGGLE_AIMBANK;
+            c.fillRoundRect(rx, ry, rw, rh, 16, card);
+            c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, on ? withA(accentHi, 0.7f) : cardEdge);
+            c.text(kFontLabel, rx + 22, ry + 30, "Aimbot Bank", on ? white : rgba(222, 222, 234));
+            c.text(kFontTiny, rx + 22, ry + 50, on ? "bank shot: off the front of the backboard (the other Aimbot is off)" : "the ball bounces off the backboard and drops in", dimGrey);
+            const float tw = 66, th = 32, tx = rx + rw - tw - 22, ty0 = ry + (rh - th) / 2;
+            c.fillRoundRect(tx, ty0, tw, th, th / 2, on ? accent : rgba(58, 58, 74));
+            c.strokeRoundRect(tx, ty0, tw, th, th / 2, hvT ? 2.2f : 1.4f, on ? accentHi : (hvT ? withA(accentHi, 0.9f) : rgba(84, 84, 104)));
+            c.fillCircle(on ? tx + tw - th / 2 : tx + th / 2, ty0 + th / 2, th / 2 - 4, rgba(250, 250, 255));
+            if (hits) hits->push_back({HIT_TOGGLE_AIMBANK, tx - 14, ry + 4, tw + 28, rh - 8});
             y += rh + 8;
         }
         // ---- "Hold Y to aim" switch (stage D8c)
@@ -620,9 +636,10 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
                 ls == 1 ? "Connected. Shoot a ball and I will tell you what happened." :
                 ls == 2 ? "Looking for your ball in the game... a few seconds." :
                 ls == 3 ? "Could not connect. Press Get facts and send me the file." :
-                "Turn the Aimbot switch on and the menu connects to the game.";
-            c.text(kFontTiny, rx + 22, ry + 63, fitText(c, kFontTiny, head, textW), grey);
-            c.text(kFontSmall, rx + 22, ry + 88, fitText(c, kFontSmall, s.aimLastShot.empty() ? std::string("No throw seen yet.") : s.aimLastShot, textW), s.aimLastShot.empty() ? dimGrey : rgba(222, 222, 234));
+                "Turn the Aimbot or the Aimbot Bank switch on and the menu connects to the game.";
+            const bool bankNo = s.aimLastShot.find("Bank unavailable") != std::string::npos;      // a bank shot that was NOT possible stands out (amber): the throw was left as you threw it
+            c.text(kFontTiny, rx + 22, ry + 63, fitText(c, kFontTiny, head, textW), head.rfind("Bank unavailable", 0) == 0 ? rgba(255, 190, 80) : grey);
+            c.text(kFontSmall, rx + 22, ry + 88, fitText(c, kFontSmall, s.aimLastShot.empty() ? std::string("No throw seen yet.") : s.aimLastShot, textW), s.aimLastShot.empty() ? dimGrey : (bankNo ? rgba(255, 190, 80) : rgba(222, 222, 234)));
             const char* note =
                 s.scanState == 1 ? "Scanning... close the menu, pick up a ball, shoot once, hold a ball (about 1 min)." :
                 s.scanState == 2 ? "Scan done. Press Get facts in the patcher and send me the file." :

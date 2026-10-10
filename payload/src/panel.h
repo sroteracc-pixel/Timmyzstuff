@@ -95,7 +95,8 @@ struct PanelState {
     int scanMatches = 0;            // how many interesting classes the scan wrote down
 
     // ---- Basketball page (Aimbot). The switch is NEVER saved: every launch starts with it off. The distance IS saved. ----
-    bool aimOn = false;             // Aimbot switch
+    bool aimOn = false;             // Aimbot switch (Direct: the ball goes straight into the hoop you aim at)
+    bool aimBank = false;           // stage D9: "Aimbot Bank" switch (the ball hits the front of the backboard first and drops in). Never saved. Only one of aimOn / aimBank is ever on.
     float aimCapM = kAimDefault;    // max shot distance, 5 .. 50 m (50 = Unlimited)
     bool aimHoldY = true;           // "Hold Y to aim": the Aimbot acts only while the Y button is held as you let go of the ball. Starts ON; IS saved.
     int aimLinkState = 0;           // stage D8: 0 = off (switch off), 1 = connected to the game's ball, 2 = looking for your ball control, 3 = failed
@@ -125,6 +126,7 @@ enum HitId {
     HIT_TOGGLE_AIM = 47,            // Basketball page: Aimbot switch
     HIT_SCAN_SHOT = 48,             // Basketball page: "Scan ball and hoops" button
     HIT_TOGGLE_AIMY = 49,           // Basketball page: "Hold Y to aim" switch
+    HIT_TOGGLE_AIMBANK = 50,        // Basketball page: "Aimbot Bank" switch (stage D9)
     HIT_COLOR0 = 60,                // 60 .. 69 = the 10 colours
 };
 struct HitRect { int id; float x, y, w, h; };

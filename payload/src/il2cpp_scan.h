@@ -59,6 +59,11 @@ struct Api {
     void* (*resolve_icall)(const char* name) = nullptr;
     // optional, stage D8: "is the calling thread known to the game's runtime?" (null result = no, the thread must not call into the game)
     void* (*thread_current)() = nullptr;
+    // optional, stage D9 (Bank mode): the class of an object, the "System.Type" object of a class, and the type of one parameter of a method
+    void* (*object_get_class)(void* obj) = nullptr;
+    void* (*class_get_type)(void* klass) = nullptr;
+    void* (*type_get_object)(void* type) = nullptr;
+    void* (*method_get_param)(void* method, uint32_t index) = nullptr;
 };
 
 // Looks the functions up in an already loaded libil2cpp.so. `missing` lists required ones that were not found.
