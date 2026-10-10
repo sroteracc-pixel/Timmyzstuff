@@ -144,6 +144,14 @@ int main() {
         click(tzpanel::HIT_SCAN_SHOT);
         const bool a = takeShotScanRequest(), b = takeShotScanRequest(), c = takeScanRequest();
         std::printf("T7r shotScan first=%d second=%d movementScan=%d scanState=%d\n", a ? 1 : 0, b ? 1 : 0, c ? 1 : 0, state().scanState);
+        std::printf("T7t holdY default=%d\n", aimAsk().holdY ? 1 : 0);
+        click(tzpanel::HIT_TOGGLE_AIMY);
+        std::printf("T7u holdY after click=%d on=%d cap=%.0f\n", aimAsk().holdY ? 1 : 0, aimAsk().on ? 1 : 0, aimAsk().capM);
+        click(tzpanel::HIT_TOGGLE_AIMY);
+        std::printf("T7v holdY after second click=%d\n", aimAsk().holdY ? 1 : 0);
+        setAimInfo(1, "connected - waiting for your shot", "shot #1: AIMED from 14 m - SCORED, 0.03 m off centre");
+        std::printf("T7w aimLinkState=%d head='%s' last='%s'\n", state().aimLinkState, state().aimHeadline.c_str(), state().aimLastShot.c_str());
+        setAimInfo(0, "", "");
         click(tzpanel::HIT_TOGGLE_AIM);
         std::printf("T7s aimAsk on=%d\n", aimAsk().on ? 1 : 0);
         state().tab = 0; state().aimOn = false; state().aimCapM = 50; state().scanState = 0; markDirty();
@@ -197,6 +205,10 @@ check "Basketball page: the switch turns the aimbot on (read back through aimAsk
 check "Basketball page: dragging the slider to the far left gives 5 m" 'grep -q "^T7p aimAsk on=1 cap=5$" <<<"$out"'
 check "Basketball page: dragging to the far right gives 50 m (Unlimited)" 'grep -q "^T7q aimAsk on=1 cap=50$" <<<"$out"'
 check "Basketball page: the scan button asks for ONE ball scan and no movement scan" 'grep -q "^T7r shotScan first=1 second=0 movementScan=0 scanState=1" <<<"$out"'
+check "Basketball page: 'Hold Y to aim' starts ON" 'grep -q "^T7t holdY default=1" <<<"$out"'
+check "Basketball page: clicking 'Hold Y to aim' turns it off and changes nothing else" 'grep -q "^T7u holdY after click=0 on=1 cap=50" <<<"$out"'
+check "Basketball page: clicking it again turns it back on" 'grep -q "^T7v holdY after second click=1" <<<"$out"'
+check "Basketball page: the game part can show its state and last shot in the menu" 'grep -q "^T7w aimLinkState=1 head=.connected - waiting for your shot. last=.shot #1: AIMED from 14 m - SCORED, 0.03 m off centre." <<<"$out"'
 check "Basketball page: the switch turns off again" 'grep -q "^T7s aimAsk on=0" <<<"$out"'
 check "no hand data: no dot" 'grep -q "^T7h onMenu=0" <<<"$out"'
 check "menu open: the game sees blanked buttons/triggers/sticks, connection byte kept" 'grep -q "^T8a open: buttons=0000 triggers=00 sticks=00 connected=ab tail=ab" <<<"$out"'

@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <string>
 #include "aimbot.h"
 using namespace tzaim;
@@ -32,6 +33,30 @@ static Flight fly(Vec3 from, Vec3 vel, Vec3 to, float g) {
             const double k = (qy - to.y) / (qy - py);
             const double cx = qx + (px - qx) * k, cz = qz + (pz - qz) * k;
             f.crossed = true; f.missM = (float)std::sqrt((cx - to.x) * (cx - to.x) + (cz - to.z) * (cz - to.z));
+            f.entryDeg = (float)(std::atan2(-vy, std::sqrt(vx * vx + vz * vz)) * 180.0 / 3.14159265358979);
+            return f;
+        }
+        if (py < from.y - 200) break;
+    }
+    return f;
+}
+
+// Stage D8: an independent flight WITH drag, written here (not taken from the solver). Unity's step order: gravity, then drag, then move.
+// `sub` small steps per physics step; exact = true uses exp(-drag*h) instead of (1 - drag*h) (a different model on purpose).
+// Fields: crossed, reach = how far along +z the ball is when it comes down through the ring's height, entryDeg.
+struct DragFlight { bool crossed; float reach; float entryDeg; };
+static DragFlight flyDrag(Vec3 from, Vec3 vel, float ringY, float g, float drag, double dt, int sub, bool exact) {
+    double px = from.x, py = from.y, pz = from.z, vx = vel.x, vy = vel.y, vz = vel.z;
+    const double h = dt / sub;
+    const double damp = exact ? std::exp(-drag * h) : 1.0 - drag * h;
+    DragFlight f{false, 0, 0};
+    for (long i = 0; i < 400000; ++i) {
+        const double qy = py, qz = pz;
+        vy -= g * h; vx *= damp; vy *= damp; vz *= damp;
+        px += vx * h; py += vy * h; pz += vz * h;
+        if (vy < 0 && qy >= ringY && py < ringY) {
+            const double k = (qy - ringY) / (qy - py);
+            f.crossed = true; f.reach = (float)(qz + (pz - qz) * k);
             f.entryDeg = (float)(std::atan2(-vy, std::sqrt(vx * vx + vz * vz)) * 180.0 / 3.14159265358979);
             return f;
         }
@@ -176,6 +201,100 @@ int main() {
         int notOk = 0;
         for (int D = 1; D <= 50; ++D) { SolveParams p; if (!solve(Vec3{0, 1.6f, 0}, Vec3{0, 3.05f, (float)D}, p).ok) ++notOk; }
         CHECK("normal gravity, default limits: all 50 distances have a solution", notOk == 0);
+    }
+    std::printf("== stage D8: the same job with air drag\n");
+    {   // flights below use flyDrag (written independently of the solver, see above main)
+        // 1) With the same step rules as the solver: lands within 1 cm of the ring centre, every metre, several drags and heights.
+        int bad = 0, total = 0, refused = 0, refusedLow = 0; float worst = 0, worstEntryShort = 0;
+        for (float drag : {0.0f, 0.11f, 0.3f, 1.0f})
+            for (float h : {-1.0f, 0.0f, 1.45f})
+                for (int D = 3; D <= 50; ++D) {
+                    SolveParams p; p.maxSpeed = 200; FlightModel m; m.drag = drag; m.dt = 1.0f / 72.0f;
+                    const Vec3 from{0, 1.6f, 0}, to{0, 1.6f + h, (float)D};
+                    const Solution s = solveFlight(from, to, p, m);
+                    ++total;
+                    if (!s.ok) { ++refused; continue; }
+                    const DragFlight f = flyDrag(from, s.vel, to.y, m.gravity, drag, m.dt, 1, false);
+                    const float err = std::fabs(f.reach - (float)D);              // flat distance reached at the ring's height; the thrown line is straight to the hoop
+                    if (!f.crossed || err > 0.01f || std::fabs(s.vel.x) > 1e-3f) { ++bad; continue; }
+                    if (err > worst) worst = err;
+                    if (p.minEntryDeg - f.entryDeg > worstEntryShort) worstEntryShort = p.minEntryDeg - f.entryDeg;
+                }
+        std::printf("       (%d solutions with drag: %d flown, worst miss %.5f m, %d refused)\n", total, total - refused, worst, refused);
+        CHECK("drag 0 / 0.11 / 0.3 / 1.0, 3 heights, 3-50 m: lands within 1 cm and the solver's own entry angle is honest", bad == 0 && total - refused > 400 && worstEntryShort < 0.05f);
+        CHECK("(with a drag up to 0.3 there are no refusals at all; only the extreme drag 1.0 may refuse the far shots)", refusedLow == 0);
+    }
+    {   // 2) Drag 0 gives the same answer as the formula version.
+        int diff = 0;
+        for (int D = 3; D <= 50; ++D) {
+            SolveParams p; FlightModel m; m.drag = 0.0f; m.dt = 0.02f;
+            const Vec3 from{0, 1.6f, 0}, to{3, 3.05f, 0};
+            Vec3 t2{D * 0.6f, 3.05f, D * 0.8f};
+            const Solution a = solve(from, t2, p), b = solveFlight(from, t2, p, m);
+            (void)to;
+            if (a.ok != b.ok) { ++diff; continue; }
+            if (a.ok && (std::fabs(a.speed - b.speed) > 0.2f)) ++diff;     // the step-by-step flight differs a little from the formula (step size), not by much
+        }
+        CHECK("drag 0: the speed is within 0.2 m/s of the exact formula for every distance", diff == 0);
+    }
+    {   // 3) Drag makes the throw need MORE speed than the no-drag answer (never less).
+        int wrong = 0;
+        for (int D = 5; D <= 50; D += 5) {
+            SolveParams p; p.maxSpeed = 200; FlightModel m0, m1; m0.drag = 0.0f; m1.drag = 0.11f; m0.dt = m1.dt = 1.0f / 72.0f;
+            const Vec3 from{0, 1.6f, 0}, to{0, 3.05f, (float)D};
+            const Solution a = solveFlight(from, to, p, m0), b = solveFlight(from, to, p, m1);
+            if (!a.ok || !b.ok || !(b.speed > a.speed)) ++wrong;
+        }
+        CHECK("with drag 0.11 the needed speed is higher than without drag, at every distance (5, 10 ... 50 m)", wrong == 0);
+    }
+    {   // 4) If the real ball behaves a little differently, how far does the ball land from the ring centre? This is the risk the headset has to settle.
+        //    (a) other drag formula (exp instead of 1 - drag*dt), same physics steps  -> must be tiny
+        //    (b) 4 times finer physics steps (a different integration, NOT what Unity does as far as I know) -> information only
+        float worstA = 0, worstB = 0; int count = 0;
+        for (int D = 4; D <= 50; ++D) {
+            SolveParams p; p.maxSpeed = 200; FlightModel m; m.drag = 0.11f; m.dt = 1.0f / 72.0f;
+            const Vec3 from{0, 1.6f, 0}, to{0, 3.05f, (float)D};
+            const Solution s = solveFlight(from, to, p, m);
+            if (!s.ok) continue;
+            const DragFlight fa = flyDrag(from, s.vel, to.y, m.gravity, 0.11f, m.dt, 1, true);
+            const DragFlight fb = flyDrag(from, s.vel, to.y, m.gravity, 0.11f, m.dt, 4, true);
+            ++count; worstA = std::max(worstA, std::fabs(fa.reach - (float)D)); worstB = std::max(worstB, std::fabs(fb.reach - (float)D));
+        }
+        std::printf("       (other drag formula: worst miss %.4f m;  4x finer steps: worst miss %.3f m;  %d distances)\n", worstA, worstB, count);
+        CHECK("other drag formula, same steps: the miss stays under 3 cm", count > 40 && worstA < 0.03f);
+        CHECK("(info) 4x finer physics steps: the miss stays under 25 cm (the ring is 46 cm wide)", worstB < 0.25f);
+    }
+    {   // 5) A wrong drag guess: if the game really had drag 0.3 and we assumed 0.11, how far off? (information, with a loose bound)
+        float worst = 0;
+        for (int D = 5; D <= 20; ++D) {
+            SolveParams p; p.maxSpeed = 200; FlightModel m; m.drag = 0.11f; m.dt = 1.0f / 72.0f;
+            const Vec3 from{0, 1.6f, 0}, to{0, 3.05f, (float)D};
+            const Solution s = solveFlight(from, to, p, m);
+            if (!s.ok) continue;
+            const DragFlight f = flyDrag(from, s.vel, to.y, m.gravity, 0.3f, m.dt, 1, false);
+            if (f.crossed) worst = std::max(worst, std::fabs(f.reach - (float)D));
+        }
+        std::printf("       (INFO: if the real drag were 0.3 instead of 0.11, the ball would miss by up to %.2f m at 5-20 m)\n", worst);
+        CHECK("(info only) a wrong drag guess gives a finite miss", worst < 100.0f);
+    }
+    {   // 6) velocityAfter agrees with the flight, and robust refusals
+        FlightModel m; m.drag = 0.11f; m.dt = 1.0f / 72.0f;
+        const Vec3 v0{0, 8, 8};
+        const Vec3 v1 = velocityAfter(v0, 0.5f, m);
+        double vx = 0, vy = 8, vz = 8; const double dmp = 1 - 0.11 / 72.0;
+        for (int i = 0; i < 36; ++i) { vy -= 9.81 / 72.0; vx *= dmp; vy *= dmp; vz *= dmp; }
+        CHECK("velocityAfter equals 36 plain steps of 1/72 s", near(v1.y, (float)vy, 1e-3f) && near(v1.z, (float)vz, 1e-3f));
+        SolveParams p; FlightModel m2; m2.drag = 0.11f;
+        CHECK("flyToRing: a ball that never comes down to the ring does not 'cross'", !flyToRing(Vec3{0, 1.6f, 0}, Vec3{0, 0, 5}, 50.0f, m2).crossed);
+        CHECK("solveFlight: hoop straight above the ball -> refuses", !solveFlight(Vec3{0, 1.6f, 0}, Vec3{0, 3.05f, 0}, p, m2).ok);
+        CHECK("solveFlight: NaN position -> refuses", !solveFlight(Vec3{0, 1.6f, 0}, Vec3{std::nanf(""), 3.05f, 10}, p, m2).ok);
+        FlightModel m3; m3.gravity = -1.0f;
+        CHECK("solveFlight: negative gravity -> refuses", !solveFlight(Vec3{0, 1.6f, 0}, Vec3{0, 3.05f, 10}, p, m3).ok);
+        SolveParams slow; slow.maxSpeed = 5.0f;
+        CHECK("solveFlight: needs more than the maximum speed -> refuses", !solveFlight(Vec3{0, 1.6f, 0}, Vec3{0, 3.05f, 40}, slow, m2).ok);
+        FlightModel m4; m4.drag = 5.0f;
+        const Solution heavy = solveFlight(Vec3{0, 1.6f, 0}, Vec3{0, 3.05f, 30}, p, m4);
+        CHECK("solveFlight: a huge drag number either works or refuses, never garbage", !heavy.ok || (heavy.speed > 0 && heavy.speed <= p.maxSpeed && heavy.vel.y == heavy.vel.y));
     }
     std::printf("== random shots: the cap rule never contradicts itself\n");
     {   std::srand(12345);

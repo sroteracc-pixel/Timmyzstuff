@@ -60,6 +60,7 @@ static double fakeClock() { return gClock; }
 struct Rig {
     std::unique_ptr<AimLink> link;
     double physAcc = 0;
+    bool yFeed = false, yHeld = false;     // D8c: report the pretend Y button to the link on every tick (like the controller doorway does)
     Config cfg;
     explicit Rig(bool hoops = true, const char* threadName = "", bool allowWrite = true) {
         fake_create(hoops ? 1 : 0);
@@ -74,6 +75,7 @@ struct Rig {
         gClock += dt; physAcc += dt;
         const double fdt = fake_fdt();
         while (physAcc >= fdt) { fake_step(); physAcc -= fdt; }
+        if (yFeed) link->noteY(yHeld, true);
         link->onGameThread();
         usleep(120);
     }
@@ -450,6 +452,199 @@ int main(int, char** argv) {
         throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
         r.run(4.5); r.settle(0.2);
         CHECK("(both ways to notice a release agree: one SHOT, not two)", r.link->counters().releases == 1);
+        r.link->stop();
+    }
+
+    std::printf("== stage D8c: 'Hold Y to aim' (the Y button is read at the moment of the release)\n");
+    {
+        // Y held when you let go: aimed
+        Rig r; r.yFeed = true; r.start(); r.link->setAsk(true, 50, true);
+        r.connect(); r.run(0.5);
+        r.yHeld = true; r.run(0.1);
+        throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+        r.run(5.0); r.settle(0.2);
+        double s[10]; state(s);
+        const Counters c = r.link->counters();
+        CHECK("Y held: it was a shot, it was aimed and scored, nothing was left alone", c.shotLike == 1 && c.aimed == 1 && c.notHoldingY == 0 && c.yUnknown == 0 && s[7] == 1 && s[8] == 1);
+        const std::string dec = findNote("decision: AIM");
+        CHECK("the report says Y was held and that the switch is ON", dec.find("Y button: HELD when you let go") != std::string::npos && dec.find("hold Y to aim: ON") != std::string::npos);
+        CHECK("the menu text says it was aimed", r.link->lastShotText().find("AIMED") != std::string::npos);
+        CHECK("the summary line counts the Y readings", r.link->summary().find("doorway") != std::string::npos && c.yReadsDoorway > 100 && c.yHeldDoorway > 10);
+        r.link->stop();
+    }
+    {
+        // Y NOT held: the shot is left alone, the speed is never set, the flight is still watched
+        Rig r; r.yFeed = true; r.start(); r.link->setAsk(true, 50, true);
+        r.connect(); r.run(0.5);
+        throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+        r.run(5.0); r.settle(0.2);
+        double s[10]; state(s);
+        const Counters c = r.link->counters();
+        CHECK("Y not held: it was a shot, it was left alone, the speed was never set", c.shotLike == 1 && c.notHoldingY == 1 && c.aimed == 0 && s[7] == 0);
+        const std::string dec = findNote("decision: LEFT ALONE");
+        CHECK("the report says Y was not held (never seen held)", dec.find("Y button: NOT held (never seen held in this session)") != std::string::npos && dec.find("the Y button was not held") != std::string::npos);
+        CHECK("the menu text says to hold Y", r.link->lastShotText().find("hold Y to aim") != std::string::npos);
+        CHECK("the unchanged throw is still watched", countNotes("result") == 1);
+        CHECK("the summary line counts it", r.link->summary().find("Y not held 1") != std::string::npos);
+        r.link->stop();
+    }
+    {
+        // the switch is OFF: every shot is aimed, Y is only reported
+        Rig r; r.yFeed = true; r.start(); r.link->setAsk(true, 50, false);
+        r.connect(); r.run(0.5);
+        throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+        r.run(5.0); r.settle(0.2);
+        const std::string dec = findNote("decision: AIM");
+        CHECK("'hold Y to aim' off: a shot without Y is aimed", r.link->counters().aimed == 1 && r.link->counters().notHoldingY == 0);
+        CHECK("... and the report still shows the Y state and that the switch is off", dec.find("Y button: NOT held") != std::string::npos && dec.find("hold Y to aim: off") != std::string::npos);
+        r.link->stop();
+    }
+    {
+        // Y let go a moment BEFORE the ball (0.05 s): counts. 0.30 s before: does not.
+        for (int pass = 0; pass < 2; ++pass) {
+            Rig r; r.yFeed = true; r.start(); r.link->setAsk(true, 50, true);
+            r.connect(); r.run(0.5);
+            r.yHeld = true; r.run(0.2);
+            r.yHeld = false; r.run(pass == 0 ? 0.05 : 0.30);
+            throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+            r.run(5.0); r.settle(0.2);
+            const Counters c = r.link->counters();
+            if (pass == 0) {
+                CHECK("Y let go 50 ms before the release: still counts, aimed", c.aimed == 1 && c.notHoldingY == 0);
+                CHECK("... and the report says so", findNote("decision: AIM").find("let go") != std::string::npos);
+            } else {
+                CHECK("Y let go 300 ms before the release: does not count, left alone", c.aimed == 0 && c.notHoldingY == 1);
+                CHECK("... and the report says when Y was last seen held", findNote("decision: LEFT ALONE").find("last seen held 0.3 s before") != std::string::npos);
+            }
+            r.link->stop();
+        }
+    }
+    {
+        // Y pressed right after you let go (before the decision, 40 ms): counts
+        Rig r; r.yFeed = true; r.start(); r.link->setAsk(true, 50, true);
+        r.connect(); r.run(0.5);
+        throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+        r.tick(); r.tick();
+        r.yHeld = true;
+        r.run(5.0); r.settle(0.2);
+        CHECK("Y pressed right after the release: aimed", r.link->counters().aimed == 1 && r.link->counters().notHoldingY == 0 && findNote("decision: AIM").find("pressed right after") != std::string::npos);
+        r.link->stop();
+    }
+    {
+        // the menu's thread is the other reader: it alone is enough
+        Rig r; r.start(); r.link->setAsk(true, 50, true);
+        r.connect(); r.run(0.5);
+        for (int i = 0; i < 30; ++i) { r.link->noteY(true, false); r.run(0.02); }
+        throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+        for (int i = 0; i < 1000; ++i) { r.link->noteY(true, false); r.run(0.005); }
+        r.settle(0.2);
+        const Counters c = r.link->counters();
+        CHECK("Y read only by the menu's thread: aimed, and its reads are counted separately", c.aimed == 1 && c.yReadsProbe > 100 && c.yHeldProbe > 100 && c.yReadsDoorway == 0);
+        r.link->stop();
+    }
+    {
+        // the two readers disagree for the whole shot (the doorway says "no Y", the menu's thread says "Y held"): held wins, in both orders
+        for (int order = 0; order < 2; ++order) {
+            Rig r; r.yFeed = true; r.yHeld = false; r.start(); r.link->setAsk(true, 50, true);       // the doorway reports "not held" on every tick
+            r.connect(); r.run(0.5);
+            for (int i = 0; i < 40; ++i) { if (order == 0) r.link->noteY(true, false); r.tick(); if (order == 1) r.link->noteY(true, false); }
+            throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+            for (int i = 0; i < 1000; ++i) { if (order == 0) r.link->noteY(true, false); r.tick(); if (order == 1) r.link->noteY(true, false); }
+            r.settle(0.2);
+            CHECK(order == 0 ? "the doorway says 'no Y' but the menu's thread says 'held' (doorway reads last): aimed" : "... same, the menu's thread reads last: aimed", r.link->counters().aimed == 1 && r.link->counters().notHoldingY == 0);
+            r.link->stop();
+        }
+    }
+    {
+        // dribbles and drops are not shots: they never count as "Y not held"
+        Rig r; r.yFeed = true; r.start(); r.link->setAsk(true, 50, true);
+        r.connect(); r.run(0.5);
+        for (int i = 0; i < 6; ++i) { throwFrom(2, 1.6, 4, 0, 12.66, -60, 2.0, 0.0); r.run(0.6); }
+        r.settle(0.3);
+        CHECK("dribbles with 'hold Y to aim' ON: not counted as left-alone shots", r.link->counters().releases == 6 && r.link->counters().notHoldingY == 0 && r.link->counters().shotLike == 0);
+        r.link->stop();
+    }
+    {
+        // a Y button that is never read must never be guessed: ON = left alone and says why; off = the shot is aimed as usual
+        for (int gate = 1; gate >= 0; --gate) {
+            Rig r; r.yFeed = false; r.start(); r.link->setAsk(true, 50, gate == 1);       // nobody reports the Y button
+            r.connect(); r.run(0.5);
+            throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+            r.run(5.0); r.settle(0.2);
+            const Counters c = r.link->counters();
+            if (gate) {
+                CHECK("Y never read, 'hold Y to aim' ON: left alone, says it cannot read the Y button", c.aimed == 0 && c.yUnknown == 1 && c.notHoldingY == 0 && findNote("decision: LEFT ALONE").find("Y button: NOT read") != std::string::npos && r.link->lastShotText().find("cannot read the Y button") != std::string::npos);
+            } else {
+                CHECK("Y never read, 'hold Y to aim' off: aimed as usual", c.aimed == 1 && c.yUnknown == 0);
+            }
+            r.link->stop();
+        }
+    }
+    {
+        // the readings stop (the menu's thread died?): after one second they no longer count, even though the last one said "held"
+        Rig r; r.yFeed = true; r.start(); r.link->setAsk(true, 50, true);
+        r.connect(); r.run(0.5);
+        r.yHeld = true; r.run(0.2);
+        r.yFeed = false; r.run(1.3);
+        throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+        r.run(5.0); r.settle(0.2);
+        CHECK("an old 'Y held' reading (1.3 s old) is not trusted: left alone as unreadable", r.link->counters().aimed == 0 && r.link->counters().yUnknown == 1);
+        r.link->stop();
+    }
+    {
+        // Y does not override the other rules: too far / wrong direction are still left alone
+        Rig r; r.yFeed = true; r.yHeld = true; r.start(); r.link->setAsk(true, 5, true);
+        r.connect(); r.run(0.5);
+        throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+        r.run(5.0); r.settle(0.2);
+        CHECK("Y held but the hoop is farther than the 5 m limit: left alone as too far", r.link->counters().aimed == 0 && r.link->counters().tooFar == 1 && r.link->counters().notHoldingY == 0);
+        r.link->stop();
+    }
+    {
+        // the player's jump state no longer matters (it is only reported)
+        for (int v : {0, 1}) {
+            Rig r; r.yFeed = true; r.yHeld = true; r.start(); r.link->setAsk(true, 50, true);
+            r.connect(); r.run(0.5);
+            fake_set("vstate", v, 0, 0);
+            throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+            r.run(5.0); r.settle(0.2);
+            char name[160]; std::snprintf(name, sizeof name, "Y held, player %s: aimed either way", v ? "in the air" : "on the floor");
+            CHECK(name, r.link->counters().aimed == 1);
+            CHECK("... and the report still shows the jump state", findNote("decision: AIM").find(v ? "IN THE AIR" : "ON THE FLOOR") != std::string::npos);
+            r.link->stop();
+        }
+        for (const char* key : {"loco_link_null", "destroy_loco"}) {
+            Rig r; r.yFeed = true; r.yHeld = true; r.start(); r.link->setAsk(true, 50, true);
+            r.connect(); r.run(0.5);
+            fake_set(key, 1, 0, 0);
+            throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+            r.run(5.0); r.settle(0.2);
+            char name[160]; std::snprintf(name, sizeof name, "%s: the jump state cannot be read, but with Y held the shot is still aimed", key);
+            CHECK(name, r.link->counters().aimed == 1 && r.link->counters().yUnknown == 0 && findNote("decision: AIM").find("jump: NOT read") != std::string::npos);
+            r.link->stop();
+        }
+        for (const char* key : {"break_vert_type", "remove_loco_vert"}) {
+            Rig r; fake_set(key, 0, 0, 0); r.yFeed = true; r.yHeld = true; r.start(); r.link->setAsk(true, 50, true);
+            const bool ok = r.connect(); r.run(0.5);
+            throwFrom(2, 1.6, 4, 0, 12.66, 55, 9.0, 6.0);
+            r.run(5.0); r.settle(0.2);
+            char name[200]; std::snprintf(name, sizeof name, "%s: it still connects, says the jump state is not readable (report only), and aims with Y held", key);
+            CHECK(name, ok && countNotes("jump state NOT readable") == 1 && r.link->counters().aimed == 1);
+            r.link->stop();
+        }
+    }
+    {
+        Rig r; r.yFeed = true; r.start(); r.link->setAsk(true, 50, true);
+        r.connect(); r.run(0.3);
+        r.link->setAsk(true, 50, false); r.link->setAsk(true, 50, true);
+        CHECK("switching 'hold Y to aim' while the Aimbot is on is written down", countNotes("'hold Y to aim' turned off") == 1 && countNotes("'hold Y to aim' turned ON") == 1);
+        r.link->stop();
+    }
+    {
+        // the switch off: the Y readings are ignored (nothing is counted, nothing is stored)
+        Rig r; r.yFeed = true; r.yHeld = true; r.start(); r.link->setAsk(false, 50, true);
+        r.run(0.5);
+        CHECK("Aimbot off: the Y readings are ignored", r.link->counters().yReadsDoorway == 0 && r.link->counters().yReadsProbe == 0);
         r.link->stop();
     }
 

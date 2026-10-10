@@ -86,6 +86,33 @@ struct Solution {
 // A velocity that makes a ball with no air drag, launched at `from`, pass through `to`, falling on the way. (Air drag and spin are NOT included.)
 Solution solve(const Vec3& from, const Vec3& to, const SolveParams& p);
 
+
+// ---- stage D8: the same job when the ball is slowed by air drag --------------------------------------------------------------
+// The real ball has a drag number (0.11 in the lobby file). The step-by-step flight below copies Unity's own physics steps:
+//     every step:  v = v + gravity * dt ;  v = v * (1 - drag * dt) ;  position = position + v * dt
+// (the game's physics runs in fixed steps of `dt`). With drag = 0 this gives the same answer as solve().
+struct FlightModel {
+    float gravity = 9.81f;     // positive number, m/s^2
+    float drag = 0.0f;         // Unity's Rigidbody drag
+    float dt = 0.02f;          // the physics step (Unity: Time.fixedDeltaTime)
+};
+// Flies a ball from `from` with velocity `vel`. Stops when it comes down through height `ringY` (crossed = true), or after `maxSeconds`.
+struct Crossing {
+    bool crossed = false;
+    Vec3 pos;                  // where it crossed the ring's height (interpolated between two steps)
+    float seconds = 0;         // time until then
+    float entryDeg = 0;        // how steeply it comes down there
+};
+Crossing flyToRing(const Vec3& from, const Vec3& vel, float ringY, const FlightModel& m, float maxSeconds = 6.0f);
+// The velocity the ball has `seconds` after leaving `from` with `vel` (used to check that the game did not change it).
+Vec3 velocityAfter(const Vec3& vel, float seconds, const FlightModel& m);
+// Where the ball is and how fast it moves after exactly `steps` physics steps (the game's physics counts steps, not seconds; used to compare with the real ball).
+struct Pose { Vec3 pos; Vec3 vel; };
+Pose stepsAfter(const Vec3& from, const Vec3& vel, int steps, const FlightModel& m);
+// Like solve(), but the ball is slowed by drag (and the physics steps are those of the game). Keeps the player's arc when it works.
+// `p.gravity` is ignored; the model's gravity is used. `Solution.entryDeg` and `.flightSeconds` come from the step-by-step flight.
+Solution solveFlight(const Vec3& from, const Vec3& to, const SolveParams& p, const FlightModel& m);
+
 // Flat (floor) distance and the vector helpers used by the tests and the game part.
 float flatDistance(const Vec3& a, const Vec3& b);
 

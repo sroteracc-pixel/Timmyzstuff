@@ -31,13 +31,15 @@ Klass kRigidbody{"Rigidbody", "UnityEngine", &kComponent, {}, {}, 0, false, fals
 Klass kPhysics{"Physics", "UnityEngine", nullptr, {}, {}, 0, false, false, 16};
 Klass kTime{"Time", "UnityEngine", nullptr, {}, {}, 0, false, false, 16};
 Type tRB{"UnityEngine.Rigidbody", &kRigidbody};
-Klass kBall, kBcm, kGm;
-Type tBall{"ShovelTools.Basketball", &kBall}, tBcm{"ShovelTools.BallControlManager", &kBcm};
+Klass kBall, kBcm, kGm, kLoco;
+Klass kEnumVert{"LocomotionVerticalState", "", nullptr, {}, {}, 4, true, true, 4};      // the player's vertical state (FLOOR, JUMPING, FALLING, GRABBING): a nested enum, so no namespace
+Type tBall{"ShovelTools.Basketball", &kBall}, tBcm{"ShovelTools.BallControlManager", &kBcm}, tLoco{"ShovelTools.PlayerLocomotion", &kLoco},
+     tVert{"ShovelTools.PlayerLocomotion.LocomotionVerticalState", &kEnumVert};
 
 char gCode[0x1000];
 Method* mk(const char* n, unsigned p, Type* r, int id, uint32_t fl = 0) { return new Method{reinterpret_cast<uint64_t>(gCode) + 0x100 + static_cast<uint64_t>(id) * 16, n, p, r, fl, id}; }
 
-Image iGame{"Assembly-CSharp", {&kBall, &kBcm, &kGm}};
+Image iGame{"Assembly-CSharp", {&kBall, &kBcm, &kGm, &kLoco, &kEnumVert}};
 Image iPhys{"UnityEngine.PhysicsModule", {&kRigidbody, &kPhysics}};
 Image iCore{"UnityEngine.CoreModule", {&kComponent, &kTime}};
 Image iMscorlib{"mscorlib", {}};
@@ -52,7 +54,9 @@ void buildFields() {       // called for every new scenario, so a scenario that 
          {"_hoopRadius", &tFloat, 304, 0}, {"_currentBallPosition", &tVec3, 316, 0}, {"_dragValuesWereCleared", &tBool, 348, 0}, {"_originalDrag", &tFloat, 352, 0},
          {"_unheldTime", &tFloat, 388, 0}, {"_basketballState", &tInt, 396, 0}, {"_NEGATIVE_VELOCITY_Y", &tFloat, 0, 0x10}};
     kBcm.fields = {{"_leftBallControl", &tOther, 40, 0}, {"_isAI", &tBool, 290, 0}, {"_basketballRigidbody", &tRB, 152, 0}, {"_basketball", &tBall, 168, 0},
-         {"_releasedLeftTimer", &tFloat, 200, 0}, {"_releasedRightTimer", &tFloat, 204, 0}, {"lastReleaseTime", &tFloat, 384, 0}, {"_lastRawThrowVelocity", &tVec3, 388, 0}};
+         {"_releasedLeftTimer", &tFloat, 200, 0}, {"_releasedRightTimer", &tFloat, 204, 0}, {"lastReleaseTime", &tFloat, 384, 0}, {"_lastRawThrowVelocity", &tVec3, 388, 0},
+         {"_playerLocomotion", &tLoco, 144, 0}};      // (last in the list, so the tests that remove fields by number keep working)
+    kLoco.fields = {{"_isLeftJumpPressed", &tBool, 240, 0}, {"_isRightJumpPressed", &tBool, 241, 0}, {"_locomotionState", &tInt, 812, 0}, {"_locomotionVerticalState", &tVert, 828, 0}};
     kGm.fields = {{"User", &tOther, 392, 0}, {"_playerBallControlManager", &tBcm, 408, 0}, {"_isInCompetitionMode", &tBool, 480, 0}, {"_isGMMode", &tBool, 760, 0}, {"_isSolo", &tBool, 761, 0},
          {"_isNBA", &tBool, 762, 0}, {"_gameState", &tState, 856, 0}};
 }
@@ -63,6 +67,7 @@ void init() {
     kBall.name = "Basketball"; kBall.ns = "ShovelTools"; kBall.parent = &kBehaviour; kBall.instanceSize = 408;
     kBcm.name = "BallControlManager"; kBcm.ns = "ShovelTools"; kBcm.parent = &kBehaviour; kBcm.instanceSize = 424;
     kGm.name = "GameManager"; kGm.ns = "ShovelTools"; kGm.parent = &kBehaviour; kGm.instanceSize = 864;
+    kLoco.name = "PlayerLocomotion"; kLoco.ns = "ShovelTools"; kLoco.parent = &kBehaviour; kLoco.instanceSize = 1056;
     buildFields();
     kRigidbody.methods = {mk("get_velocity", 0, &tVec3, M_RB_GETVEL), mk("set_velocity", 1, &tVoid, M_RB_SETVEL), mk("get_position", 0, &tVec3, M_RB_GETPOS),
                           mk("get_drag", 0, &tFloat, M_RB_GETDRAG), mk("get_useGravity", 0, &tBool, M_RB_GETUSEGRAV)};
@@ -73,7 +78,7 @@ void init() {
 
 // ---------------------------------------------------------------- the pretend world
 struct World {
-    unsigned char *gm = nullptr, *bcm = nullptr, *ball = nullptr, *rb = nullptr;
+    unsigned char *gm = nullptr, *bcm = nullptr, *ball = nullptr, *rb = nullptr, *loco = nullptr;
     double p[3] = {0, 1.6, 0}, v[3] = {0, 0, 0};
     double drag = 0.11, gravity = 9.81, fdt = 1.0 / 72.0;
     bool useGravity = true, held = true, released = false;
@@ -113,10 +118,11 @@ EXPORT void fake_aim_create(int withHoops) {
     for (size_t i = 0; i < gAllocated.size(); ++i) { std::memset(gAllocated[i], 0, static_cast<size_t>(gAllocatedSize[i])); free(gAllocated[i]); }
     gAllocated.clear(); gAllocatedSize.clear();
     W = World();
-    W.gm = makeObject(&kGm, 864); W.bcm = makeObject(&kBcm, 424); W.ball = makeObject(&kBall, 408); W.rb = makeObject(&kRigidbody, 24);
+    W.gm = makeObject(&kGm, 864); W.bcm = makeObject(&kBcm, 424); W.ball = makeObject(&kBall, 408); W.rb = makeObject(&kRigidbody, 24); W.loco = makeObject(&kLoco, 1056);
     const uint64_t pRb = reinterpret_cast<uint64_t>(W.rb), pBall = reinterpret_cast<uint64_t>(W.ball), pBcm = reinterpret_cast<uint64_t>(W.bcm);
     std::memcpy(W.ball + 72, &pRb, 8);
     std::memcpy(W.bcm + 168, &pBall, 8); std::memcpy(W.bcm + 152, &pRb, 8);
+    { const uint64_t pLoco = reinterpret_cast<uint64_t>(W.loco); std::memcpy(W.bcm + 144, &pLoco, 8); }
     std::memcpy(W.gm + 408, &pBcm, 8);
     std::memcpy(W.ball + 144, &pBcm, 8);
     if (withHoops) { setV(W.ball, 180, 0, 3.1, 12.66); setV(W.ball, 192, 0, 3.1, -12.66); }
@@ -135,6 +141,13 @@ EXPORT void fake_aim_set(const char* key, double a, double b, double c) {
     else if (k == "unheld_mode") W.unheldMode = static_cast<int>(a);
     else if (k == "destroy_rb") { W.rbDestroyed = a != 0; const uint64_t z = a != 0 ? 0 : reinterpret_cast<uint64_t>(W.rb) + 0x40; std::memcpy(W.rb + 16, &z, 8); }
     else if (k == "destroy_bcm") { const uint64_t z = a != 0 ? 0 : reinterpret_cast<uint64_t>(W.bcm) + 0x40; std::memcpy(W.bcm + 16, &z, 8); }
+    else if (k == "vstate") { const int v = static_cast<int>(a); std::memcpy(W.loco + 828, &v, 4); }                       // the player's vertical state: 0 floor, 1 jumping, 2 falling, 3 grabbing
+    else if (k == "locostate") { const int v = static_cast<int>(a); std::memcpy(W.loco + 812, &v, 4); }
+    else if (k == "jumpbtn") { W.loco[240] = a != 0; W.loco[241] = b != 0; }
+    else if (k == "loco_link_null") { const uint64_t z = a != 0 ? 0 : reinterpret_cast<uint64_t>(W.loco); std::memcpy(W.bcm + 144, &z, 8); }
+    else if (k == "destroy_loco") { const uint64_t z = a != 0 ? 0 : reinterpret_cast<uint64_t>(W.loco) + 0x40; std::memcpy(W.loco + 16, &z, 8); }
+    else if (k == "break_vert_type") { for (Field& f : kLoco.fields) if (f.name == "_locomotionVerticalState") f.type = &tInt; }
+    else if (k == "remove_loco_vert") { for (size_t i = 0; i < kLoco.fields.size(); ++i) if (kLoco.fields[i].name == "_locomotionVerticalState") { kLoco.fields.erase(kLoco.fields.begin() + static_cast<long>(i)); break; } }
     else if (k == "hoops_zero") { setV(W.ball, 180, 0, 0, 0); setV(W.ball, 192, 0, 0, 0); }
     else if (k == "break_rigidbody_type") { for (Field& f : kBall.fields) if (f.name == "_rigidbody") f.type = &tInt; }
     else if (k == "remove_field") { /* a = index of the field, b = 0: ball control class, 1: ball class */

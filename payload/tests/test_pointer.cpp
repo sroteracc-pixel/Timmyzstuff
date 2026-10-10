@@ -358,6 +358,12 @@ int main() {
         CHECK("the Aimbot switch turns on", m.aimOn && !m.speedOn && !m.jumpOn && m.gravityMode == 0);
         click(mi, m, HIT_TOGGLE_AIM);
         CHECK("... and off again", !m.aimOn);
+        CHECK("the page has the 'Hold Y to aim' switch, and it starts ON", find(h, HIT_TOGGLE_AIMY).id != 0 && fresh.aimHoldY && m.aimHoldY);
+        {   const HitRect jr = find(hitsFor(m), HIT_TOGGLE_AIMY); const float jx = jr.x + jr.w / 2, jy = jr.y + jr.h / 2;
+            step(mi, m, jx, jy, 0.0f); const Outcome jo = step(mi, m, jx, jy, 0.9f); step(mi, m, jx, jy, 0.0f);
+            CHECK("clicking it turns it off, asks for a save (it is a setting), and changes nothing else", !m.aimHoldY && jo.saveNeeded && !m.aimOn && m.aimCapM == 50.0f && !m.speedOn && !m.jumpOn);
+            click(mi, m, HIT_TOGGLE_AIMY);
+            CHECK("... and on again", m.aimHoldY); }
 
         // dragging the slider: far left, far right, and every position on the way is a whole number between 5 and 50
         const std::vector<HitRect> bh = hitsFor(m);
@@ -442,6 +448,18 @@ int main() {
         CHECK("a hand-edited 23.6 is snapped to a whole metre (24)", o3.aimCapM == 24.0f);
         PanelState old; const bool okOld = settingsFromText("sound=0\ncolor=2\nspeed=2.0\n", old);
         CHECK("an older settings file without the aimbot line leaves the default (Unlimited)", okOld && old.aimCapM == 50.0f && !old.aimOn);
+    }
+    {   PanelState a; a.aimHoldY = false;
+        const std::string txt = settingsToText(a);
+        PanelState b; const bool ok = settingsFromText(txt, b);
+        CHECK("'Hold Y to aim' OFF is saved and comes back off", ok && !b.aimHoldY && txt.find("aimy=0\n") != std::string::npos);
+        PanelState c; CHECK("ON is saved as aimy=1 and is the default", c.aimHoldY && settingsToText(c).find("aimy=1\n") != std::string::npos);
+        PanelState d; settingsFromText("aimy=7\naimy=abc\n", d);
+        CHECK("garbage in that line is ignored (stays ON)", d.aimHoldY);
+        PanelState old; settingsFromText("sound=0\naimdistance=20\n", old);
+        CHECK("an older settings file without the line leaves 'Hold Y to aim' ON", old.aimHoldY && old.aimCapM == 20.0f);
+        PanelState d8b; settingsFromText("aimdistance=30\naimjump=0\n", d8b);
+        CHECK("the line the previous test version wrote (aimjump=0) is ignored, and nothing else is lost", d8b.aimHoldY && d8b.aimCapM == 30.0f);
     }
     {   PanelState o; settingsFromText("transparency=0.60\n", o);
         CHECK("an old saved transparency of 0.60 is pulled down to the new maximum 0.25", near(o.transparency, 0.25f, 1e-4f)); }

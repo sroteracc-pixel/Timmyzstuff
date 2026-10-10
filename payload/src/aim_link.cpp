@@ -113,8 +113,9 @@ void AimLink::stop() {
 
 void* AimLink::threadMain(void* self) { static_cast<AimLink*>(self)->loop(); return nullptr; }
 
-void AimLink::setAsk(bool on, float capM) {
+void AimLink::setAsk(bool on, float capM, bool holdY) {
     capM_.store(capM);
+    const bool yWas = holdY_.exchange(holdY);
     const bool was = on_.exchange(on);
     if (on && !was) {
         onSinceAtomic_.store(nowSec());
@@ -126,10 +127,34 @@ void AimLink::setAsk(bool on, float capM) {
         }
         if (engineDead_.exchange(false)) resetExc_.store(true);
         if (!bound_.load()) { fastFailed_.store(false); needBcm_.store(false); }
-        say("aim: switch turned ON, max shot distance %s", tzaim::capLabel(capM).c_str());
+        say("aim: switch turned ON, max shot distance %s, hold Y to aim: %s", tzaim::capLabel(capM).c_str(), holdY ? "ON" : "off");
     } else if (!on && was) {
         say("aim: switch turned OFF");
+    } else if (on && yWas != holdY) {
+        say("aim: 'hold Y to aim' turned %s", holdY ? "ON" : "off");
     }
+}
+
+// The real Y button. Two places call this (see the header). Nothing here touches the game.
+void AimLink::noteY(bool held, bool fromDoorway) {
+    if (!on_.load(std::memory_order_relaxed)) return;
+    const double t = tnow();
+    const int i = fromDoorway ? 1 : 0;
+    (fromDoorway ? yReadsDoor_ : yReads_).fetch_add(1, std::memory_order_relaxed);
+    if (held) (fromDoorway ? yHeldDoor_ : yHeld_).fetch_add(1, std::memory_order_relaxed);
+    yNow_[i].store(held, std::memory_order_relaxed);
+    ySeen_[i].store(t, std::memory_order_relaxed);
+    if (held) yHeldAt_.store(t, std::memory_order_relaxed);
+}
+
+bool AimLink::yHeldNow(double now) const {
+    for (int i = 0; i < 2; ++i) if (yNow_[i].load(std::memory_order_relaxed) && now - ySeen_[i].load(std::memory_order_relaxed) <= 0.15) return true;
+    return false;
+}
+
+bool AimLink::yReadable(double now) const {
+    for (int i = 0; i < 2; ++i) if (now - ySeen_[i].load(std::memory_order_relaxed) <= 1.0) return true;     // Y is read many times a second; nothing for a whole second = it cannot be read
+    return false;
 }
 
 // ---------------------------------------------------------------- the menu texts
@@ -168,6 +193,8 @@ std::string AimLink::lastShotText() const { std::lock_guard<std::mutex> lock(mu_
 Counters AimLink::counters() const {
     Counters c;
     c.ticks = ticks_.load(); c.releases = releases_.load(); c.shotLike = shotLike_.load(); c.aimed = aimed_.load();
+    c.notHoldingY = notHoldingY_.load(); c.yUnknown = yUnknown_.load();
+    c.yReadsProbe = yReads_.load(); c.yHeldProbe = yHeld_.load(); c.yReadsDoorway = yReadsDoor_.load(); c.yHeldDoorway = yHeldDoor_.load();
     c.tooFar = tooFar_.load(); c.wrongDirection = wrongDir_.load(); c.noHoop = noHoop_.load(); c.notAShot = notShot_.load(); c.noSolution = noSolution_.load(); c.refused = refused_.load();
     c.errors = errors_.load(); c.overridden = overridden_.load(); c.scored = scored_.load(); c.missed = missed_.load();
     return c;
@@ -179,9 +206,10 @@ std::string AimLink::summary() const {
     const int ui = uiState();
     if (ui == 1) state = "connected"; else if (ui == 2) state = "looking"; else if (ui == 3) state = "FAILED";
     std::string why = ui == 3 ? failReason() : std::string();
-    return fmt("aim: link %s%s%s | doorway calls %llu, used %llu | releases %llu, shot-like %llu, AIMED %llu (scored %llu, missed %llu, game changed our speed %llu) | left alone: too far %llu, wrong direction %llu, no hoop %llu, no solution %llu, not a shot %llu, other %llu | engine errors %llu",
+    return fmt("aim: link %s%s%s | doorway calls %llu, used %llu | releases %llu, shot-like %llu, AIMED %llu (scored %llu, missed %llu, game changed our speed %llu) | left alone: too far %llu, wrong direction %llu, Y not held %llu, Y unreadable %llu, no hoop %llu, no solution %llu, not a shot %llu, other %llu | engine errors %llu | Y button reads: menu thread %llu (held in %llu), doorway %llu (held in %llu)",
                state, why.empty() ? "" : ": ", why.c_str(), calls_.load(), c.ticks, c.releases, c.shotLike, c.aimed, c.scored, c.missed, c.overridden,
-               c.tooFar, c.wrongDirection, c.noHoop, c.noSolution, c.notAShot, c.refused, c.errors);
+               c.tooFar, c.wrongDirection, c.notHoldingY, c.yUnknown, c.noHoop, c.noSolution, c.notAShot, c.refused, c.errors,
+               c.yReadsProbe, c.yHeldProbe, c.yReadsDoorway, c.yHeldDoorway);
 }
 
 // ---------------------------------------------------------------- the link thread: layout and the memory search
@@ -260,6 +288,27 @@ bool AimLink::resolveLayout(std::string* why, bool* transient) {
     field(L.bcm, "_lastRawThrowVelocity", "UnityEngine.Vector3", 12, false, &L.cRaw);
     if (L.cTimerL < 0 && L.cTimerR < 0 && L.cLastRel < 0 && L.bUnheld < 0) { *why = "the game has none of the release timers (_releasedLeftTimer, _releasedRightTimer, lastReleaseTime, _unheldTime): the game was updated?"; return false; }
 
+    // stage D8b: the player's jump state (optional; since stage D8c it is only written into the report - the Aimbot no longer depends on it).
+    // From the game's own files: BallControlManager._playerLocomotion (a link at +144) -> ShovelTools.PlayerLocomotion._locomotionVerticalState (a number at +828).
+    // Its type has four values named FLOOR, JUMPING, FALLING, GRABBING. Only "0 = FLOOR" is relied on (a 0 was read in an earlier scan; the first name of an enum is 0).
+    field(L.bcm, "_playerLocomotion", "ShovelTools.PlayerLocomotion", 8, false, &L.cLoco);
+    L.loco = tzscan::findClass(L.api, "ShovelTools", "PlayerLocomotion");
+    if (!L.loco.found) L.jumpWhy = "the class ShovelTools.PlayerLocomotion was not found";
+    else if (L.cLoco < 0) L.jumpWhy = "your ball control has no _playerLocomotion link (the game was updated?)";
+    else {
+        std::string keep = *why;
+        if (!field(L.loco, "_locomotionVerticalState", "ShovelTools.PlayerLocomotion.LocomotionVerticalState", 4, true, &L.lVert)) { L.jumpWhy = *why; L.lVert = -1; }
+        *why = keep;
+        field(L.loco, "_isLeftJumpPressed", "System.Boolean", 1, false, &L.lJumpL);
+        field(L.loco, "_isRightJumpPressed", "System.Boolean", 1, false, &L.lJumpR);
+        field(L.loco, "_locomotionState", nullptr, 4, false, &L.lState);
+        if (L.lVert >= 0) {
+            L.jumpOk = true;
+            int mx = 24; for (int off : {L.lVert + 4, L.lJumpL + 1, L.lJumpR + 1, L.lState + 4}) if (off > mx) mx = off;
+            L.lRead = mx;
+        }
+    }
+
     field(L.gm, "_playerBallControlManager", "ShovelTools.BallControlManager", 8, false, &L.gBcm);
     field(L.gm, "_gameState", nullptr, 4, false, &L.gState);
     field(L.gm, "_isInCompetitionMode", "System.Boolean", 1, false, &L.gComp);
@@ -289,6 +338,7 @@ bool AimLink::resolveLayout(std::string* why, bool* transient) {
         bcmBuf_.assign(static_cast<size_t>(L.bcm.size), 0);
         ballBuf_.assign(static_cast<size_t>(L.ball.size), 0);
         gmBuf_.assign(static_cast<size_t>(L.gm.size), 0);
+        locoBuf_.assign(static_cast<size_t>(L.lRead > 0 ? L.lRead : 24), 0);
     }
     char b[900];
     std::snprintf(b, sizeof b, "aim: found the game's classes. Ball %s (size %d): _rigidbody@%d, north hoop@%d, south hoop@%d, _wasShot@%d, _shotMade@%d, _unheldTime@%d | ball control (size %d): _basketball@%d, left timer@%d, right timer@%d, lastReleaseTime@%d | GameManager (size %d): _playerBallControlManager@%d | engine: get_velocity %s, set_velocity %s, get_position %s, get_drag %s, get_useGravity %s, Physics.get_gravity %s, Time.get_fixedDeltaTime %s | ways to find your ball control: GameManager.get_Instance %s + GetOwnedBallControlManager %s, memory search %s",
@@ -296,6 +346,8 @@ bool AimLink::resolveLayout(std::string* why, bool* transient) {
                   L.mGetVel ? "yes" : "NO", L.mSetVel ? "yes" : "NO", L.mGetPos ? "yes" : "NO", L.mGetDrag ? "yes" : "NO", L.mGetUseGravity ? "yes" : "NO", L.mGetGravity ? "yes" : "NO", L.mGetFixedDt ? "yes" : "NO",
                   L.mGmInstance ? "yes" : "NO", L.mGmOwned ? "yes" : "NO", L.gBcm >= 0 ? "possible" : "NOT possible");
     say("%s", b);
+    if (L.jumpOk) say("aim: jump state can be read (report only, the Aimbot does not use it): ball control _playerLocomotion@%d -> player object (size %d) _locomotionVerticalState@%d (read %d bytes).", L.cLoco, L.loco.size, L.lVert, L.lRead);
+    else say("aim: jump state NOT readable (report only, the Aimbot does not use it): %s.", L.jumpWhy.c_str());
     layoutReady_.store(true, std::memory_order_release);
     return true;
 }
@@ -539,7 +591,52 @@ void AimLink::startShot(double now, int hand, uintptr_t ballPtr) {
     s.id = shotSeq_.fetch_add(1) + 1; s.hand = hand; s.tEdge = now;
     s.ball = plausiblePtr(ballPtr) ? ballPtr : (now - g_.lastBallT < 2.0 ? g_.lastBall : 0);
     releases_.fetch_add(1);
+    readY(s, now);                                                  // the Y button at THIS moment (the moment of the release)
+    readJump(s);                                                    // the player's jump state at this moment (for the report only)
     g_.phase = WAIT;
+}
+
+// The Y button at the release (the latest reading from the menu's thread or the doorway). Reads our own memory only.
+void AimLink::readY(Shot& s, double now) {
+    s.holdY = holdY_.load();
+    s.yKnown = yReadable(now);
+    s.yHeldAtRelease = false; s.yAgo = -1; s.yRecent = false; s.yAtDecision = false;
+    if (!s.yKnown) return;
+    s.yHeldAtRelease = yHeldNow(now);
+    const double heldAt = yHeldAt_.load();
+    if (!s.yHeldAtRelease && heldAt > -1e8) { s.yAgo = std::max(0.0, now - heldAt); s.yRecent = s.yAgo <= cfg_.yGraceSeconds; }
+}
+
+std::string AimLink::yText(const Shot& s, bool readable) const {
+    if (!readable) return "Y button: NOT read (no reading in the last second)";
+    if (s.yHeldAtRelease) return "Y button: HELD when you let go";
+    if (s.yRecent) return fmt("Y button: let go %.0f ms before you released the ball (counts as held)", s.yAgo * 1000.0);
+    if (s.yAtDecision) return "Y button: pressed right after you let go (counts as held)";
+    if (s.yAgo >= 0) return fmt("Y button: NOT held (last seen held %.1f s before the release)", s.yAgo);
+    return "Y button: NOT held (never seen held in this session)";
+}
+
+// The player's vertical state at the release: 0 = on the floor, any other number = in the air. Reads memory only (no game call). Report only.
+void AimLink::readJump(Shot& s) {
+    s.vKnown = false; s.vState = -1; s.jumpPressed = 0; s.locoState = -1;
+    if (!L_.jumpOk) { s.vWhy = L_.jumpWhy.empty() ? "this game has no jump state I can read" : L_.jumpWhy; return; }
+    const uintptr_t lp = rdP(bcmBuf_.data(), L_.cLoco);
+    if (!plausiblePtr(lp)) { s.vWhy = "your ball control has no player linked"; return; }
+    unsigned char* b = locoBuf_.data();
+    if (!readObj(b, lp, static_cast<size_t>(L_.lRead)) || !liveObj(b, L_.loco.klassInv, L_.loco.unityObject)) { s.vWhy = "the player object could not be read (gone?)"; return; }
+    const int v = rdI(b, L_.lVert);
+    s.vState = v;
+    if (L_.lJumpL >= 0 && b[L_.lJumpL]) s.jumpPressed |= 1;
+    if (L_.lJumpR >= 0 && b[L_.lJumpR]) s.jumpPressed |= 2;
+    if (L_.lState >= 0) s.locoState = rdI(b, L_.lState);
+    if (v < 0 || v > 3) { s.vWhy = fmt("the vertical state number %d is outside 0..3 (the game has four values)", v); return; }       // not believable: do not guess
+    s.vKnown = true;
+}
+
+std::string AimLink::jumpText(const Shot& s) const {
+    if (!s.vKnown) return fmt("jump: NOT read (%s)", s.vWhy.c_str());
+    return fmt("jump: vertical state %d = %s (jump button left %s, right %s; locomotion state %d)", s.vState, s.vState == 0 ? "ON THE FLOOR" : "IN THE AIR",
+               (s.jumpPressed & 1) ? "pressed" : "no", (s.jumpPressed & 2) ? "pressed" : "no", s.locoState);
 }
 
 void AimLink::abandon(const char* why) {
@@ -587,6 +684,11 @@ void AimLink::tickWait(double now) {
     }
     const float cap = capM_.load();
     s.capM = cap;
+    // the Y button again, now that the decision is made: pressing it right after you let go also counts
+    const bool yFreshNow = yReadable(now);
+    s.yAtDecision = yFreshNow && yHeldNow(now);
+    const bool yCanRead = s.yKnown || yFreshNow;
+    const bool yPass = s.yHeldAtRelease || s.yRecent || s.yAtDecision;
     tzaim::Shot shot; shot.pos = pos; shot.vel = vel;
     const tzaim::Decision d = tzaim::decide(true, cap, shot, s.hoops, s.nHoops, tzaim::Rules());
     s.dec = d;
@@ -611,10 +713,10 @@ void AimLink::tickWait(double now) {
     if (L_.mGetUseGravity && callBool(L_.mGetUseGravity, rb, &ug)) useGrav = ug;
     s.model.gravity = gmag; s.model.drag = drag; s.model.dt = fdt;
 
-    std::string head = fmt("aim: SHOT #%d (noticed by: %s) %.0f ms after the release | ball %s moving %.1f m/s, %.0f deg upward, _unheldTime %.2f | physics: gravity %.2f, drag %.3f, step %.4f s, uses gravity %s%s | %s | hoops known: %d | max shot distance %s",
+    std::string head = fmt("aim: SHOT #%d (noticed by: %s) %.0f ms after the release | ball %s moving %.1f m/s, %.0f deg upward, _unheldTime %.2f | physics: gravity %.2f, drag %.3f, step %.4f s, uses gravity %s%s | %s | %s | %s | hold Y to aim: %s | hoops known: %d | max shot distance %s",
                           s.id, handText(s.hand).c_str(), dt * 1000.0, fv(pos).c_str(), static_cast<double>(speed),
                           static_cast<double>(elev), static_cast<double>(s.unheld), static_cast<double>(gmag), static_cast<double>(drag), static_cast<double>(fdt), useGrav ? "yes" : "NO", physNote.c_str(),
-                          gameFlags().c_str(), s.nHoops, tzaim::capLabel(cap).c_str());
+                          gameFlags().c_str(), yText(s, yCanRead).c_str(), jumpText(s).c_str(), s.holdY ? "ON" : "off", s.nHoops, tzaim::capLabel(cap).c_str());
     s.hoopPos = s.hoops[d.hoop];
     const std::string hoopTxt = fmt("%s at %s, %.1f m away along the floor, %.0f degrees off your throw direction", kHoopNames[s.hoopSlot[d.hoop]], fv(s.hoopPos).c_str(), static_cast<double>(d.distanceM), static_cast<double>(d.angleDeg));
     s.predStart = vel;
@@ -627,6 +729,14 @@ void AimLink::tickWait(double now) {
         wrongDir_.fetch_add(1); s.why = "no hoop within 40 degrees of your throw direction";
         queue(head + " | decision: LEFT ALONE - " + s.why + " (closest: " + hoopTxt + ")");
         setLast(fmt("shot #%d: not aimed - no hoop in your throw direction", s.id));
+    } else if (s.holdY && !yCanRead) {
+        yUnknown_.fetch_add(1); s.why = "'hold Y to aim' is ON but the Y button could not be read";
+        queue(head + " | decision: LEFT ALONE - " + s.why);
+        setLast(fmt("shot #%d: not aimed - cannot read the Y button", s.id));
+    } else if (s.holdY && !yPass) {
+        notHoldingY_.fetch_add(1); s.why = "the Y button was not held when you let go and 'hold Y to aim' is ON";
+        queue(head + " | decision: LEFT ALONE - " + s.why + " (" + hoopTxt + ")");
+        setLast(fmt("shot #%d: not aimed - hold Y to aim", s.id));
     } else if (!useGrav) {
         refused_.fetch_add(1); s.why = "the ball does not use the engine's gravity, so the flight cannot be worked out";
         queue(head + " | decision: LEFT ALONE - " + s.why);

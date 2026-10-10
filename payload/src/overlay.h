@@ -59,11 +59,13 @@ bool takeScanRequest();
 bool takeShotScanRequest();                   // the "Scan ball and hoops" button on the Basketball page (the same one-at-a-time scan, a different report)
 void setScanResult(bool ok, int matches);     // called when the scan ends (any thread)
 void setLinkState(int state);                 // 0 = waiting (no switch on), 1 = connected to the game, 2 = looking for the player object, 3 = failed
+// stage D8: the Basketball page's game link card. state: 0 off, 1 connected, 2 looking for your ball control, 3 failed. The two texts are short plain sentences (cut to fit).
+void setAimInfo(int state, const char* headline, const char* lastShot);
 // A copy of what the Movement switches/sliders ask for right now (taken under the menu's lock).
 struct MovementAsk { bool speedOn, jumpOn; int gravityMode; float speed, jump, lowPct, highPct; };
 MovementAsk movementAsk();
 // What the Basketball page asks for right now (taken under the menu's lock). `capM` is 5 .. 50; 50 means "Unlimited".
-struct AimAsk { bool on; float capM; };
+struct AimAsk { bool on; float capM; bool holdY; };
 AimAsk aimAsk();
 
 // True while the menu is open, and for a moment after it closes. The input doorway uses this to hide

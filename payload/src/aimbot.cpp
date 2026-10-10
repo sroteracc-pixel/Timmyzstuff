@@ -2,6 +2,7 @@
 #include "aimbot.h"
 
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 
 namespace tzaim {
@@ -106,6 +107,93 @@ Solution solve(const Vec3& from, const Vec3& to, const SolveParams& p) {
     s.vel.x = dx / D * v * c; s.vel.z = dz / D * v * c; s.vel.y = v * sn;
     s.flightSeconds = D / (v * c);
     return s;
+}
+
+
+// ---------------------------------------------------------------- stage D8: flight with drag
+Crossing flyToRing(const Vec3& from, const Vec3& vel, float ringY, const FlightModel& m, float maxSeconds) {
+    Crossing c;
+    const double dt = (m.dt > 1e-4f && m.dt < 0.2f) ? m.dt : 0.02;
+    const double damp = std::fmax(0.0, std::fmin(1.0, 1.0 - static_cast<double>(m.drag) * dt));
+    double px = from.x, py = from.y, pz = from.z, vx = vel.x, vy = vel.y, vz = vel.z;
+    const long steps = static_cast<long>(maxSeconds / dt) + 1;
+    for (long i = 0; i < steps; ++i) {
+        const double qx = px, qy = py, qz = pz;
+        vy -= static_cast<double>(m.gravity) * dt;
+        vx *= damp; vy *= damp; vz *= damp;
+        px += vx * dt; py += vy * dt; pz += vz * dt;
+        if (vy < 0 && qy >= ringY && py < ringY) {                      // came down through the ring's height
+            const double k = (qy - ringY) / (qy - py);
+            c.crossed = true;
+            c.pos = Vec3{static_cast<float>(qx + (px - qx) * k), ringY, static_cast<float>(qz + (pz - qz) * k)};
+            c.seconds = static_cast<float>((static_cast<double>(i) + k) * dt);
+            c.entryDeg = static_cast<float>(std::atan2(-vy, std::sqrt(vx * vx + vz * vz)) * 180.0 / 3.14159265358979);
+            return c;
+        }
+        if (py < from.y - 300.0) break;                                  // fell far below: give up
+    }
+    return c;
+}
+
+Vec3 velocityAfter(const Vec3& vel, float seconds, const FlightModel& m) {
+    const double dt = (m.dt > 1e-4f && m.dt < 0.2f) ? m.dt : 0.02;
+    const double damp = std::fmax(0.0, std::fmin(1.0, 1.0 - static_cast<double>(m.drag) * dt));
+    double vx = vel.x, vy = vel.y, vz = vel.z;
+    const long steps = static_cast<long>(std::floor(static_cast<double>(seconds) / dt + 0.5));
+    for (long i = 0; i < steps && i < 100000; ++i) { vy -= static_cast<double>(m.gravity) * dt; vx *= damp; vy *= damp; vz *= damp; }
+    return Vec3{static_cast<float>(vx), static_cast<float>(vy), static_cast<float>(vz)};
+}
+
+Pose stepsAfter(const Vec3& from, const Vec3& vel, int steps, const FlightModel& m) {
+    const double dt = (m.dt > 1e-4f && m.dt < 0.2f) ? m.dt : 0.02;
+    const double damp = std::fmax(0.0, std::fmin(1.0, 1.0 - static_cast<double>(m.drag) * dt));
+    double px = from.x, py = from.y, pz = from.z, vx = vel.x, vy = vel.y, vz = vel.z;
+    for (int i = 0; i < steps && i < 100000; ++i) {
+        vy -= static_cast<double>(m.gravity) * dt; vx *= damp; vy *= damp; vz *= damp;
+        px += vx * dt; py += vy * dt; pz += vz * dt;
+    }
+    Pose r; r.pos = Vec3{static_cast<float>(px), static_cast<float>(py), static_cast<float>(pz)}; r.vel = Vec3{static_cast<float>(vx), static_cast<float>(vy), static_cast<float>(vz)};
+    return r;
+}
+
+Solution solveFlight(const Vec3& from, const Vec3& to, const SolveParams& p, const FlightModel& m) {
+    auto fail = [](const char* why) { Solution bad; bad.why = why; return bad; };
+    SolveParams q = p; q.gravity = m.gravity;
+    Solution first = solve(from, to, q);                                   // the drag-free answer: tells the direction, the arc and a first speed
+    if (!first.ok) return first;
+    const float dx = to.x - from.x, dz = to.z - from.z, D = std::sqrt(dx * dx + dz * dz);
+    const double ux = dx / D, uz = dz / D;
+    const float hi = clampf(p.maxLaunchDeg, 5.0f, 89.0f);
+    float launch = first.launchDeg;
+    for (int round = 0; round < 40; ++round) {                              // a steeper arc, if the entry is too flat after drag
+        const double th = rad(launch), c = std::cos(th), sn = std::sin(th);
+        // bisection on the speed: the flat distance covered when the ball comes down to the ring's height must be D
+        auto miss = [&](double sp, Crossing* out) {
+            const Vec3 v{static_cast<float>(ux * sp * c), static_cast<float>(sp * sn), static_cast<float>(uz * sp * c)};
+            const Crossing cr = flyToRing(from, v, to.y, m, 60.0f);                  // long limit: a very fast, high throw stays in the air a long time
+            if (out) *out = cr;
+            if (!cr.crossed) return -1e6;                                    // never comes down to the ring (too weak): "far too short"
+            return static_cast<double>((cr.pos.x - from.x) * ux + (cr.pos.z - from.z) * uz) - D;
+        };
+        double a = first.speed * 0.5, b = first.speed * 1.5 + 1.0;
+        const double bMax = p.maxSpeed * 1.5;                              // a bit above the allowed maximum, so "too fast" is told apart from "no answer"
+        while (b < bMax && miss(b, nullptr) < 0) b *= 1.5;                 // the drag may need a much faster throw: widen the search upward
+        if (b > bMax) b = bMax;
+        if (!(miss(a, nullptr) < 0) || !(miss(b, nullptr) > 0)) return fail("could not find a speed that reaches the hoop with this drag");
+        for (int i = 0; i < 60; ++i) { const double mid = 0.5 * (a + b); if (miss(mid, nullptr) < 0) a = mid; else b = mid; }
+        const double sp = 0.5 * (a + b);
+        Crossing cr; const double err = miss(sp, &cr);
+        if (!cr.crossed || std::fabs(err) > 0.02) return fail("could not find a speed that reaches the hoop with this drag");
+        if (sp > p.maxSpeed) return fail("would need a faster throw than the maximum");
+        if (cr.entryDeg + 1e-3f >= p.minEntryDeg) {
+            Solution s; s.ok = true; s.speed = static_cast<float>(sp); s.launchDeg = launch; s.entryDeg = cr.entryDeg; s.flightSeconds = cr.seconds;
+            s.vel = Vec3{static_cast<float>(ux * sp * c), static_cast<float>(sp * sn), static_cast<float>(uz * sp * c)};
+            return s;
+        }
+        if (launch >= hi - 1e-3f) return fail("cannot come down steeply enough within the maximum launch angle");
+        launch = std::min(hi, launch + 1.0f);
+    }
+    return fail("no arc found");
 }
 
 }  // namespace tzaim

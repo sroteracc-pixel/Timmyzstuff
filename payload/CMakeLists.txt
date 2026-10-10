@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.18)
 project(timmyzstuff_payload CXX)
 set(CMAKE_CXX_STANDARD 17)
-add_library(main_payload SHARED src/proxy.cpp src/frame_stubs.cpp src/overlay.cpp src/pointer.cpp src/movement.cpp src/game_link.cpp src/aimbot.cpp src/il2cpp_scan.cpp src/panel.cpp src/panel_font.cpp ../menu/src/menu_input.cpp)     # produces libmain_payload.so
+add_library(main_payload SHARED src/proxy.cpp src/frame_stubs.cpp src/overlay.cpp src/pointer.cpp src/movement.cpp src/game_link.cpp src/aimbot.cpp src/aim_link.cpp src/il2cpp_scan.cpp src/panel.cpp src/panel_font.cpp ../menu/src/menu_input.cpp)     # produces libmain_payload.so
 target_include_directories(main_payload PRIVATE ../menu/src)
 target_compile_options(main_payload PRIVATE -fvisibility=hidden)   # export only JNI_OnLoad
 target_link_options(main_payload PRIVATE -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports.map)

@@ -1,6 +1,6 @@
-# Movement page (stage D6, still the same in stage D7)
+# Movement page (stage D6, still the same in stage D8c)
 
-Stage D7 only added the Basketball page with the Aimbot switch (see AIMBOT.md). Nothing about movement changed.
+Stages D7, D8, D8b and D8c added the Basketball page and the Aimbot (see AIMBOT.md). Nothing about movement changed.
 
 ## What is real, what is not
 | Part | State |

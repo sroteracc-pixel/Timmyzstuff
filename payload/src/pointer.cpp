@@ -102,6 +102,7 @@ void Interaction::press(int id, float x, PanelState& s, const std::vector<HitRec
         o.redraw = true; break;
     // Basketball page. The Aimbot switch is never saved: the game always starts with it off.
     case HIT_TOGGLE_AIM: s.aimOn = !s.aimOn; o.redraw = true; break;
+    case HIT_TOGGLE_AIMY: s.aimHoldY = !s.aimHoldY; o.redraw = o.saveNeeded = true; break;      // this one IS saved (it is a setting, not an effect)
     case HIT_SCAN_SHOT:
         if (s.scanState != 1) { s.scanState = 1; o.shotScanRequested = true; }
         o.redraw = true; break;

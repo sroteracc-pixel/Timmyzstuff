@@ -97,7 +97,10 @@ struct PanelState {
     // ---- Basketball page (Aimbot). The switch is NEVER saved: every launch starts with it off. The distance IS saved. ----
     bool aimOn = false;             // Aimbot switch
     float aimCapM = kAimDefault;    // max shot distance, 5 .. 50 m (50 = Unlimited)
-    int aimLinkState = 0;           // 0 = the part that touches the game's ball does not exist yet (stage D7). Later stages use the other numbers.
+    bool aimHoldY = true;           // "Hold Y to aim": the Aimbot acts only while the Y button is held as you let go of the ball. Starts ON; IS saved.
+    int aimLinkState = 0;           // stage D8: 0 = off (switch off), 1 = connected to the game's ball, 2 = looking for your ball control, 3 = failed
+    std::string aimHeadline;        // short text from the game part: what it is doing right now (empty = the menu picks a default text)
+    std::string aimLastShot;        // short text: what happened to your last throw (empty = no throw seen yet)
 };
 
 // Clickable areas (in picture pixels), so a pointer can find what it points at.
@@ -121,6 +124,7 @@ enum HitId {
     HIT_SLIDER_AIMCAP = 46,         // Basketball page: max shot distance
     HIT_TOGGLE_AIM = 47,            // Basketball page: Aimbot switch
     HIT_SCAN_SHOT = 48,             // Basketball page: "Scan ball and hoops" button
+    HIT_TOGGLE_AIMY = 49,           // Basketball page: "Hold Y to aim" switch
     HIT_COLOR0 = 60,                // 60 .. 69 = the 10 colours
 };
 struct HitRect { int id; float x, y, w, h; };

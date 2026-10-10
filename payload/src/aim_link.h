@@ -51,6 +51,7 @@ struct Config {
     const char* gameThreadName = "UnityMain";  // only a thread with this name may call into the game (empty = any thread: PC tests)
     double releaseDelaySeconds = 0.04;         // after you let go: wait this long before reading the ball's speed (the throw has been applied by then)
     double releaseWindowSeconds = 0.40;        // ... and give up when no shot-like speed showed up within this long
+    double yGraceSeconds = 0.10;               // "Hold Y": Y also counts when it was let go of up to this long before you let go of the ball
     double watchSeconds = 4.5;                 // how long a flight is watched
     int maxReportLines = 220;                  // lines this link may write into the facts file in total
     bool allowWrite = true;                    // false: only read and report (PC tests)
@@ -64,6 +65,8 @@ struct Counters {
     unsigned long long shotLike = 0;    // ... that looked like a shot
     unsigned long long aimed = 0;       // ... and where the ball's speed was changed
     unsigned long long tooFar = 0, wrongDirection = 0, noHoop = 0, notAShot = 0, noSolution = 0, refused = 0;   // shots left alone, by reason
+    unsigned long long notHoldingY = 0, yUnknown = 0;      // stage D8c ("Hold Y to aim"): shots left alone because Y was not held / because the Y button could not be read
+    unsigned long long yReadsProbe = 0, yHeldProbe = 0, yReadsDoorway = 0, yHeldDoorway = 0;   // how often the Y button was read (and seen held) by the menu's thread / by the controller doorway
     unsigned long long errors = 0;      // engine calls that threw an error in the game
     unsigned long long overridden = 0;  // the game changed the speed we set
     unsigned long long scored = 0, missed = 0;     // what the game said about watched shots (_shotMade)
@@ -77,7 +80,12 @@ public:
     void stop();
 
     // The menu's Aimbot switch and max shot distance (5 ... 50 m; 50 = Unlimited). Cheap; called often.
-    void setAsk(bool on, float capM);
+    // `holdY` = the menu's "Hold Y to aim" switch: the throw is only changed when the Y button (left Touch controller) is held as you let go of the ball.
+    void setAsk(bool on, float capM, bool holdY = false);
+
+    // The real Y button, as seen right now. Called by the menu's thread (about 50 times a second) and by the controller doorway (about 185 times a second).
+    // Cheap, never waits, ignored while the switch is off. `fromDoorway` only tells the facts file which of the two saw it.
+    void noteY(bool held, bool fromDoorway);
 
     // Called by the game's own thread inside the controller doorway (about 185 times a second). Does its work in microseconds, never waits,
     // never writes to a file. Anything but the game's script thread is ignored.
@@ -97,12 +105,16 @@ private:
         bool ok = false;
         tzscan::Api api;
         tzscan::ClassInfo ball, bcm, gm;           // the three game classes (fields with positions)
+        tzscan::ClassInfo loco;                    // stage D8b: ShovelTools.PlayerLocomotion (the player; the jump state lives there). Optional.
         void* rbKlass = nullptr;                   // UnityEngine.Rigidbody
         // Basketball
         int bRigid = -1, bWasShot = -1, bShotMade = -1, bUnheld = -1, bHoopsLen = -1, bOrigDrag = -1, bCurPos = -1;
         int bHoop[6] = {-1, -1, -1, -1, -1, -1};   // north, south, north01, south01, north02, south02
         // BallControlManager
         int cTimerL = -1, cTimerR = -1, cLastRel = -1, cBall = -1, cRaw = -1;
+        // stage D8b: the player's jump state. BallControlManager._playerLocomotion -> PlayerLocomotion._locomotionVerticalState (+ two "jump pressed" flags, for the report)
+        int cLoco = -1, lVert = -1, lJumpL = -1, lJumpR = -1, lState = -1, lRead = 0;     // lRead = how many bytes of the player object are read
+        bool jumpOk = false; std::string jumpWhy;                                          // jumpOk: the jump state can be read; jumpWhy: why not
         // GameManager
         int gBcm = -1, gState = -1, gComp = -1, gGm = -1, gSolo = -1, gNba = -1;
         // engine and game methods (null = not found)
@@ -129,6 +141,15 @@ private:
         int madeFlag = -1;                           // _shotMade at the end: -1 unknown, 0 no, 1 yes
         bool overridden = false; float overrideDiff = 0;
         std::string why;                             // when nothing was changed
+        // stage D8c: the Y button at the moment of the release (and again when the decision is made)
+        bool holdY = false;                          // the menu's "Hold Y to aim" at that moment
+        bool yKnown = false, yHeldAtRelease = false; // yKnown: the Y button was being read; yHeldAtRelease: it was held when you let go
+        double yAgo = -1;                            // when not held at the release: seconds since it was last seen held (-1 = not within this session)
+        bool yRecent = false, yAtDecision = false;   // let go of Y up to yGraceSeconds before the release / held when the decision was made
+        // stage D8b (report only since D8c): the player's jump state, read at the moment of the release
+        bool vKnown = false; int vState = -1;        // the game's vertical state number (0 = on the floor); vKnown = it could be read
+        int jumpPressed = 0, locoState = -1;         // report only: bit 1 left jump pressed, bit 2 right jump pressed; the game's locomotion state number
+        std::string vWhy;                            // when it could not be read
     };
 
     static void* threadMain(void* self);
@@ -149,6 +170,10 @@ private:
     void fastResolve(double now);
     void dropBcm(const char* why);
     void startShot(double now, int hand, uintptr_t ballPtr);
+    void readJump(Shot& s);                                                       // game thread: the player's vertical state at the release (report only)
+    void readY(Shot& s, double now);                                              // game thread: the Y button at the release
+    std::string jumpText(const Shot& s) const;
+    std::string yText(const Shot& s, bool readable) const;
     void tickWait(double now);
     void tickWatch(double now);
     void finishShot(const char* why, double now);
@@ -171,6 +196,14 @@ private:
     bool pipesOk_ = false;
     std::atomic<bool> on_{false};
     std::atomic<float> capM_{50.0f};
+    std::atomic<bool> holdY_{false};
+    // The Y button has two readers ([0] the menu's thread, [1] the controller doorway). Each keeps its latest reading and when it was made (the link's clock).
+    // "Y is held" = ANY reader that is still reporting says held, so one reader that sees nothing (e.g. the doorway asked about the right hand only) cannot cancel the other.
+    std::atomic<bool> yNow_[2] = {{false}, {false}};
+    std::atomic<double> ySeen_[2] = {{-1e9}, {-1e9}};
+    std::atomic<double> yHeldAt_{-1e9};          // when Y was last seen HELD by anyone
+    bool yHeldNow(double now) const;             // some reader says held, and made that reading no more than 0.15 s ago
+    bool yReadable(double now) const;            // some reader made a reading within the last second
     // handover from the link thread (memory search) to the game thread
     std::atomic<uintptr_t> bcmFound_{0}, gmFound_{0};
     std::atomic<unsigned> bcmGen_{0};
@@ -187,7 +220,7 @@ private:
         bool engineChecked = false;
         int bindNotes = 0, releaseNotes = 0;
     } g_;
-    std::vector<unsigned char> bcmBuf_, ballBuf_, gmBuf_;
+    std::vector<unsigned char> bcmBuf_, ballBuf_, gmBuf_, locoBuf_;
     // reports from the game thread to the facts file
     mutable std::mutex outMu_;
     std::vector<std::string> out_;
@@ -198,8 +231,8 @@ private:
     double nextLayoutAt_ = 0, nextSearchAt_ = 0, lastSearchEnd_ = -1e9;
     int layoutTries_ = 0, searches_ = 0, emptySearches_ = 0;
     std::atomic<int> notes_{0};
-    std::atomic<unsigned long long> calls_{0}, ticks_{0}, releases_{0}, shotLike_{0}, aimed_{0}, tooFar_{0}, wrongDir_{0}, noHoop_{0}, notShot_{0}, noSolution_{0}, refused_{0},
-                                    errors_{0}, overridden_{0}, scored_{0}, missed_{0};
+    std::atomic<unsigned long long> calls_{0}, ticks_{0}, releases_{0}, shotLike_{0}, aimed_{0}, tooFar_{0}, wrongDir_{0}, noHoop_{0}, notShot_{0}, noSolution_{0}, refused_{0}, notHoldingY_{0}, yUnknown_{0},
+                                    yReads_{0}, yHeld_{0}, yReadsDoor_{0}, yHeldDoor_{0}, errors_{0}, overridden_{0}, scored_{0}, missed_{0};
     std::atomic<int> shotSeq_{0};
     std::atomic<double> onSinceAtomic_{-1};
     std::string engineDeadWhy_;                  // under mu_
