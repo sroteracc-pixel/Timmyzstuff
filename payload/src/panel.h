@@ -86,7 +86,7 @@ struct PanelState {
     float jumpMul = kJumpMin;       // 1.1 .. 5.0 (times the normal jump HEIGHT)
     float lowGravPct = 0.0f;        // 0 .. 90: 90 means only 10% of normal gravity is left
     float highGravPct = 0.0f;       // 0 .. 90: 90 means 190% of normal gravity
-    int linkState = 0;              // 0 = the menu is not connected to the game's movement code, 1 = connected
+    int linkState = 0;              // 0 = waiting (no switch on yet), 1 = connected to the game's movement code, 2 = looking for the player, 3 = failed
     int scanState = 0;              // game-code scan: 0 not run, 1 running, 2 done, 3 failed
     int scanMatches = 0;            // how many interesting classes the scan wrote down
 };

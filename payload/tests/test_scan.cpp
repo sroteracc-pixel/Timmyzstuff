@@ -108,7 +108,10 @@ int main(int, char** argv) {
     check("RemoveMovementTag (contains Movement) is written out", has("scan: CLASS Game.RemoveMovementTag"));
     check("RemoveItem is NOT written out", !has("CLASS Game.RemoveItem"));
     check("MobilePlayerLocomotion is written out first-class", has("scan: CLASS Game.MobilePlayerLocomotion : LocomotionBase   [assembly Assembly-CSharp]") && has("method SetJumpHeight(1) : System.Void rva="));
-    check("an important class is written out in FULL, no 60-field limit (70 fields)", has("field _pad69 : System.Int32 @292") && !has("(more fields not shown)"));
+    {   // (the other important-looking class, PlayerLocomotion with 211 fields, is a movement-ish class here and keeps its limit: so look at what follows _pad69)
+        int padAt = -1; for (size_t i = 0; i < gLines.size(); ++i) if (gLines[i].find("field _pad69 : System.Int32 @292") != std::string::npos) padAt = static_cast<int>(i);
+        check("an important class is written out in FULL, no 60-field limit (70 fields)", padAt >= 0 && padAt + 1 < static_cast<int>(gLines.size()) && gLines[padAt + 1].find("more fields not shown") == std::string::npos);
+    }
     check("7 classes written out in detail", s.matchedClasses == 7);
     check("a speed field in a non-matching class is a field-hit", has("scan: field-hit Game.GameSettings.speedMultiplier : System.Single @16"));
     check("a 'fly' field in the Menu class is a field-hit", has("scan: field-hit Game.Menu.flyingText"));
@@ -184,15 +187,20 @@ int main(int, char** argv) {
         check("brief scan: ok", sb.ok && !sb.memoryStuck);
         check("brief scan: no index lines and no single-line hits", countOf("scan: index ") == 0 && !has("scan: field-hit") && !has("scan: type-hit") && sb.indexed == 0);
         check("brief scan: non-important classes are not written out", !has("scan: CLASS Game.PlayerMovement") && !has("scan: CLASS Game.MobilePlayerLocomotion"));
-        check("brief scan: PlayerLocomotion is written out in full", has("scan: CLASS ShovelTools.PlayerLocomotion : MonoBehaviour") && has("field _forwardMaxSpeed : System.Single @24") && has("method Update(0) : System.Void rva="));
-        check("brief scan: setter code bytes are written (str s0,[x0,#24] ; ret)", has("method SetForwardMaxSpeed(1) : System.Void rva=") && has(" code=001800bdc0035fd6"));
-        check("brief scan: the second setter writes another field (+28)", has(" code=001c00bdc0035fd6"));
+        check("brief scan: PlayerLocomotion is written out in full", has("scan: CLASS ShovelTools.PlayerLocomotion : MonoBehaviour") && has("field _forwardMaxSpeed : System.Single @684") && has("method Update(0) : System.Void rva="));
+        check("brief scan: setter code bytes are written (str s0,[x0,#684] ; ret)", has("method SetForwardMaxSpeed(1) : System.Void rva=") && has(" code=00ac02bdc0035fd6"));
+        check("brief scan: the second setter writes another field (+732)", has(" code=00dc02bdc0035fd6"));
         bool updateHasCode = false; for (const auto& l : gLines) if (l.find("method Update(0)") != std::string::npos && l.find(" code=") != std::string::npos) updateHasCode = true;
         check("brief scan: methods that are not Set/get_/On get no code bytes", countOf("method Update(0)") >= 1 && !updateHasCode);
         check("brief scan: both copies are real objects, the best-looking is written first", has("scan: live ShovelTools.PlayerLocomotion: ") && has("2 look like a real running copy") && has("best sanity=100%"));
         int at = -1; for (size_t i = 0; i < gLines.size(); ++i) if (gLines[i].find("scan: live ShovelTools.PlayerLocomotion #1") != std::string::npos) { at = static_cast<int>(i); break; }
-        check("brief scan: copy #1 is the healthy one (4.5), with its sanity", at >= 0 && gLines[at].find("sanity=100%") != std::string::npos && at + 1 < static_cast<int>(gLines.size()) && gLines[at + 1].find("live _forwardMaxSpeed = 4.5 ") != std::string::npos);
-        check("brief scan: copy #2 is the garbage one with a low sanity and only differing fields", has("scan: live ShovelTools.PlayerLocomotion #2") && has("sanity=0%") && has("only the fields that differ from copy #1"));
+        bool healthyValue = false;
+        for (size_t i = at < 0 ? gLines.size() : static_cast<size_t>(at) + 1; i < gLines.size() && gLines[i].find("scan: live ShovelTools.PlayerLocomotion #2") == std::string::npos; ++i)
+            if (gLines[i].find("live _forwardMaxSpeed = 2.5 ") != std::string::npos) healthyValue = true;
+        check("brief scan: copy #1 is the healthy one (2.5), with its sanity", at >= 0 && gLines[at].find("sanity=100%") != std::string::npos && healthyValue);
+        int secondSanity = -1;
+        for (const auto& l : gLines) { const size_t q = l.find("scan: live ShovelTools.PlayerLocomotion #2"); if (q != std::string::npos) { const size_t w = l.find("sanity="); if (w != std::string::npos) secondSanity = std::atoi(l.c_str() + w + 7); } }
+        check("brief scan: copy #2 is the garbage one with a low sanity and only differing fields", has("scan: live ShovelTools.PlayerLocomotion #2") && has("only the fields that differ from copy #1") && secondSanity >= 0 && secondSanity < 50);
         check("brief scan: the old (phone) class is not looked for any more", !has("scan: live Game.MobilePlayerLocomotion"));
     }
 

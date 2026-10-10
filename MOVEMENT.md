@@ -1,17 +1,39 @@
-# Movement page (stage D4)
+# Movement page (stage D6)
 
 ## What is real, what is not
 | Part | State |
 |---|---|
-| Movement page in the menu (4 switches, 4 sliders with exact numbers, saved slider values) | Built and tested on a PC |
-| The rules (off = original value back, no stacking, one gravity mode, Fly wins) | Built and tested on a PC (37 checks) |
-| "Scan game code" button (reads the game's class/field/method names into the facts file) | Built; tested ONLY against a pretend game on a PC |
-| **Changing the game's real speed / jump / gravity** | **NOT built. The switches do nothing in the game yet.** |
+| Movement page in the menu (4 switches, 4 sliders with exact numbers, saved slider values) | Built, works on the headset |
+| The rules (off = original value back, no stacking, one gravity mode, Fly wins) | Built and tested on a PC (38 checks) |
+| "Scan game code" button | Works on the headset (stage D5c file) |
+| **Game link: finding the headset's player object and writing into it (Speed, Jump, Low / High Gravity)** | **Built in stage D6. Tested on a PC against a pretend game (77 link checks + a whole-payload run). NOT yet seen working in the real game.** |
 | **Fly** | **Does not exist yet.** The rules already have a "Fly is on" input so Fly will win over the boosts once it exists. |
 
-Why nothing happens in the game: no game code (libil2cpp.so, global-metadata.dat) is available to read, so there is
-no verified place to hook. I do not guess game addresses. The menu says "Game link: not connected" until a real
-connection exists.
+## What the game link does (game_link.cpp)
+Everything below was read from the real game by the stage D5c scan (names and exact positions), nothing is guessed:
+- The headset game keeps the player's movement numbers in ONE running object of the class `ShovelTools.PlayerLocomotion`
+  (the stage D5c file found 2 copies: the active player, and an inactive one with head tracking never started).
+- Nothing happens until you turn a movement switch on. Then the link (on its own thread) asks the game's runtime for the class and its
+  field positions, looks through the game's memory (about 3 seconds, low priority, read-only) and keeps the copy that is the ACTIVE player
+  (`_hmdTrackingInitialized` is true and all the numbers are believable).
+- Fields it changes, always as `the game's own value x factor` (never "current x factor", so nothing can pile up):
+  | Switch | Fields (all floats) |
+  |---|---|
+  | Speed Boost | `_forwardMaxSpeed`, `_lateralMaxSpeed`, `_backwardMaxSpeed` and their accelerations / decelerations (9 numbers: the top speed rises and is reached just as fast) |
+  | Jump Boost | `_jumpHeightMultiplier` |
+  | Low / High Gravity | `_gravity` (all 3 numbers of the vector) |
+- The setter code bytes in the facts file confirm the positions (`str s0,[x0,#684]` = `_forwardMaxSpeed`, `#732` = `_jumpHeightMultiplier`).
+- It re-checks the object about 100 times a second while a switch is on. If the game writes its own value back, ours is put back.
+  If the game sets a NEW value of its own (a new setting arrived), that becomes the new "original". A value that is far off the usual
+  (more than 5x) is left alone and reported.
+- Turning a switch off, or the slider going back to "no change", writes the game's own value back exactly.
+- If the object disappears (new scene) the link notices, shows "looking..." in the menu and finds the new one by itself.
+- Every read and write goes through a "safe copy" (the kernel says "no" for a bad address instead of the game crashing).
+
+NOT verified (only the headset can tell): that writing these fields really changes the movement; that `_jumpHeightMultiplier` makes the
+jump 2x as HIGH at 2.0x (if the game uses it as launch speed the jump would be even higher - the facts file records the peak jump speed);
+how `_gravity` interacts with the jump arc; whether the game re-applies its config over our numbers (the facts file counts it);
+whether the online game notices or dislikes changed speeds.
 
 ## The rules (movement.cpp)
 - Everything starts OFF. Switches are never saved; slider values are saved.
@@ -19,8 +41,8 @@ connection exists.
 - Turning a switch off, or moving to "no change", puts the game's original value back exactly.
 - Low Gravity multiplies gravity by `1 - pct/100` (90% -> 10% of normal). High Gravity by `1 + pct/100` (90% -> 190%).
   Only one gravity mode is on at a time (one setting, 0 / low / high).
-- Jump Boost means jump HEIGHT. Height goes with the square of the launch speed, so the launch speed is scaled by
-  the square root of the factor (2.0x height -> about 1.41x launch speed under the same gravity).
+- Jump Boost is meant as jump HEIGHT. The game has a number literally called `_jumpHeightMultiplier`, so that is what is scaled
+  (1.5 in the game -> 3.0 at 2.0x). Whether that gives exactly twice the height is one of the things to check in the headset.
 - When Fly is active (not built yet) the boosts step aside and come back afterwards.
 
 ## Slider ranges
@@ -70,3 +92,14 @@ NOT verified yet: which field each setter writes (stage D5c prints the first byt
 running `PlayerLocomotion` holds, whether writing those fields changes the movement, and whether the game re-applies its config over our change.
 
 If the game closes while scanning, tell me.
+
+## Stage D6 test checklist (in the headset)
+1. Open the menu -> Movement. "Game link: waiting".
+2. Turn **Speed Boost** on at 2.0x. The link says "looking..." for a few seconds, then "connected". Walk: you should be about twice as fast.
+3. Turn it off: normal speed again, at once.
+4. **Jump Boost** 2.0x: jump and compare. Then 3.0x. Then off.
+5. **Low Gravity** 50%: floaty. Then **High Gravity** 50%: heavy. Off: normal.
+6. Turn on all three together, then off one by one.
+7. Open the patcher, press **Get facts**, send me the file (no need to press Scan).
+The facts file lines starting with `link:` say what the link found and wrote, whether the game fought back, and the peak speed seen.
+

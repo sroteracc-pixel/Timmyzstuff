@@ -106,6 +106,12 @@ int main() {
         c.shutdown();
         CHECK("shutdown puts everything back", g.speed == 3.0f && c.status() == Controller::IDLE);
     }
+    {   PretendGame g; Controller c; c.setAdapter(&g); Request q; q.speedOn = true; q.speed = 2.0f; g.captureWorks = false;
+        c.update(q);
+        const bool wasError = c.status() == Controller::ERROR_;
+        g.isReady = false; c.update(q); g.isReady = true; g.captureWorks = true; c.update(q);
+        CHECK("a link that drops and comes back gets a fresh try even with the same request", wasError && g.applies == 1 && near(g.speed, 6.0f) && c.status() == Controller::ACTIVE);
+    }
     std::printf("\npassed: %d  failed: %d\n", passed, failed);
     return failed == 0 ? 0 : 1;
 }

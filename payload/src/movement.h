@@ -11,9 +11,9 @@
 //     * only one gravity mode is active at a time;
 //     * while Fly is active, the boosts step aside (Fly wins) and come back afterwards.
 //
-//   The part that really reaches INTO the game is an "adapter" (see Adapter below). THERE IS NO ADAPTER
-//   YET: reading the game's real movement code has not been possible (see the facts-file scan), so right
-//   now the Controller reports "no game link" and changes nothing in the game.
+//   The part that really reaches INTO the game is an "adapter" (see Adapter below). Since stage D6 the adapter is game_link.cpp
+//   (it writes into the headset's ShovelTools.PlayerLocomotion object). Without a connected adapter the Controller reports
+//   "no game link" and changes nothing in the game.
 #pragma once
 
 namespace tzmove {

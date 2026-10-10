@@ -44,6 +44,7 @@
 #include "frame_stubs.h"
 #include "movement.h"     // the movement rules (stage D4)
 #include "il2cpp_scan.h"   // read-only scan of the game's code (stage D4)
+#include "game_link.h"     // the link that really changes speed / jump / gravity (stage D6)
 #include "overlay.h"      // shows the menu picture in the headset (stage D2)  // counting doorways for ovrp_EndFrame4 / BeginFrame4 / WaitToBeginFrame
 
 #ifdef __ANDROID__
@@ -102,13 +103,20 @@ const size_t kDumpBytes = 192;        // how many bytes of it we write down
 FILE* gOut = nullptr;
 
 void fact(const char* fmt, ...) {
-    if (!gOut) return;
+    FILE* out = gOut;
+    if (!out) return;
+    char b[4096];
     va_list ap;
     va_start(ap, fmt);
-    std::vfprintf(gOut, fmt, ap);
+    int n = std::vsnprintf(b, sizeof b - 1, fmt, ap);
     va_end(ap);
-    std::fputc('\n', gOut);
-    std::fflush(gOut);
+    if (n < 0) return;
+    if (n > static_cast<int>(sizeof b) - 2) n = static_cast<int>(sizeof b) - 2;
+    b[n++] = '\n';
+    flockfile(out);                      // one whole line at a time, even when two threads (menu, scan, game link) write together
+    std::fwrite(b, 1, static_cast<size_t>(n), out);
+    std::fflush(out);
+    funlockfile(out);
 }
 
 double secondsSinceStart() {
@@ -492,15 +500,32 @@ void* scanWorker(void* p) {
     return nullptr;
 }
 
+// Finds the game's libil2cpp.so that is already loaded (never loads anything new). `base` = where it starts in memory.
+void* openIl2cpp(uintptr_t* base) {
+    void* lib = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
+    uintptr_t b = 0; std::string path;
+    for (const MapRegion& r : readMaps()) {
+        if (r.path.size() >= 12 && r.path.compare(r.path.size() - 12, 12, "libil2cpp.so") == 0) { if (!b || r.start < b) b = r.start; path = r.path; }
+    }
+    if (!lib && !path.empty()) lib = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+    if (base) *base = b;
+    return lib;
+}
+
+// For the movement link: gives it the game's il2cpp functions (asked again and again until the game has loaded them).
+bool il2cppForLink(tzscan::Api* api, std::string* why) {
+    void* lib = openIl2cpp(nullptr);
+    if (!lib) { *why = "libil2cpp.so is not loaded in the game yet"; return false; }
+    std::string missing;
+    if (!tzscan::loadApi(lib, api, &missing)) { *why = "libil2cpp.so lacks: " + missing; return false; }
+    return true;
+}
+
 void* scanMain(void*) {
     fact("--- scan requested from the menu at t=%.1f ---", secondsSinceStart());
     bool ok = false; int matches = 0;
-    void* lib = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
-    uintptr_t base = 0; std::string path;
-    for (const MapRegion& r : readMaps()) {
-        if (r.path.size() >= 12 && r.path.compare(r.path.size() - 12, 12, "libil2cpp.so") == 0) { if (!base || r.start < base) base = r.start; path = r.path; }
-    }
-    if (!lib && !path.empty()) lib = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+    uintptr_t base = 0;
+    void* lib = openIl2cpp(&base);
     if (!lib) {
         fact("scan: libil2cpp.so is not loaded in the game (so there is nothing to read)");
     } else {
@@ -553,11 +578,29 @@ void startScan() {
     else { gScanRunning.store(false); tzoverlay::setScanResult(false, 0); fact("scan: could not start the scan thread"); }
 }
 
-// ---- stage D4: movement ----------------------------------------------------------------------
-// The rules (tested on a PC) live in movement.cpp. There is NO adapter to the game yet, so the controller
-// reports "no game link" and nothing is changed in the game. The requests are still logged, so the facts
-// file shows what the menu asked for.
+// ---- stage D4 / D6: movement ----------------------------------------------------------------
+// The rules (tested on a PC) live in movement.cpp. Since stage D6 the controller talks to the game through game_link.cpp
+// (it finds the headset's PlayerLocomotion object when a switch is turned on and writes "original x factor" into it).
+// The requests and what the link does are written to the facts file.
 tzmove::Controller gMove;
+tzgame::PlayerLink gLink;
+
+#ifdef TZ_FAST_TEST
+// PC test only: pretend the menu switches are set like this. TZ_TEST_ASK="speed,jump,gravityMode,pct" (speed / jump of 1 = switch off),
+// from TZ_TEST_ASK_ON_S to TZ_TEST_ASK_OFF_S seconds after the start.
+void testOverride(tzoverlay::MovementAsk* a, double now) {
+    const char* e = std::getenv("TZ_TEST_ASK");
+    if (!e) return;
+    float sp = 1, ju = 1, pct = 0; int mode = 0;
+    std::sscanf(e, "%f,%f,%d,%f", &sp, &ju, &mode, &pct);
+    double onAt = 0, offAt = 1e18;
+    if (const char* o = std::getenv("TZ_TEST_ASK_ON_S")) onAt = std::atof(o);
+    if (const char* o = std::getenv("TZ_TEST_ASK_OFF_S")) offAt = std::atof(o);
+    if (now < onAt || now >= offAt) return;
+    a->speedOn = sp >= 1.05f; a->speed = sp; a->jumpOn = ju >= 1.05f; a->jump = ju;
+    a->gravityMode = mode; a->lowPct = mode == 1 ? pct : 0.0f; a->highPct = mode == 2 ? pct : 0.0f;
+}
+#endif
 
 void* probeMain(void*) {
     secondsSinceStart();                               // start the clock
@@ -566,7 +609,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D5c: clickable menu + Movement page + update check + short scan of the headset movement classes; movement NOT connected to the game yet)");
+    fact("Timmyzstuff facts (stage D6: clickable menu + Movement page + update check + short scan + REAL game link for Speed Boost / Jump Boost / Low and High Gravity (Fly does not exist yet))");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -639,6 +682,13 @@ void* probeMain(void*) {
     // ---- controllers -> the real open/close rules ------------------------------------------
     fact("--- controller test: hold BOTH triggers and click A to open; B closes ---");
     fact("layout (matches your stage B file): bytes 4-7 buttons (A=1 B=2 X=256 Y=512), floats at 16 (left trigger) and 20 (right trigger)");
+    {   tzgame::LinkConfig lc; lc.provider = il2cppForLink; lc.note = fact;
+#ifdef TZ_FAST_TEST
+        lc.retrySoonSeconds = 0.3; lc.minSearchGapSeconds = 0.3; lc.refreshSeconds = 30; lc.searchSeconds = 20; lc.stallSeconds = 5;     // PC test only: quicker
+#endif
+        gMove.setAdapter(&gLink);
+        gLink.start(lc);                                 // does nothing in the game until a movement switch is turned on
+    }
     MenuInput menu;                                      // the same rules the real menu will use
     alignas(16) unsigned char buf[kBufSize];
     alignas(16) unsigned char prev[kBufSize];
@@ -754,22 +804,36 @@ void* probeMain(void*) {
         { static bool testScanDone = false; if (!testScanDone && now >= 2.0) { testScanDone = true; startScan(); } }     // PC test only: press "Scan" by itself
 #endif
         {
-            const tzoverlay::MovementAsk ask = tzoverlay::movementAsk();
+            tzoverlay::MovementAsk ask = tzoverlay::movementAsk();
+#ifdef TZ_FAST_TEST
+            testOverride(&ask, now);
+#endif
             tzmove::Request req;
             req.speedOn = ask.speedOn; req.speed = ask.speed; req.jumpOn = ask.jumpOn; req.jump = ask.jump;
             req.gravityMode = ask.gravityMode; req.lowPct = ask.lowPct; req.highPct = ask.highPct; req.flyActive = false;   // there is no Fly yet
+            gLink.setWanted(req.speedOn || req.jumpOn || req.gravityMode != 0);       // only now does the link look for the player object
             gMove.update(req);
-            tzoverlay::setLinkState(gMove.status() == tzmove::Controller::NO_LINK ? 0 : 1);
+            const int linkUi = gLink.uiState();
+            tzoverlay::setLinkState(linkUi);
             static int moveLogs = 0; static double lastMoveLog = -10; static tzoverlay::MovementAsk lastAsk = {false, false, 0, 0, 0, 0, 0};
             const bool changed = ask.speedOn != lastAsk.speedOn || ask.jumpOn != lastAsk.jumpOn || ask.gravityMode != lastAsk.gravityMode ||
                                  (now - lastMoveLog > 1.0 && (ask.speed != lastAsk.speed || ask.jump != lastAsk.jump || ask.lowPct != lastAsk.lowPct || ask.highPct != lastAsk.highPct) && (ask.speedOn || ask.jumpOn || ask.gravityMode));
             if (changed && moveLogs < 40) {
                 ++moveLogs; lastMoveLog = now; lastAsk = ask;
                 const tzmove::Effective e = tzmove::resolve(req);
-                fact("movement: menu asks speed=%s %.1fx | jump=%s %.1fx | gravity=%s %.0f%%  ->  would send speed x%.2f, jump height x%.2f, gravity x%.2f  [%s]",
+                const char* what = gMove.status() == tzmove::Controller::ACTIVE ? "applied to the game" :
+                                   gMove.status() == tzmove::Controller::ERROR_ ? "the game's values could not be read: nothing changed" :
+                                   gMove.status() == tzmove::Controller::IDLE ? "nothing to change" : "game link not connected (yet): nothing changed in the game so far";
+                fact("movement: menu asks speed=%s %.1fx | jump=%s %.1fx | gravity=%s %.0f%%  ->  game gets speed x%.2f, jump height x%.2f, gravity x%.2f  [%s]",
                      ask.speedOn ? "ON" : "off", ask.speed, ask.jumpOn ? "ON" : "off", ask.jump,
                      ask.gravityMode == 1 ? "LOW" : (ask.gravityMode == 2 ? "HIGH" : "off"), ask.gravityMode == 1 ? ask.lowPct : (ask.gravityMode == 2 ? ask.highPct : 0.0f),
-                     e.speedMul, e.jumpHeightMul, e.gravityMul, gMove.status() == tzmove::Controller::NO_LINK ? "no game link: nothing is changed in the game" : "applied");
+                     e.speedMul, e.jumpHeightMul, e.gravityMul, what);
+            }
+            // the link's own numbers: whenever its state changes and then every 15 seconds while a switch is on (never more than 100 lines)
+            static int lastLinkUi = 0, linkLogs = 0; static double nextLinkLog = 0;
+            if ((linkUi != lastLinkUi || (linkUi != 0 && now >= nextLinkLog)) && linkLogs < 100) {
+                ++linkLogs; lastLinkUi = linkUi; nextLinkLog = now + 15.0;
+                fact("t=%.0f %s", now, gLink.summary().c_str());
             }
         }
         tzoverlay::tick(now, fact);
@@ -790,6 +854,7 @@ void* probeMain(void*) {
         usleep(20 * 1000);                              // 50 samples per second
     }
     fact("summary: menu opened %d times, closed %d times", opens, closes);
+    fact("%s", gLink.summary().c_str());
     for (int i = 0; i < frameWatchCount(); ++i)
         fact("frame watch %s: %s, %llu calls counted in total", frameWatch(i)->name, gWatchPatched[i] ? "installed" : "NOT installed (the plugin never saved that address)", static_cast<unsigned long long>(*frameWatch(i)->count));
     fact("done: %ld samples, %d change lines", samples, lines);
@@ -810,7 +875,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D5c: pass-through + input probe + frame watcher + clickable menu panel + movement page)");
+    logf_("payload loaded (stage D6: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

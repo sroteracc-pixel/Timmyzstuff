@@ -27,7 +27,7 @@ Effective resolve(const Request& r) {
 }
 
 bool Controller::update(const Request& r) {
-    if (!adapter_ || !adapter_->ready()) { status_ = NO_LINK; return false; }
+    if (!adapter_ || !adapter_->ready()) { status_ = NO_LINK; failedWith_ = Effective(); return false; }      // (a link that comes back gets a fresh try)
     const Effective want = resolve(r);
     if (want.sameAs(applied_)) { if (status_ != ERROR_) status_ = applied_.isIdentity() ? IDLE : ACTIVE; return false; }   // nothing new: do NOT apply again
     if (want.isIdentity()) {                       // everything off (or Fly took over): put the originals back

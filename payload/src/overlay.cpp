@@ -362,9 +362,9 @@ void setScanResult(bool ok, int matches) {
     std::lock_guard<std::mutex> g(gMutex);
     gState.scanState = ok ? 2 : 3; gState.scanMatches = matches; gDirty = true;
 }
-void setLinkState(int linked) {
+void setLinkState(int state) {
     std::lock_guard<std::mutex> g(gMutex);
-    if (gState.linkState != linked) { gState.linkState = linked; gDirty = true; }
+    if (gState.linkState != state) { gState.linkState = state; gDirty = true; }
 }
 MovementAsk movementAsk() {
     std::lock_guard<std::mutex> g(gMutex);

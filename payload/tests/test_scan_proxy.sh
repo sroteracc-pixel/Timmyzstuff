@@ -8,7 +8,7 @@ pass=0; failn=0
 check() { if eval "$2"; then pass=$((pass+1)); echo "  PASS  $1"; else failn=$((failn+1)); echo "  FAIL  $1"; fi; }
 
 g++ -std=c++17 -shared -fPIC -fvisibility=hidden -I"$HERE/fake_jni" -I"$HERE/../src" -I"$HERE/../../menu/src" -DTZ_FAST_TEST \
-  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/movement.cpp" "$HERE/../src/il2cpp_scan.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" "$HERE/../../menu/src/menu_input.cpp" \
+  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/movement.cpp" "$HERE/../src/game_link.cpp" "$HERE/../src/il2cpp_scan.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" "$HERE/../../menu/src/menu_input.cpp" \
   -ldl -pthread -Wl,--version-script="$HERE/../exports.map" -o "$W/libmain.so" || exit 2
 echo 'extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void*, void*) { return 0x00010006; }' > "$W/orig.cpp"
 g++ -shared -fPIC "$W/orig.cpp" -o "$W/libmain_orig.so"
@@ -28,8 +28,20 @@ cat > "$W/host.cpp" <<'C'
 #include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <string>
+static unsigned char* gPlayer = nullptr;
+static void show(const char* tag) {
+  if (!gPlayer) return;
+  float fwd, jump, gy; std::memcpy(&fwd, gPlayer + 684, 4); std::memcpy(&jump, gPlayer + 732, 4); std::memcpy(&gy, gPlayer + 528, 4);
+  std::printf("%s fwd=%g jump=%g gy=%g\n", tag, (double)fwd, (double)jump, (double)gy); std::fflush(stdout);
+}
+static bool fileHas(const std::string& path, const std::string& prefix) {
+  std::ifstream in(path); std::string line;
+  while (std::getline(in, line)) if (line.find(prefix) != std::string::npos) return true;
+  return false;
+}
 int main(int, char** argv) {
   if (!dlopen("libOVRPlugin.so", RTLD_NOW)) { std::printf("NOOVR\n"); return 4; }
   if (argv[2][0] != '-') {                                                   // the pretend game runtime (full path, like the real one)
@@ -37,19 +49,25 @@ int main(int, char** argv) {
     if (!il) { std::printf("NOLIB\n"); return 4; }
     void* (*mk)(int) = (void* (*)(int))dlsym(il, "fake_make_locomotion");   // one running copy of the important class, in ordinary memory
     if (mk) mk(0);
+    if (getenv("HOST_PLAYER")) {                                             // the headset's player object (the one the movement link looks for)
+      void* (*mkp)(int) = (void* (*)(int))dlsym(il, "fake_make_player_locomotion");
+      if (mkp) gPlayer = (unsigned char*)mkp(0);
+    }
   }
   void* h = dlopen(argv[1], RTLD_NOW);
   int (*f)(void*, void*) = (int(*)(void*, void*))dlsym(h, "JNI_OnLoad");
   std::printf("RESULT=%d\n", f(nullptr, nullptr));
-  // wait (up to 30 s) until the scan has written its last line, then a little more
+  // wait (up to 40 s) until the facts file has the wanted last line, then a little more
   std::string path = std::string(getenv("TZ_FACTS_DIR")) + "/timmyzstuff_facts.txt";
-  for (int i = 0; i < 300; ++i) {
+  const std::string until = getenv("HOST_WAIT_LINE") ? getenv("HOST_WAIT_LINE") : "--- scan finished";
+  bool shownMid = false;
+  for (int i = 0; i < 400; ++i) {
     usleep(100000);
-    std::ifstream in(path); std::string line; bool done = false;
-    while (std::getline(in, line)) if (line.rfind("--- scan finished", 0) == 0) { done = true; break; }
-    if (done) break;
+    if (!shownMid && gPlayer && fileHas(path, "link: applied speed")) { usleep(300000); show("MID"); shownMid = true; }
+    if (fileHas(path, until)) break;
   }
   sleep(1);
+  show("END");
   return 0;
 }
 C
@@ -67,7 +85,7 @@ check "scan wrote a field hit and a type hit" 'grep -q "^scan: field-hit Game.Ga
 check "scan finished OK" 'grep -q "^--- scan finished: ok ---" "$F" && grep -q "^scan: DONE" "$F"'
 check "the index and the full detail of the important class are written" 'grep -q "^scan: index Game.MobilePlayerLocomotion" "$F" && grep -q "^scan: CLASS Game.MobilePlayerLocomotion" "$F" && grep -q "method SetJumpHeight(1) : System.Void rva=" "$F"'
 check "the running copy was found in memory and its values written" 'grep -q "^scan: live Game.MobilePlayerLocomotion #1 size=80" "$F" && grep -q "^scan:   live _maxSpeed = 4.25 " "$F" && grep -q "^scan:   live _jumpHeight = 1.5 " "$F"'
-check "the facts header says stage D5c" 'head -1 "$F" | grep -q "stage D5c"'
+check "the facts header says stage D6" 'head -1 "$F" | grep -q "stage D6"'
 check "no memory addresses written (no 0x)" '! grep -q "0x" "$F"'
 check "progress lines for every step are written" 'grep -q "^scan: step 3 of 6" "$F" && grep -q "^scan: step 4 done" "$F" && grep -q "^scan: step 5 done: 4 class" "$F" && grep -q "^scan: step 6 of 6" "$F"'
 check "the memory search line tells the pipe size and trouble count" 'grep -q "^scan: memory search read .* copy pipe=[0-9]* bytes (chunk [0-9]* KB); .*copy trouble=0" "$F"'
@@ -119,5 +137,33 @@ out2=$(cd "$W" && LD_LIBRARY_PATH="$W" TZ_FACTS_DIR="$W/facts" "$W/host" "$W/lib
 check "game still starts (65542)" '[[ "$out2" == *"RESULT=65542"* ]]'
 check "says plainly that there is nothing to read" 'grep -q "scan: libil2cpp.so is not loaded in the game" "$F"'
 check "the scan still ends (reports FAILED to the menu), no crash" 'grep -q "^--- scan finished: FAILED ---" "$F"'
+
+echo "== a movement switch is turned on (pretend menu), the pretend game has the headset player object"
+runscan move TZ_SAMPLE_MS=18000 HOST_PLAYER=1 TZ_TEST_ASK="2.5,2.0,1,40" TZ_TEST_ASK_ON_S=3 TZ_TEST_ASK_OFF_S=9 "HOST_WAIT_LINE=link: the game's own values were put back"
+F6="$W/move.txt"
+check "game still starts (65542)" '[[ "$out_last" == *"RESULT=65542"* ]]'
+check "the facts say what the menu asked and what the game gets" 'grep -q "^movement: menu asks speed=ON 2.5x | jump=ON 2.0x | gravity=LOW 40%  ->  game gets speed x2.50, jump height x2.00, gravity x0.60" "$F6"'
+check "the link searched, found exactly one active player object and connected" 'grep -q "^link: search #[0-9]*: .* 1 look like the active player .* CONNECTED to 1 object" "$F6"'
+check "the link wrote the class and field positions it found" 'grep -q "^link: found the class ShovelTools.PlayerLocomotion (object size 1056)" "$F6" && grep -q "_forwardMaxSpeed@684" "$F6"'
+check "the pretend game really got speed x2.5, jump x2.0, gravity x0.6 (2.5*2.5, 1.5*2, -0.9*0.6)" 'grep -q "^MID fwd=6.25 jump=3 gy=-0.54$" <<< "$out_last"'
+check "the facts have the read-back of the writes" 'grep -q "^link: applied speed x2.50, jump height x2.00, gravity x0.60. Read-back from the game" "$F6"'
+check "switching it off puts the game back exactly (2.5, 1.5, -0.9)" 'grep -q "^END fwd=2.5 jump=1.5 gy=-0.9$" <<< "$out_last"'
+check "the link summary lines are written (state + counters)" 'grep -q "^t=[0-9]* link: connected | objects alive 1 of 1 known" "$F6"'
+check "the scan (which also ran) still finished OK" 'grep -q "^--- scan finished: ok ---" "$F6"'
+check "no memory addresses written with a 0x prefix" '! grep -q "0x[0-9a-f]\{4,\}" "$F6"'
+check "the whole file stays small" '[ "$(wc -c < "$F6")" -lt 300000 ]'
+
+echo "== a switch is on but the game has NO active player object"
+runscan noplayer TZ_SAMPLE_MS=12000 TZ_TEST_ASK="2.0,1,0,0" TZ_TEST_ASK_ON_S=3 "HOST_WAIT_LINE=link: search #3"
+F7="$W/noplayer.txt"
+check "game still starts (65542)" '[[ "$out_last" == *"RESULT=65542"* ]]'
+check "the link looked and said there is no active player yet (not a crash, not a failure)" 'grep -q "^link: search #1: .* 0 look like the active player" "$F7" && ! grep -q "^link: FAILED" "$F7"'
+check "the movement line says nothing was changed in the game" 'grep -q "\[game link not connected (yet): nothing changed in the game so far\]" "$F7"'
+
+echo "== no switch is turned on at all: the link must stay completely quiet"
+runscan quiet TZ_SAMPLE_MS=9000 HOST_PLAYER=1 "HOST_WAIT_LINE=scan: DONE"
+F8="$W/quiet.txt"
+check "no link search and no link lines at all" '! grep -q "^link: " "$F8" && ! grep -q " link: " "$F8"'
+check "the pretend player object was not touched" 'grep -q "^END fwd=2.5 jump=1.5 gy=-0.9$" <<< "$out_last"'
 
 echo; echo "passed: $pass  failed: $failn"; [ "$failn" -eq 0 ]

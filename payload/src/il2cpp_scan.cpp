@@ -1,11 +1,14 @@
 // il2cpp_scan.cpp - see il2cpp_scan.h.
 #include "il2cpp_scan.h"
+#include "safe_copy.h"
 
 #include <dlfcn.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 #include <algorithm>
@@ -142,74 +145,7 @@ void listThreads(Out& out) {
     if (!line.empty()) out.line("scan: threads: %s", line.c_str());
 }
 
-// ---- crash-proof memory reads (the kernel says "no" for a bad address instead of the program crashing)
-// The memory is written into a pipe (the kernel checks every address) and read back out of it.
-// IMPORTANT (found with the second real scan, which hung): a pipe can be SMALLER than we ask for. A write that is bigger than
-// the pipe waits for a reader that never comes, and the thread is stuck for good. So: both ends never wait (O_NONBLOCK),
-// the real pipe size is asked for and never exceeded, and the pipe is tested once before it is used.
-class CopyPipe {
-public:
-    // `scratch` (optional, kChunk bytes) lets open() also test a full-size copy.
-    bool open(size_t askedBytes, unsigned char* scratch) {
-        int p[2];
-        if (pipe(p) != 0) { err_ = errno; return false; }
-        rd_ = p[0]; wr_ = p[1];
-        fcntl(rd_, F_SETFL, fcntl(rd_, F_GETFL, 0) | O_NONBLOCK);
-        fcntl(wr_, F_SETFL, fcntl(wr_, F_GETFL, 0) | O_NONBLOCK);
-#ifdef F_SETPIPE_SZ
-        fcntl(wr_, F_SETPIPE_SZ, static_cast<int>(askedBytes ? askedBytes : (1u << 17)));     // may be refused: then we use what we got
-#else
-        (void)askedBytes;
-#endif
-        long sz = 0;
-#ifdef F_GETPIPE_SZ
-        sz = fcntl(wr_, F_GETPIPE_SZ);
-#endif
-        if (sz < 4096) sz = 4096;                                      // unknown: assume one page
-        pipeBytes_ = static_cast<size_t>(sz);
-        cap_ = pipeBytes_ < kChunk ? pipeBytes_ : kChunk;
-        cap_ &= ~static_cast<size_t>(4095);
-        if (cap_ < 4096) cap_ = 4096;
-        // self-test with our own memory: a small copy that must come back unchanged, then (if given) a full-size one
-        unsigned char a[256], b[256];
-        for (int i = 0; i < 256; ++i) { a[i] = static_cast<unsigned char>(i * 7 + 3); b[i] = 0; }
-        bool ok = copy(reinterpret_cast<uintptr_t>(a), b, sizeof a) && std::memcmp(a, b, sizeof a) == 0;
-        if (ok && scratch) ok = copy(reinterpret_cast<uintptr_t>(scratch), scratch, cap_);
-        trouble_ = 0;                                                  // the self-test does not count
-        if (!ok) { close(); return false; }
-        return true;
-    }
-    void close() { if (rd_ >= 0) ::close(rd_); if (wr_ >= 0) ::close(wr_); rd_ = wr_ = -1; }
-    size_t chunk() const { return cap_; }               // the biggest copy that fits the pipe
-    size_t pipeBytes() const { return pipeBytes_; }
-    int trouble() const { return trouble_; }            // copies that failed for a reason other than "bad address"
-    int lastErrno() const { return err_; }
-
-    // Copies n bytes from address `from` to `to`. False if any byte could not be read (nothing is promised about `to` then).
-    bool copy(uintptr_t from, unsigned char* to, size_t n) {
-        std::lock_guard<std::mutex> lock(mu_);
-        if (rd_ < 0 || n == 0 || n > cap_) return false;
-        ssize_t w;
-        do { w = write(wr_, reinterpret_cast<const void*>(from), n); } while (w < 0 && errno == EINTR);
-        if (w != static_cast<ssize_t>(n)) {
-            if (w < 0 && errno != EFAULT) { ++trouble_; err_ = errno; }
-            drain();                                                    // something in the range could not be read: throw away what was copied
-            return false;
-        }
-        size_t got = 0;
-        while (got < n) {
-            const ssize_t r = read(rd_, to + got, n - got);
-            if (r < 0 && errno == EINTR) continue;
-            if (r <= 0) { ++trouble_; err_ = r < 0 ? errno : 0; drain(); return false; }
-            got += static_cast<size_t>(r);
-        }
-        return true;
-    }
-private:
-    void drain() { unsigned char d[4096]; for (int i = 0; i < 64; ++i) { const ssize_t r = read(rd_, d, sizeof d); if (r <= 0) break; } }
-    int rd_ = -1, wr_ = -1; size_t cap_ = 4096, pipeBytes_ = 4096; int trouble_ = 0, err_ = 0; std::mutex mu_;
-};
-
+// ---- crash-proof memory reads: see safe_copy.h
 CopyPipe& pointerPipe() {                  // the small reads of the code step (8 bytes at a time); the memory search has its own pipe
     static CopyPipe p; static bool tried = false, ok = false;
     if (!tried) { tried = true; ok = p.open(0, nullptr); }
@@ -339,6 +275,7 @@ double nowSeconds() { timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return s
 
 alignas(8) unsigned char gChunk[kChunk];      // the copy buffer for the memory search (its own memory is never searched)
 std::atomic<bool> gSearchBusy{false};         // one memory search at a time (a stuck one keeps this set and keeps using gChunk)
+std::atomic<unsigned long long> gBeat{0};     // ticks once for every bit of progress ANY search makes: a second search waits while this moves, and gives up when it stops
 std::atomic<const char*> gStep{"not started"};
 
 // the class pointer is kept inverted, so a leftover copy in freed memory can never look like a running object
@@ -359,7 +296,7 @@ struct SearchJob {
     // inputs (set before the thread starts, never changed afterwards)
     std::vector<PlanLite> plans;
     std::vector<MapEntry> maps;
-    int maxSeconds = 90, testHangAfterChunks = 0; size_t testPipeBytes = 0;
+    int maxSeconds = 90, testHangAfterChunks = 0; size_t testPipeBytes = 0; int testPollMicros = 0;
     // progress (the search thread writes, the scan thread reads)
     std::atomic<unsigned> heartbeat{0};
     std::atomic<unsigned long> region{0}, regionsRead{0};
@@ -473,7 +410,7 @@ void searchMemory(SearchJob& j) {
         j.region.store(ri); j.regionsRead.fetch_add(1);
         for (uintptr_t c = r.start; c < r.end; c += pipe.chunk()) {
             if (nowSeconds() - t0 >= j.maxSeconds) { j.timedOut = true; break; }
-            j.heartbeat.fetch_add(1);
+            j.heartbeat.fetch_add(1); gBeat.fetch_add(1);
             if (j.testHangAfterChunks > 0 && static_cast<int>(chunks) >= j.testHangAfterChunks) { for (;;) sleep(1000); }      // PC test only: a read that never returns
             const size_t n = r.end - c < pipe.chunk() ? static_cast<size_t>(r.end - c) : pipe.chunk();
             if (pipe.copy(c, gChunk, n)) { j.bytes.fetch_add(n); scanBytes(gChunk, n, c, static_cast<int>(ri)); }
@@ -490,11 +427,12 @@ void searchMemory(SearchJob& j) {
     j.stage.store(2);
     j.cands = static_cast<int>(cands.size());
     for (const Cand& cd : cands) {
-        j.heartbeat.fetch_add(1);
+        j.heartbeat.fetch_add(1); gBeat.fetch_add(1);
         ++j.candidatesPer[cd.plan];
         const PlanLite& p = j.plans[cd.plan];
         unsigned char hdr[24];
         if (!pipe.copy(cd.addr, hdr, sizeof hdr)) { ++j.rejUnreadable; continue; }
+        { uint64_t k; std::memcpy(&k, hdr, 8); k = ~k; std::memcpy(hdr, &k, 8); }          // our own copy must never look like a running object to a later search
         uint64_t monitor, cached; std::memcpy(&monitor, hdr + 8, 8); std::memcpy(&cached, hdr + 16, 8);
         if (monitor != 0) { ++j.rejMonitor; continue; }
         if (p.unityObject && (cached == 0 || (cached & 7) != 0)) { ++j.rejCached; continue; }     // a destroyed or fake object
@@ -507,6 +445,7 @@ void searchMemory(SearchJob& j) {
             if (pipe.copy(cd.addr, lo.bytes.data(), want)) got = want;
         }
         if (got == 0) { --j.acceptedPer[cd.plan]; ++j.rejUnreadable; continue; }
+        { uint64_t k; std::memcpy(&k, lo.bytes.data(), 8); k = ~k; std::memcpy(lo.bytes.data(), &k, 8); }     // the first 8 bytes (the class pointer) are kept inverted: a copy of ours is never mistaken for the game's object
         const MapEntry& reg = j.maps[cd.region];
         lo.where = reg.path.empty() ? "anonymous memory" : reg.path;
         j.found.push_back(lo);
@@ -518,6 +457,7 @@ void* searchThread(void* arg) {
     std::shared_ptr<SearchJob>* holder = static_cast<std::shared_ptr<SearchJob>*>(arg);
     std::shared_ptr<SearchJob> job = *holder;
     delete holder;
+    setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 10);       // be polite: the game's own threads always go first (affects only this thread; errors do not matter)
     searchMemory(*job);
     return nullptr;
 }
@@ -529,6 +469,51 @@ std::string describeRegion(const SearchJob& j, unsigned long ri) {
     std::snprintf(b, sizeof b, "region %lu of %lu: %llu KB, %s", ri + 1, static_cast<unsigned long>(j.maps.size()), static_cast<unsigned long long>((r.end - r.start) >> 10),
                   r.path.empty() ? "anonymous memory" : r.path.c_str());
     return b;
+}
+
+enum JobResult { JOB_DONE, JOB_STUCK, JOB_BUSY, JOB_NOTHREAD };
+
+// Starts the memory search on its own thread and waits for it, watching the heartbeat. `talk` (optional) gets a "still working" line every 10 s.
+// JOB_STUCK: it stopped making progress (or ran far over its time) and was given up on; *stuckWhere says where. The thread is left alone (it keeps
+// gSearchBusy set while it is stuck, so no second search starts on top of it).
+JobResult runJob(const std::shared_ptr<SearchJob>& job, int stallSeconds, Out* talk, std::string* stuckWhere) {
+    {   // one search at a time. If another one is running (the Scan button and the movement link can ask at the same moment) wait for it -
+        // unless it makes no progress for stallSeconds: then it is stuck, and we say so instead of piling on.
+        bool expected = false;
+        if (!gSearchBusy.compare_exchange_strong(expected, true)) {
+            const double waitStart = nowSeconds();
+            double lastMoveAt = waitStart; unsigned long long lastBeat = gBeat.load();
+            for (;;) {
+                usleep(50000);
+                expected = false;
+                if (gSearchBusy.compare_exchange_strong(expected, true)) break;
+                const double now = nowSeconds(); const unsigned long long b = gBeat.load();
+                if (b != lastBeat) { lastBeat = b; lastMoveAt = now; }
+                if (now - lastMoveAt >= stallSeconds || now - waitStart >= 150.0) return JOB_BUSY;
+            }
+        }
+    }
+    pthread_t th; auto* holder = new std::shared_ptr<SearchJob>(job);
+    if (pthread_create(&th, nullptr, searchThread, holder) != 0) { delete holder; gSearchBusy.store(false); return JOB_NOTHREAD; }
+    pthread_detach(th);
+    const double tStart = nowSeconds();
+    double lastBeatAt = tStart, lastTalk = tStart; unsigned lastBeat = job->heartbeat.load();
+    while (!job->done.load()) {
+        usleep(job->testPollMicros > 0 ? job->testPollMicros : 100000);
+        const double now = nowSeconds();
+        const unsigned hb = job->heartbeat.load();
+        if (hb != lastBeat) { lastBeat = hb; lastBeatAt = now; }
+        if (talk && now - lastTalk >= 10.0) {
+            lastTalk = now;
+            talk->key("scan: memory search still working: %llu MB read so far, %s", job->bytes.load() >> 20, describeRegion(*job, job->region.load()).c_str());
+        }
+        if (now - lastBeatAt >= stallSeconds || now - tStart >= job->maxSeconds + 30.0) {
+            char b[400]; std::snprintf(b, sizeof b, "%s, step %d, after %llu MB", describeRegion(*job, job->region.load()).c_str(), job->stage.load(), job->bytes.load() >> 20);
+            if (stuckWhere) *stuckWhere = b;
+            return JOB_STUCK;
+        }
+    }
+    return JOB_DONE;
 }
 
 }  // namespace
@@ -591,6 +576,90 @@ bool loadApi(void* lib, Api* out, std::string* missing) {
 }
 
 const char* currentStep() { return gStep.load(); }
+
+// ---- stage D6: finding one class and its running copies again, quietly (nothing is written to the facts file) ------------------------------
+const FieldInfo* ClassInfo::field(const char* n) const {
+    for (const FieldInfo& f : fields) if (f.name == n) return &f;
+    return nullptr;
+}
+
+ClassInfo findClass(const Api& api, const char* ns, const char* name) {
+    ClassInfo ci;
+    const std::string wantNs = ns ? ns : "", wantName = name ? name : "";
+    ci.fullName = wantNs.empty() ? wantName : wantNs + "." + wantName;
+    void* domain = api.domain_get ? api.domain_get() : nullptr;
+    if (!domain) { ci.error = "the game's runtime is not ready yet (no domain)"; return ci; }
+    void* thread = api.thread_attach ? api.thread_attach(domain) : nullptr;
+    struct Detach { const Api& a; void* t; ~Detach() { if (t && a.thread_detach) a.thread_detach(t); } } detach{api, thread};
+    size_t asmCount = 0;
+    void** assemblies = api.domain_get_assemblies(domain, &asmCount);
+    if (!assemblies || asmCount == 0) { ci.error = "no assemblies reported"; return ci; }
+    void* klass = nullptr;
+    for (int pass = 0; pass < 2 && !klass; ++pass) {                       // the game's own code first, then anything that is not engine / system
+        for (size_t a = 0; a < asmCount && !klass; ++a) {
+            void* image = api.assembly_get_image(assemblies[a]);
+            if (!image) continue;
+            const char* rawName = api.image_get_name(image);
+            const std::string an = rawName ? rawName : "";
+            if (skipAssembly(an) || (pass == 0 && !oursAssembly(an))) continue;
+            const size_t count = api.image_get_class_count(image);
+            for (size_t i = 0; i < count; ++i) {
+                void* k = api.image_get_class(image, i);
+                if (!k) continue;
+                const char* cn = api.class_get_name(k);
+                if (!cn || wantName != cn) continue;
+                const char* kns = api.class_get_namespace(k);
+                if (wantNs != (kns ? kns : "")) continue;
+                klass = k; break;
+            }
+        }
+    }
+    if (!klass) { ci.error = "the class " + ci.fullName + " does not exist in this game"; return ci; }
+    const int32_t isz = api.class_instance_size ? api.class_instance_size(klass) : 0;
+    if (isz < 16 || isz > 8192) { ci.error = "the size of " + ci.fullName + " could not be read"; return ci; }
+    ci.klassInv = ~static_cast<uint64_t>(reinterpret_cast<uintptr_t>(klass));
+    ci.size = isz;
+    ci.unityObject = isUnityObjectClass(api, klass);
+    void* it = nullptr; int n = 0;
+    while (void* f = api.class_get_fields(klass, &it)) {
+        if (++n > 600) break;
+        const int flags = api.field_get_flags ? api.field_get_flags(f) : 0;
+        if (flags & (0x10 | 0x40)) continue;                              // static / constant: not stored in the object
+        const int off = static_cast<int>(api.field_get_offset(f));
+        if (off < 16 || off >= isz) continue;
+        FieldInfo fi; const char* fn = api.field_get_name(f);
+        fi.name = fn ? fn : "?"; fi.offset = off; fi.typeName = typeName(api, api.field_get_type(f));
+        ci.fields.push_back(fi);
+    }
+    ci.found = true;
+    return ci;
+}
+
+CopySearch findCopies(const ClassInfo& cls, int maxCopies, int maxSeconds, int stallSeconds, int testHangAfterChunks, int testPollMicros) {
+    CopySearch r;
+    if (!cls.found || cls.size < 16) { r.error = "no class to look for"; return r; }
+    auto job = std::make_shared<SearchJob>();
+    job->plans.push_back({cls.klassInv, cls.unityObject, cls.size});
+    job->maps = readMaps();
+    job->maxSeconds = maxSeconds; job->testHangAfterChunks = testHangAfterChunks; job->testPollMicros = testPollMicros;
+    std::string where;
+    switch (runJob(job, stallSeconds, nullptr, &where)) {
+        case JOB_DONE: break;
+        case JOB_STUCK: r.stuck = true; r.error = "the memory search stopped answering (" + where + ")"; return r;
+        case JOB_BUSY: r.busy = true; r.stuck = true; r.error = "an earlier memory search is still stuck in this game session"; return r;
+        case JOB_NOTHREAD: r.error = "could not start the memory search thread"; return r;
+    }
+    r.bytesRead = job->bytes.load(); r.seconds = job->seconds;
+    if (job->pipeFailed) { r.error = "the copy pipe does not work here (error " + std::to_string(job->pipeErrno) + ")"; return r; }
+    r.ok = true;
+    r.hits = job->cands; r.accepted = job->acceptedPer.empty() ? 0 : job->acceptedPer[0];
+    for (const LiveObject& lo : job->found) {
+        if (static_cast<int>(r.copies.size()) >= maxCopies) break;
+        Copy c; c.addr = lo.addr; c.bytes = lo.bytes;
+        r.copies.push_back(std::move(c));
+    }
+    return r;
+}
 
 Summary run(const Api& api, uintptr_t libBase, LogFn log) {
     Options o; o.libBase = libBase;
@@ -802,37 +871,16 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
         for (const LivePlan& p : plans) job->plans.push_back({p.klassInv, p.unityObject, p.size});
         job->maps = readMaps();
         job->maxSeconds = opt.maxSeconds; job->testHangAfterChunks = opt.testHangAfterChunks; job->testPipeBytes = opt.testPipeBytes;
-        bool expected = false;
-        if (!gSearchBusy.compare_exchange_strong(expected, true)) {
-            out.key("scan: an earlier memory search is still stuck in this game session, so no new one is started (close and reopen the game to try the live values again)");
-            stuck = true; stuckWhere = "an earlier search is still stuck"; job.reset();
-        } else {
-            pthread_t th; auto* holder = new std::shared_ptr<SearchJob>(job);
-            if (pthread_create(&th, nullptr, searchThread, holder) != 0) {
-                delete holder; gSearchBusy.store(false);
+        std::string where;
+        switch (runJob(job, opt.stallSeconds, &out, &where)) {
+            case JOB_DONE: break;
+            case JOB_STUCK: stuck = true; stuckWhere = where; break;
+            case JOB_BUSY:
+                out.key("scan: an earlier memory search is still stuck in this game session, so no new one is started (close and reopen the game to try the live values again)");
+                stuck = true; stuckWhere = "an earlier search is still stuck"; job.reset(); break;
+            case JOB_NOTHREAD:
                 out.key("scan: could not start the memory search thread");
-                stuck = true; stuckWhere = "could not start the memory search thread"; job.reset();
-            } else {
-                pthread_detach(th);
-                const double tStart = nowSeconds();
-                double lastBeatAt = tStart, lastTalk = tStart; unsigned lastBeat = job->heartbeat.load();
-                while (!job->done.load()) {
-                    usleep(100000);
-                    const double now = nowSeconds();
-                    const unsigned hb = job->heartbeat.load();
-                    if (hb != lastBeat) { lastBeat = hb; lastBeatAt = now; }
-                    if (now - lastTalk >= 10.0) {
-                        lastTalk = now;
-                        out.key("scan: memory search still working: %llu MB read so far, %s", job->bytes.load() >> 20, describeRegion(*job, job->region.load()).c_str());
-                    }
-                    if (now - lastBeatAt >= opt.stallSeconds || now - tStart >= opt.maxSeconds + 30.0) {
-                        stuck = true;
-                        char b[400]; std::snprintf(b, sizeof b, "%s, step %d, after %llu MB", describeRegion(*job, job->region.load()).c_str(), job->stage.load(), job->bytes.load() >> 20);
-                        stuckWhere = b;
-                        break;
-                    }
-                }
-            }
+                stuck = true; stuckWhere = "could not start the memory search thread"; job.reset(); break;
         }
     }
     if (job && !stuck) {

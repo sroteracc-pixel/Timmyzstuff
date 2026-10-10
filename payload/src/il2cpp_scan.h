@@ -15,6 +15,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string>
+#include <vector>
 
 namespace tzscan {
 
@@ -85,6 +86,33 @@ const char* currentStep();
 // Runs the scan.
 Summary run(const Api& api, const Options& options, LogFn log);
 Summary run(const Api& api, uintptr_t libBase, LogFn log);      // same, with default options
+
+// ---- stage D6: finding ONE class and its running copies again, quietly (nothing is written to the facts file)
+struct FieldInfo { std::string name, typeName; int offset = 0; };       // offset counts from the start of the object (the 16-byte header is included)
+struct ClassInfo {
+    bool found = false;
+    std::string fullName, error;
+    uint64_t klassInv = 0;            // the class pointer, inverted, so that a copy of it in our own memory never looks like a running object
+    int size = 0;                     // size of one object, header included
+    bool unityObject = false;
+    std::vector<FieldInfo> fields;    // the class's OWN instance fields (not static, not inherited)
+    const FieldInfo* field(const char* name) const;
+};
+// Looks the class up by namespace + name in the game's own code. The calling thread is attached to the runtime for the call.
+ClassInfo findClass(const Api& api, const char* ns, const char* name);
+
+struct Copy { uintptr_t addr = 0; std::vector<unsigned char> bytes; };
+struct CopySearch {
+    bool ok = false;                  // the search ran to its end
+    bool stuck = false;               // it stopped answering and was given up on (or an earlier one still is)
+    bool busy = false;                // ... because an earlier search is still stuck, so nothing was started
+    std::string error;
+    std::vector<Copy> copies;         // running copies that look like real objects (owner lock free, native link set), at most maxCopies
+    int hits = 0, accepted = 0;
+    unsigned long long bytesRead = 0; double seconds = 0;
+};
+// Looks through the game's memory for the running copies of `cls` (on its own watched thread: this call always comes back).
+CopySearch findCopies(const ClassInfo& cls, int maxCopies, int maxSeconds, int stallSeconds, int testHangAfterChunks = 0, int testPollMicros = 0);
 
 // The words used to pick classes / fields (exposed for the test).
 bool classNameMatches(const std::string& name);       // movement-ish class names

@@ -519,14 +519,18 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
             const float ry = y, rh = 72;
             c.fillRoundRect(rx, ry, rw, rh, 16, card);
             c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, cardEdge);
-            c.fillCircle(rx + 28, ry + 26, 7, s.linkState ? rgba(80, 220, 130) : rgba(240, 170, 60));
-            c.text(kFontLabel, rx + 46, ry + 32, s.linkState ? "Game link: connected" : "Game link: not connected", white);
+            const int ls = s.linkState;      // 0 waiting (no switch on yet), 1 connected, 2 looking for the player, 3 failed
+            const Color dot = ls == 1 ? rgba(80, 220, 130) : (ls == 3 ? rgba(240, 90, 90) : (ls == 2 ? rgba(240, 170, 60) : rgba(150, 150, 170)));
+            c.fillCircle(rx + 28, ry + 26, 7, dot);
+            c.text(kFontLabel, rx + 46, ry + 32, ls == 1 ? "Game link: connected" : (ls == 2 ? "Game link: looking..." : (ls == 3 ? "Game link: failed" : "Game link: waiting")), white);
             const char* note =
-                s.linkState ? "The switches above change the game." :
                 s.scanState == 1 ? "Scanning the game's code... this can take about a minute." :
+                ls == 1 ? "The switches above change the game." :
+                ls == 2 ? "Looking for your player in the game... a few seconds." :
+                ls == 3 ? "Could not connect. Press Get facts and send me the file." :
                 s.scanState == 2 ? "Scan done. Press Get facts in the patcher and send me the file." :
                 s.scanState == 3 ? "Scan failed. Press Get facts in the patcher and send me the file." :
-                "The switches are saved but do nothing in the game yet. Press Scan.";
+                "Turn a switch on and the menu connects to the game.";
             c.text(kFontTiny, rx + 22, ry + 63, note, grey);
             const float bw = 188, bh = 36, bx = rx + rw - bw - 18, by = ry + 8;
             const bool hv = s.hover == HIT_SCAN, busy = s.scanState == 1;

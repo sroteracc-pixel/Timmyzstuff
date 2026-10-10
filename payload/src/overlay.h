@@ -57,7 +57,7 @@ void setSettingsPath(const char* path, LogFn log);
 // The "Scan game code" button sets a request; the payload's main loop picks it up (once) and starts the scan.
 bool takeScanRequest();
 void setScanResult(bool ok, int matches);     // called when the scan ends (any thread)
-void setLinkState(int linked);                // 0 = movement switches are not connected to the game, 1 = connected
+void setLinkState(int state);                 // 0 = waiting (no switch on), 1 = connected to the game, 2 = looking for the player object, 3 = failed
 // A copy of what the Movement switches/sliders ask for right now (taken under the menu's lock).
 struct MovementAsk { bool speedOn, jumpOn; int gravityMode; float speed, jump, lowPct, highPct; };
 MovementAsk movementAsk();
