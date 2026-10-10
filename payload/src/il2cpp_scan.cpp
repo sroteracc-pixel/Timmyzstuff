@@ -741,7 +741,7 @@ CopySearch findCopies(const ClassInfo& cls, int maxCopies, int maxSeconds, int s
 namespace {
 const int kMaxShotIndex = 500;         // index lines (names only)
 const int kMaxShotDetail = 45;         // ball / hoop / shot-assist classes written out in full
-const int kMaxShotLive = 12;           // classes looked for in memory
+const int kMaxShotLive = 15;           // classes looked for in memory
 
 // ---- The exact classes. The stage D7b scan of the real game (lobby) listed every class with a ball / hoop / shot-like name (311 of them) and showed that most
 // are noise (audio, tether ball, shaders, bots ...). These are the ones that matter for an aimbot: the ball, the game's OWN shot assist, the hoops and the
@@ -755,12 +755,16 @@ const ShotTarget kShotTargets[] = {
     {"BasketballGameContext", 0, 60}, {"GameManager", 120, 120},                                     // lobby or official match?
     {"BallControl", 0, 0}, {"BallControlManager", 0, 80}, {"BasketballProperties", 0, 0}, {"ShootGesture", 0, 0}, {"ShootGameBall", 0, 0},
     {"BallPhysicsUtilities", 0, 0}, {"ReleasedBallCommand", 0, 0}, {"ShotManager", 0, 0}, {"ShotDetectionHelper", 0, 0}, {"SteveBallSync", 0, 0}, {"BallController", 0, 0},
+    // stage D10 ("Shot points"): the game's SCORING classes. The earlier files only list their names (ScoreManager has 17 fields and 16 methods, PlayerNetworked keeps the
+    // score that is shared with the other players, ScoreSync is that shared score itself). Written out in full so the next step can see how a basket becomes points.
+    {"ScoreManager", 0, 0}, {"PlayerScore", 0, 0}, {"ScoreSync", 0, 0}, {"ScoreSyncModel", 0, 0}, {"ScoreSyncHelper", 0, 0}, {"PlayerNetworked", 0, 0}, {"TeamScorePanelUI", 0, 0},
     {nullptr, 0, 0}};
 // The network library of the game (Normcore: "Normal.Realtime.dll"). Written out with limits (who owns an object, how to ask for ownership).
 const char* const kNetClasses[] = {"Normal.Realtime.RealtimeView", "Normal.Realtime.RealtimeTransform", nullptr};
 // Classes whose running copies are looked for in memory, most important first (at most kMaxLiveTargets).
 const char* const kShotLive[] = {"Basketball", "BasketballStateSync", "GameManager", "BasketballGameContext", "BasketballGoal", "BasketballShotAssist", "ShotAssistParams",
-                                 "ThrowAssist", "BasketballAssist", "HoopManager", "BallControl", "BallControlManager", nullptr};
+                                 "ThrowAssist", "BasketballAssist", "HoopManager", "BallControl", "BallControlManager",
+                                 "ScoreManager", "PlayerNetworked", "BasketballProperties", nullptr};      // (stage D10: the last three show the live score numbers and a ball's point value)
 
 // Classes that can never have a useful running copy: event delegates, enums, structs (they live inside other objects).
 bool shotUselessParent(const std::string& parent) { return parent == "MulticastDelegate" || parent == "Delegate" || parent == "Enum" || parent == "ValueType"; }
@@ -937,6 +941,8 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
     std::vector<char> detailed(classes.size(), 0);
     int priorityCount = 0, otherCount = 0;
     unsigned noneCount = 0, ilCount = 0, otherLibCount = 0, outsideCount = 0;
+    int deepDumps = 0;                          // stage D10: code dumps of scoring methods written so far
+    const int kMaxDeepDumps = 28;
     auto detail = [&](size_t idx, bool priority, int capF = 0, int capM = 0) {
         const ClassRef& c = classes[idx];
         const AsmRef& ar = asms[c.asmIndex];
@@ -978,6 +984,18 @@ Summary run(const Api& api, const Options& opt, LogFn log) {
                 }
             }
             out.line("scan:   method %s(%u) : %s %s%s%s", mn ? mn : "?", api.method_get_param_count(m), typeName(api, api.method_get_return_type(m)).c_str(), where, codeText, (mflags & 0x10) ? " static" : "");
+            // stage D10: in the ball-and-hoops report the first 320 bytes of the code of the SCORING methods (names with Score / PointValue / Points) are written out too.
+            // They are never run: read offline, the calls inside them (and the methods they call, whose rva is listed above) show how a basket becomes points.
+            if (shot && kind == P_IL2CPP && mn && deepDumps < kMaxDeepDumps &&
+                (std::strstr(mn, "Score") || std::strstr(mn, "PointValue") || std::strstr(mn, "Points"))) {
+                unsigned char cb[320];
+                if (pointerPipe().copy(static_cast<uintptr_t>(ptr), cb, sizeof cb)) {
+                    std::string hex; hex.reserve(sizeof cb * 2);
+                    for (size_t bi = 0; bi < sizeof cb; ++bi) { char two[4]; std::snprintf(two, sizeof two, "%02x", static_cast<unsigned>(cb[bi])); hex += two; }
+                    out.line("scan:   code320 %s.%s(%u) rva=%lx : %s", c.name.c_str(), mn, api.method_get_param_count(m), rva, hex.c_str());
+                    ++deepDumps;
+                }
+            }
         }
         detailed[idx] = 1; ++sum.matchedClasses;
         if (priority) ++priorityCount; else ++otherCount;

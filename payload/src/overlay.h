@@ -68,6 +68,11 @@ MovementAsk movementAsk();
 // `on` = the Direct Aimbot, `bank` = Aimbot Bank (stage D9). The menu never turns both on; if both were ever on, the caller treats it as "neither" (nothing is guessed).
 struct AimAsk { bool on; float capM; bool holdY; bool bank; };
 AimAsk aimAsk();
+// stage D10 (Troll page, "Shot points"): what the page asks for right now, and the link card's texts going back to the page.
+// `stop` is the slider stop 1 .. 12 (see points.h: stops 1 .. 11 = that many points, 12 = 999).
+struct PointsAsk { bool on; float stop; };
+PointsAsk pointsAsk();
+void setPointsInfo(int state, const char* headline, const char* lastBasket);     // state: 0 off, 1 connected, 2 looking for your ball, 3 failed
 
 // True while the menu is open, and for a moment after it closes. The input doorway uses this to hide
 // button presses from the game so that clicking the menu does not also play the game.

@@ -49,6 +49,7 @@
 #include "game_link.h"     // the link that really changes speed / jump / gravity (stage D6)
 #include "aimbot.h"        // the Aimbot rules and maths (stage D7)
 #include "aim_link.h"      // the Aimbot's game part (stage D8): reads the ball when you let go and, if the rules say yes, aims it
+#include "points.h"        // the Troll page's "Shot points" slider stops (stage D10)
 #include "overlay.h"      // shows the menu picture in the headset (stage D2)  // counting doorways for ovrp_EndFrame4 / BeginFrame4 / WaitToBeginFrame
 
 #ifdef __ANDROID__
@@ -670,7 +671,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D9b: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot (switch, distance slider, Hold Y) and the new AIMBOT BANK mode (bank shots off the backboard - 2nd version: looks for the board's solid part in more places; not yet proven in the real game) + ball-and-hoops scan)");
+    fact("Timmyzstuff facts (stage D10: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot (switch, distance slider, Hold Y) and AIMBOT BANK mode (bank shots off the backboard - 2nd version: looks for the board's solid part in more places; not yet proven in the real game) + Troll page 'Shot points' (keeps the point value of YOUR ball at the slider's number; new, not yet proven in the real game) + ball-and-hoops scan, now also writing out the game's scoring classes)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -936,6 +937,32 @@ void* probeMain(void*) {
                 fact("t=%.0f %s", now, gAim.summary().c_str());
             }
         }
+        {   // ---- stage D10: the Troll page's "Shot points" switch and slider go to the game part; its state and last basket go back to the menu.
+            tzoverlay::PointsAsk pa = tzoverlay::pointsAsk();
+#ifdef TZ_FAST_TEST
+            if (const char* e = std::getenv("TZ_TEST_POINTS")) { int n = 0; std::sscanf(e, "%d", &n); if (now >= 3.0) { pa.on = n > 0; pa.stop = tzpoints::stopForPoints(n); } }       // PC test only: "TZ_TEST_POINTS=11" = Shot points ON at 11
+#endif
+            const int pts = pa.on ? tzpoints::pointsForStop(pa.stop) : 0;
+            gAim.setPoints(pts);
+            const int ptsUi = pts ? gAim.pointsUiState() : 0;
+            tzoverlay::setPointsInfo(ptsUi, pts ? gAim.pointsHeadline().c_str() : "", gAim.pointsLastText().c_str());
+            // what the menu asks: written when the value has been the same for a second (a slider drag is not logged step by step)
+            static int ptsSeen = 0, ptsLogged = 0, ptsAskLogs = 0; static double ptsSeenAt = 0;
+            if (pts != ptsSeen) { ptsSeen = pts; ptsSeenAt = now; }
+            if (ptsSeen != ptsLogged && now - ptsSeenAt >= 1.0 && ptsAskLogs < 30) {
+                ++ptsAskLogs; ptsLogged = ptsSeen;
+                fact("points: menu asks Shot points=%s%s  [stage D10: when ON, the point value of the ball you control is kept at this number; not proven in the real game yet - the link reports every basket below]",
+                     pts ? "ON" : "off", pts ? (" (" + tzpoints::pointsText(pts) + " points per basket)").c_str() : "");
+            }
+            // the points part's own numbers: whenever its state or the number of baskets changes, and then every 20 seconds while the switch is on (never more than 40 lines)
+            static int lastPtsUi = 0, ptsSumLogs = 0; static double nextPtsSum = 0; static unsigned long long lastPtsKey = 0;
+            const tzaimlink::PointsCounters pc = gAim.pointsCounters();
+            const unsigned long long ptsKey = pc.baskets * 1000003ULL + pc.gameWrites;
+            if ((ptsUi != lastPtsUi || ptsKey != lastPtsKey || (ptsUi != 0 && now >= nextPtsSum)) && ptsSumLogs < 40) {
+                ++ptsSumLogs; lastPtsUi = ptsUi; lastPtsKey = ptsKey; nextPtsSum = now + 20.0;
+                fact("t=%.0f %s", now, gAim.pointsSummary().c_str());
+            }
+        }
         tzoverlay::tick(now, fact);
         if (now >= nextBeat) {
             fact("t=%.0f still sampling (%ld samples, menu opened %d times, closed %d times)", now, samples, opens, closes);
@@ -965,6 +992,7 @@ void* probeMain(void*) {
     fact("threads (final): controller-state doorway: %s | EndFrame4 doorway: %s", describeTally(gInputThreads).c_str(), describeTally(gFrameThreads).c_str());
     fact("%s", gLink.summary().c_str());
     fact("%s", gAim.summary().c_str());
+    fact("%s", gAim.pointsSummary().c_str());
     for (int i = 0; i < frameWatchCount(); ++i)
         fact("frame watch %s: %s, %llu calls counted in total", frameWatch(i)->name, gWatchPatched[i] ? "installed" : "NOT installed (the plugin never saved that address)", static_cast<unsigned long long>(*frameWatch(i)->count));
     fact("done: %ld samples, %d change lines", samples, lines);
@@ -985,7 +1013,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D9b: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot with game link)");
+    logf_("payload loaded (stage D10: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot with game link + shot points)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

@@ -104,6 +104,8 @@ void Interaction::press(int id, float x, PanelState& s, const std::vector<HitRec
     // Only one aimbot mode can be on: turning one on turns the other one off (the same click).
     case HIT_TOGGLE_AIM: s.aimOn = !s.aimOn; if (s.aimOn) s.aimBank = false; o.redraw = true; break;
     case HIT_TOGGLE_AIMBANK: s.aimBank = !s.aimBank; if (s.aimBank) s.aimOn = false; o.redraw = true; break;
+    // Troll page (stage D10): the Shot points switch is never saved (an effect, like the Aimbot); the slider position is.
+    case HIT_TOGGLE_POINTS: s.pointsOn = !s.pointsOn; o.redraw = true; break;
     case HIT_TOGGLE_AIMY: s.aimHoldY = !s.aimHoldY; o.redraw = o.saveNeeded = true; break;      // this one IS saved (it is a setting, not an effect)
     case HIT_SCAN_SHOT:
         if (s.scanState != 1) { s.scanState = 1; o.shotScanRequested = true; }

@@ -100,6 +100,7 @@ Klass kAssistParams{"ShotAssistParams", "ShovelTools", nullptr, {{"AssistRadius"
 Klass kPredicted{"PredictedShotResult", "ShovelTools", &kValueType, {{"willScore", &tBool, 0, 0}, {"flightTime", &tFloat, 4, 0}}, {}, 0, true, false, 16};       // a struct: written out, never searched in memory
 Klass kGoal{"BasketballGoal", "ShovelTools", &kBehaviour, {{"_rimTransform", &tTransform, 24, 0}, {"_isNorth", &tBool, 32, 0}}, {}, 0, false, false, 48};
 Klass kGameMgr{"GameManager", "ShovelTools", &kBehaviour, {{"_officialMatch", &tBool, 24, 0}, {"_mode", &tInt, 28, 0}}, {}, 0, false, false, 48};
+Klass kScoreMgr{"ScoreManager", "ShovelTools", &kBehaviour, {{"_northScore", &tInt, 24, 0}, {"_southScore", &tInt, 28, 0}}, {}, 0, false, false, 48};     // stage D10: only in the world after fake_add_score_class(1)
 Klass kCannon{"CannonBall", "", &kBehaviour, {{"explosion", &tOther, 24, 0}}, {}, 0, false, false, 32};          // a "ball" name that is noise: never written out
 Klass kTether{"TetherBallCollision", "", &kBehaviour, {{"x", &tInt, 24, 0}}, {}, 0, false, false, 32};
 Image iShot{"IRL.GymFake", {&kRimSync, &kRimBend, &kSlider, &kBall, &kShotPrefs, &kPrimary, &kFootball, &kBaseball, &kParamMass, &kBallPhys, &kACommand, &kShotCmd,
@@ -133,6 +134,8 @@ void init() {
     kBallPhys.methods = {mk("FixedUpdate", 0, &tVoid, 0x3580), mk("OnThrown", 1, &tVoid, 0x3590)};
     kBasketball.methods = {mk("OnRelease", 1, &tVoid, 0x3800 - 0x100), mk("Shoot", 2, &tVoid, 0x37a0)};
     kShotAssist.methods = {mk("ComputeAssist", 3, &tVec3, 0x37b0)};
+    kScoreMgr.methods = {mk("AddScore", 1, &tVoid, 0x3a00), mk("GetScore", 0, &tInt, 0x3a40), mk("Reset", 0, &tVoid, 0x3a80), mk("IncreasePoints", 2, &tVoid, 0x3ac0)};
+    for (int i = 0; i < 0x200; ++i) gCode[0x3a00 + i] = static_cast<char>(i & 0xff);                // a recognisable pattern: byte n of a dump is n modulo 256 (relative to 0x3a00)
     kStateSync.methods = {mk("get_IsCurrentOwner", 0, &tBool, 0x37c0)};
     kRealtime.methods = {mk("get_connected", 0, &tBool, 0x35a0)};
     kRtView.methods = {mk("RequestOwnership", 0, &tVoid, 0x35b0), mk("get_isOwnedLocallySelf", 0, &tBool, 0x35c0)};
@@ -202,6 +205,11 @@ __attribute__((visibility("default"))) void* fake_make_vertical() {
 }
 
 __attribute__((visibility("default"))) void* il2cpp_domain_get() { init(); return gDomainNull ? nullptr : &gDomain; }
+__attribute__((visibility("default"))) void fake_add_score_class(int on) {       // stage D10: a ScoreManager with scoring methods joins the game's own assembly (or leaves it again)
+    init();
+    for (size_t i = 0; i < iShot.classes.size(); ++i) if (iShot.classes[i] == &kScoreMgr) { iShot.classes.erase(iShot.classes.begin() + static_cast<long>(i)); break; }
+    if (on) iShot.classes.push_back(&kScoreMgr);
+}
 __attribute__((visibility("default"))) void fake_set_shot_world(int on) {
     gShotWorld = on != 0;
     if (gShotWorld) { void* a[8] = {&iCore, &iGame, &iPhoton, &iShot, &iAuto, &iPhys, &iCoreEng, &iNet}; std::memcpy(gAssembliesShot, a, sizeof a); }

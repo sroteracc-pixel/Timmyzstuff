@@ -75,7 +75,10 @@ void AimLink::queue(const std::string& line) {
 void AimLink::flush() {
     std::vector<std::string> v;
     { std::lock_guard<std::mutex> lock(outMu_); v.swap(out_); }
-    for (const std::string& s : v) say("%s", s.c_str());
+    for (const std::string& s : v) {
+        if (s.compare(0, 7, "points:") == 0) sayPoints("%s", s.c_str());        // stage D10: the points lines have their own budget
+        else say("%s", s.c_str());
+    }
 }
 
 void AimLink::setLast(const std::string& text) { std::lock_guard<std::mutex> lock(mu_); lastText_ = text; }
@@ -115,36 +118,41 @@ void* AimLink::threadMain(void* self) { static_cast<AimLink*>(self)->loop(); ret
 
 void AimLink::setAsk(bool on, float capM, bool holdY) { setAsk(on ? 1 : 0, capM, holdY); }
 
+// The link as a whole (aim OR points) just came to life: forget old failures and look again.
+void AimLink::initOn() {
+    onSinceAtomic_.store(nowSec());
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        failed_ = false; failReason_.clear(); engineDeadWhy_.clear();
+        if (!layoutReady_.load()) { nextLayoutAt_ = 0; layoutTries_ = 0; }
+        nextSearchAt_ = 0;
+    }
+    if (engineDead_.exchange(false)) resetExc_.store(true);
+    if (!bound_.load()) { fastFailed_.store(false); needBcm_.store(false); }
+}
+
 void AimLink::setAsk(int mode, float capM, bool holdY) {
     if (mode < 0 || mode > 2) mode = 0;
-    const bool on = mode != 0;
     capM_.store(capM);
     const bool yWas = holdY_.exchange(holdY);
     const int modeWas = mode_.exchange(mode);
-    const bool was = on_.exchange(on);
+    const bool linkOn = mode != 0 || points_.load() != 0;          // stage D10: the "Shot points" part also needs the link
+    const bool linkWas = on_.exchange(linkOn);
     const char* name = mode == 2 ? "BANK" : "Direct";
-    if (on && !was) {
-        onSinceAtomic_.store(nowSec());
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            failed_ = false; failReason_.clear(); engineDeadWhy_.clear();
-            if (!layoutReady_.load()) { nextLayoutAt_ = 0; layoutTries_ = 0; }
-            nextSearchAt_ = 0;
-            if (mode == 2 && !bankReady_.load()) { nextBankLayoutAt_ = 0; bankLayoutTries_ = 0; bankFailWhy_.clear(); }
-        }
-        if (engineDead_.exchange(false)) resetExc_.store(true);
-        if (!bound_.load()) { fastFailed_.store(false); needBcm_.store(false); }
+    if (linkOn && !linkWas) initOn();
+    if (mode != 0 && modeWas == 0) {
+        if (mode == 2 && !bankReady_.load()) { std::lock_guard<std::mutex> lock(mu_); nextBankLayoutAt_ = 0; bankLayoutTries_ = 0; bankFailWhy_.clear(); }
         say("aim: switch turned ON (%s mode), max shot distance %s, hold Y to aim: %s", name, tzaim::capLabel(capM).c_str(), holdY ? "ON" : "off");
-    } else if (!on && was) {
+    } else if (mode == 0 && modeWas != 0) {
         say("aim: switch turned OFF");
-    } else if (on && modeWas != mode) {
+    } else if (mode != 0 && modeWas != mode) {
         {
             std::lock_guard<std::mutex> lock(mu_);
             if (mode == 2 && !bankReady_.load()) { nextBankLayoutAt_ = 0; bankLayoutTries_ = 0; bankFailWhy_.clear(); }
             lastText_.clear();
         }
         say("aim: mode changed to %s", name);
-    } else if (on && yWas != holdY) {
+    } else if (mode != 0 && yWas != holdY) {
         say("aim: 'hold Y to aim' turned %s", holdY ? "ON" : "off");
     }
 }
@@ -173,7 +181,7 @@ bool AimLink::yReadable(double now) const {
 
 // ---------------------------------------------------------------- the menu texts
 int AimLink::uiState() const {
-    if (!on_.load()) return 0;
+    if (!on_.load() || mode_.load() == 0) return 0;          // (stage D10: the link also runs for "Shot points" alone; that is not the Aimbot's state)
     if (!failReason().empty()) return 3;
     return bound_.load() ? 1 : 2;
 }
@@ -194,7 +202,7 @@ std::string AimLink::failReason() const {
 }
 
 std::string AimLink::headline() const {
-    if (!on_.load()) return "Aimbot is off";
+    if (!on_.load() || mode_.load() == 0) return "Aimbot is off";
     const std::string why = failReason();
     if (!why.empty()) return "FAILED: " + why;
     if (!layoutReady_.load()) return "looking at the game's code ...";
@@ -247,10 +255,22 @@ void AimLink::loop() {
                 if (!layoutReady_.load() && !failed_ && now >= nextLayoutAt_) doLayout = true;
                 else if (layoutReady_.load() && !failed_ && needBcm_.load() && fastFailed_.load() && !bound_.load() && now >= nextSearchAt_ && now - lastSearchEnd_ >= cfg_.minSearchGapSeconds) doSrch = true;
             }
-            bool doBank = false;
+            bool doBank = false, doPoints = false;
             {
                 std::lock_guard<std::mutex> lock(mu_);
                 if (layoutReady_.load() && !failed_ && mode_.load() == 2 && !bankReady_.load() && now >= nextBankLayoutAt_) doBank = true;
+                if (layoutReady_.load() && !failed_ && points_.load() != 0 && !pointsReady_.load() && !pointsDead_ && now >= nextPointsAt_) doPoints = true;
+            }
+            if (doPoints) {
+                std::string why; bool transient = false;
+                if (resolvePointsLayout(&why, &transient)) { pointsReady_.store(true, std::memory_order_release); std::lock_guard<std::mutex> lock(mu_); pointsFailWhy_.clear(); }
+                else {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    ++pointsTries_;
+                    pointsFailWhy_ = why;
+                    if (transient) { nextPointsAt_ = nowSec() + cfg_.retrySoonSeconds + std::min(12.0, pointsTries_ * 2.0); if (pointsTries_ == 1 || pointsTries_ % 10 == 0) queuePoints("points: not ready yet (" + why + ") - trying again in a few seconds"); }
+                    else { pointsDead_ = true; queuePoints("points: cannot be used: " + why); }
+                }
             }
             if (doBank) {
                 std::string why; bool transient = false;
@@ -577,6 +597,7 @@ void AimLink::onGameThread() {
     if (!started_) return;
     if (!on_.load(std::memory_order_relaxed)) {
         if (g_.phase != IDLE && !g_.inTick) abandon("the switch was turned off");
+        if (!g_.ptsBalls.empty() && !g_.inTick && layoutReady_.load(std::memory_order_acquire) && gameThreadOk()) pointsStandDown();      // stage D10: the points switch went off too
         g_.haveTimers = false;
         return;
     }
@@ -617,11 +638,23 @@ void AimLink::onGameThread() {
             g_.prevUnheld = u; g_.prevUnheldBall = wb;
         } else g_.prevUnheldBall = 0;
     }
-    if (hand && now - g_.lastEdgeT > 0.15) { g_.lastEdgeT = now; startShot(now, hand, ballPtr); }
+    const int aimMode = mode_.load(std::memory_order_relaxed);           // stage D10: the link also runs for "Shot points" alone; then it must not touch your throws
+    if (hand && aimMode != 0 && now - g_.lastEdgeT > 0.15) { g_.lastEdgeT = now; startShot(now, hand, ballPtr); }
+    if (aimMode == 0 && g_.phase != IDLE) abandon("the Aimbot was turned off");
 
     if (g_.phase == WAIT) tickWait(now);
     else if (g_.phase == WATCH) tickWatch(now);
-    else if (mode_.load(std::memory_order_relaxed) == 2 && bankReady_.load(std::memory_order_acquire)) bankPrepare(now);       // idle: measure the backboards ahead of the first shot
+    else if (aimMode == 2 && bankReady_.load(std::memory_order_acquire)) bankPrepare(now);       // idle: measure the backboards ahead of the first shot
+
+    // stage D10 ("Shot points"): keep your ball at the asked number of points. (Reads and writes the ball's own memory only; no engine call.)
+    if (points_.load(std::memory_order_relaxed) != 0) {
+        float since = -1.0f;                                              // seconds since you let go of a ball (the smaller of the two release timers), or -1
+        if (std::isfinite(tl) && tl >= 0) since = tl;
+        if (std::isfinite(tr) && tr >= 0 && (since < 0 || tr < since)) since = tr;
+        pointsTick(now, ballPtr, since);
+    } else if (!g_.ptsBalls.empty()) {
+        pointsStandDown();
+    }
 }
 
 void AimLink::startShot(double now, int hand, uintptr_t ballPtr) {

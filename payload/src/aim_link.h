@@ -78,6 +78,15 @@ struct Counters {
     unsigned long long bankAimed = 0, bankUnavailable = 0, bankScored = 0, bankMissed = 0;   // stage D9 (Bank mode): bank shots set / shots where a bank shot was not possible / results
 };
 
+// stage D10 ("Shot points"): what the points part did. All numbers only count; nothing here changes any behaviour.
+struct PointsCounters {
+    unsigned long long writes = 0;          // times we wrote our number into the ball's point value
+    unsigned long long gameWrites = 0;      // times the game had put its OWN number there since our last write (so it did not stay ours)
+    unsigned long long baskets = 0;         // baskets the ball told us about (_shotMade went to yes) while the switch was on
+    unsigned long long balls = 0;           // different balls of yours that were handled
+    unsigned long long readFails = 0, writeFails = 0;
+};
+
 class AimLink {
 public:
     AimLink();
@@ -91,6 +100,16 @@ public:
     // stage D9: the same with the mode: 0 off, 1 Direct (aim straight at the ring), 2 Bank (hit the backboard first). Only one mode can be on.
     void setAsk(int mode, float capM, bool holdY);
     int mode() const { return mode_.load(); }
+
+    // ---- stage D10 (Troll page, "Shot points"): every basket of YOURS is set to `points` points (0 = off, otherwise 1 ... 999).
+    // It only ever touches the ball you control (the one your ball control object points at) and the balls you let go of in the last few seconds. Cheap; called often.
+    // It works on its own: the Aimbot does not have to be on (and when the Aimbot is off, nothing about your throws is changed).
+    void setPoints(int points);
+    int pointsUiState() const;              // 0 off, 1 connected, 2 looking for your ball, 3 failed
+    std::string pointsHeadline() const;     // short text for the menu: what the points part is doing
+    std::string pointsLastText() const;     // short text for the menu: what happened at your last basket
+    std::string pointsSummary() const;      // one line for the facts file
+    PointsCounters pointsCounters() const;
 
     // The real Y button, as seen right now. Called by the menu's thread (about 50 times a second) and by the controller doorway (about 185 times a second).
     // Cheap, never waits, ignored while the switch is off. `fromDoorway` only tells the facts file which of the two saw it.
@@ -161,6 +180,27 @@ private:
         tzaim::Vec3 cBounds;                       // where the collider's box was when it was measured (to notice a moved / replaced board)
         float halfW = 0, halfH = 0, thick = 0;
         std::string how;                           // where the numbers came from (for the facts file)
+    };
+    // ---- stage D10 ("Shot points"): where the ball keeps its point value. Found on the link thread, then read-only (published by pointsReady_).
+    // From the game's own files (the ball is ShovelTools.Basketball): its link _properties (a ShovelTools.BasketballProperties object) holds _pointValue, a whole number.
+    // The game sets that number with BasketballProperties.SetPointValue(int) when a throw is released; it is also what ShotData.PointValue is built from.
+    struct PointsLayout {
+        bool ok = false;
+        tzscan::ClassInfo props;                   // BasketballProperties
+        int bProps = -1;                           // in the ball: _properties
+        int pValue = -1;                           // in the ball's properties: _pointValue
+    };
+    // one ball of yours that is being kept at the asked number of points (game thread only)
+    struct PtsBall {
+        uintptr_t ball = 0, props = 0;
+        double firstSeen = 0, lastControlled = 0;  // lastControlled: the last time your ball control pointed at this ball
+        bool seenValue = false; int firstValue = 0;        // the number the ball had when we first looked
+        bool haveGame = false; int gameValue = 0;          // the last number the GAME put there (not ours)
+        bool made = false;                                  // _shotMade was already seen "yes" for this flight
+        double madeAt = -1;
+        int writes = 0, gameWrites = 0;                     // our writes / times the game put its own number there after one of ours
+        int lastWritten = 0, lastGame = 0;                  // the number we wrote last / the number the game put there after one of ours
+        double retryAt = 0; int readFailNotes = 0;          // a ball that cannot be read is looked at again later
     };
     enum Phase { IDLE = 0, WAIT = 1, WATCH = 2 };
     struct Sample { int steps = 0; tzaim::Vec3 pos, vel; tzaim::Pose pred; };
@@ -248,6 +288,16 @@ private:
     std::string bankNameOf(uintptr_t obj);                                                                         // the engine's name of an object ("" when it cannot be read)
     std::string bankClassOf(uintptr_t obj) const;                                                                  // the class name of an object
 
+    // ---- stage D10 (Shot points), aim_points.cpp
+    void initOn();                                                                // the link as a whole just came to life (aim or points)
+    bool resolvePointsLayout(std::string* why, bool* transient);                  // link thread
+    void pointsTick(double now, uintptr_t ballPtr, float sinceRelease);           // game thread: keep your balls at the asked number
+    void pointsStandDown();                                                       // game thread: the switch went off - put the game's own number back where we changed it
+    bool pointsReadBall(PtsBall& b, int* value, bool* shotMade);                  // game thread: reads the ball and its properties (false = gone / unreadable)
+    bool pointsWrite(const PtsBall& b, int value);                                // game thread: writes the number (checked)
+    void sayPoints(const char* fmt, ...) __attribute__((format(printf, 2, 3)));   // facts file, with its own line budget (does not eat the aim lines)
+    void queuePoints(const std::string& line);                                    // game thread: queued, written by the link thread
+
     // ---- stage D9 (Bank mode), aim_bank.cpp
     bool resolveBankLayout(std::string* why, bool* transient);                    // link thread
     void bankPrepare(double now);                                                 // game thread, idle ticks: measures the backboards before the first shot
@@ -270,6 +320,18 @@ private:
     std::atomic<bool> on_{false};
     std::atomic<int> mode_{0};                   // 0 off, 1 Direct, 2 Bank (on_ is true for both)
     BankLayout B_;                               // written once by the link thread, then read-only (published by bankReady_)
+    // stage D10 (Shot points)
+    PointsLayout P_;                             // written once by the link thread, then read-only (published by pointsReady_)
+    std::atomic<bool> pointsReady_{false};
+    std::atomic<int> points_{0};                 // 0 = off, else the number of points every basket of yours is set to
+    double nextPointsAt_ = 0; int pointsTries_ = 0;       // under mu_
+    std::string pointsFailWhy_;                  // under mu_: why the points part cannot be used ("" = no problem known)
+    bool pointsDead_ = false;                    // under mu_: it cannot work at all (fields missing / writes refused): shown as FAILED, not retried
+    std::string ptsLast_;                        // under mu_: the last basket, for the menu
+    std::atomic<int> ptsNotes_{0};
+    std::atomic<bool> ptsWriteDead_{false};      // the system refused five writes in a row: the points part stopped
+    std::vector<unsigned char> ptsBallBuf_, ptsPropsBuf_;
+    std::atomic<unsigned long long> ptsWrites_{0}, ptsGameWrites_{0}, ptsBaskets_{0}, ptsBalls_{0}, ptsReadFails_{0}, ptsWriteFails_{0};
     std::atomic<bool> bankReady_{false}, bankTried_{false};
     double nextBankLayoutAt_ = 0; int bankLayoutTries_ = 0;       // under mu_
     std::string bankFailWhy_;                    // under mu_: why Bank mode cannot be used (shown in the menu)
@@ -302,6 +364,10 @@ private:
         bool heavyOk = true;                       // stage D9b: the slow search through the whole scene is allowed on this attempt (the 1st and the 3rd only)
         std::vector<BoardFail> boardFails;         // stage D9b: a backboard that could not be measured is tried again later, not on every shot
         double nextBankPrep = 0; int bankPrepNotes = 0, bankShotNotes = 0;
+        // stage D10 (Shot points)
+        std::vector<PtsBall> ptsBalls;             // your balls that are being kept at the asked number (at most 4)
+        int ptsNotes = 0, ptsWriteFailRun = 0, ptsAsked = 0;
+        bool ptsWasOn = false;
     } g_;
     std::vector<unsigned char> bcmBuf_, ballBuf_, gmBuf_, locoBuf_;
     // reports from the game thread to the facts file

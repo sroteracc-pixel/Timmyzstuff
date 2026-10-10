@@ -33,14 +33,17 @@ int main(int, char** argv) {
             {"BankShotCandidate", "ValueType", true, false}, {"RimTarget", "ValueType", true, false}, {"ShotData", "ValueType", true, false}, {"BasketballAssist", "Object", true, true},
             {"ThrowAssist", "Object", true, true}, {"BasketballGoal", "MonoBehaviour", true, true}, {"BasketballGoalManager", "MonoBehaviour", true, false}, {"HoopManager", "MonoBehaviour", true, true},
             {"NetRimReference", "MonoBehaviour", true, false}, {"BasketballGameContext", "Object", true, true}, {"GameManager", "MonoBehaviour", true, true}, {"BallControl", "MonoBehaviour", true, true},
-            {"BallControlManager", "MonoBehaviour", true, true}, {"BasketballProperties", "MonoBehaviour", true, false}, {"ShootGesture", "Gesture", true, false}, {"ShootGameBall", "Holdable", true, false},
+            {"BallControlManager", "MonoBehaviour", true, true}, {"BasketballProperties", "MonoBehaviour", true, true}, {"ShootGesture", "Gesture", true, false}, {"ShootGameBall", "Holdable", true, false},
             {"BallPhysicsUtilities", "Object", true, false}, {"ReleasedBallCommand", "ACommand", true, false}, {"ShotManager", "MonoBehaviour", true, false}, {"ShotDetectionHelper", "MonoBehaviour", true, false},
             {"SteveBallSync", "RealtimeComponent`1", true, false}, {"BallController", "MonoBehaviour", true, false}, {"BasketballStateSync", "RealtimeComponent`1", false, true},
+            // stage D10: the scoring classes (written out in full so the next step can see how a basket becomes points); only ScoreManager gets a live search
+            {"ScoreManager", "MonoBehaviour", true, true}, {"PlayerScore", "MonoBehaviour", true, false}, {"ScoreSync", "RealtimeComponent`1", true, false}, {"ScoreSyncModel", "RealtimeModel", true, false},
+            {"ScoreSyncHelper", "Object", true, false}, {"TeamScorePanelUI", "MonoBehaviour", true, false},
             // noise or already seen: not written out, not searched
             {"ParameterBasketballAngularDrag", "MulticastDelegate", false, false}, {"ParameterBasketballMass", "MulticastDelegate", false, false}, {"ParameterRimPhysicsBounciness", "MulticastDelegate", false, false},
             {"ParameterMaxThrowMultiplier", "MulticastDelegate", false, false}, {"CannonBall", "MonoBehaviour", false, false}, {"TetherBallCollision", "MonoBehaviour", false, false},
             {"BallPhysics", "MonoBehaviour", false, false}, {"RimPhysics", "Object", false, false}, {"BasketballPlayer", "Object", false, false}, {"BasketballSinglePlayer", "MonoBehaviour", false, false},
-            {"SpawnGameBasketball", "MonoBehaviour", false, false}, {"BasketballMaterialSync", "RealtimeComponent`1", false, false}, {"PlayerNetworked", "MonoBehaviour", false, false},
+            {"SpawnGameBasketball", "MonoBehaviour", false, false}, {"BasketballMaterialSync", "RealtimeComponent`1", false, false}, {"PlayerNetworked", "MonoBehaviour", true, true},
             {"RimSync", "RealtimeComponent`1", false, false}, {"HoopHeight", "MonoBehaviour", false, false}, {"GymClassRimBend", "MonoBehaviour", false, false}, {"BallVFXAnchor", "VFXAnchor", false, false},
             {"PlayerLocomotion", "MonoBehaviour", false, false},
         };
@@ -125,6 +128,32 @@ int main(int, char** argv) {
     check("the summary counts the live copies (2 balls + 2 syncs + 2 hoops + 1 assist + 1 settings + 1 manager = 9)", s.liveObjects == 9 && has("live-copies=9"));
     check("no waiting without a delay setting (the scan was quick)", !has("scan: waiting") && secondsTaken < 20.0);
     check("DONE line is there", has("scan: DONE."));
+
+    std::printf("== stage D10: the scoring classes and the code of the scoring methods\n");
+    {
+        auto addScore = reinterpret_cast<void (*)(int)>(dlsym(lib, "fake_add_score_class"));
+        check("the pretend game can have a ScoreManager", addScore != nullptr);
+        if (addScore) {
+            addScore(1); gLines.clear();
+            const Summary sc = run(api, opt, logFn);
+            check("run says ok", sc.ok && sc.error.empty());
+            check("ScoreManager is written out in full (fields and methods)", has("scan: CLASS ShovelTools.ScoreManager : MonoBehaviour") && has("field _northScore : System.Int32 @24") && has("method AddScore(1) : System.Void rva=") && has("method GetScore(0) : System.Int32 rva="));
+            check("the code of the SCORING methods is written out: AddScore, GetScore and IncreasePoints (3 lines), not Reset", countOf("scan:   code320 ShovelTools.ScoreManager.") == 0 && countOf("scan:   code320 ScoreManager.") == 3 && !has("code320 ScoreManager.Reset"));
+            // the method lines and the code lines must show the SAME rva (the fake keeps its method code 0x40 bytes apart: byte pattern 0x00, 0x01, 0x02 ... from the first method on)
+            auto rvaOf = [&](const char* methodLine) { std::string r; for (const std::string& l : gLines) { const size_t p = l.find(methodLine); if (p != std::string::npos) { const size_t q = l.find("rva=", p); if (q != std::string::npos) r = l.substr(q + 4); } } return r; };
+            const std::string rvaAdd = rvaOf("scan:   method AddScore(1) : System.Void"), rvaGet = rvaOf("scan:   method GetScore(0) : System.Int32");
+            std::string line;
+            for (const std::string& l : gLines) if (!rvaAdd.empty() && l.find("scan:   code320 ScoreManager.AddScore(1) rva=" + rvaAdd + " : ") != std::string::npos) line = l;
+            const size_t colon = line.find(" : ");
+            const std::string hex = colon == std::string::npos ? std::string() : line.substr(colon + 3);
+            check("the dump has exactly 320 bytes (640 hex characters) and they are the bytes of the method (0x00 0x01 0x02 ... 0x3e 0x3f)", hex.size() == 640 && hex.compare(0, 12, "000102030405") == 0 && hex.compare(hex.size() - 4, 4, "3e3f") == 0);
+            check("the dump of the second method has its own rva (the one of its method line) and starts with its own byte 0x40", !rvaGet.empty() && rvaGet != rvaAdd && has(("code320 ScoreManager.GetScore(0) rva=" + rvaGet + " : 404142434445").c_str()));
+            check("nothing was CALLED in the game", [&] { int* invokes = static_cast<int*>(dlsym(lib, "fake_invoke_count")); return invokes && *invokes == 0; }());
+            addScore(0); gLines.clear();
+            const Summary s0 = run(api, opt, logFn);
+            check("without a scoring class there are no code dumps and the scan is as before", s0.ok && countOf("scan:   code320") == 0 && s0.matchedClasses == 8);
+        }
+    }
 
     std::printf("== the pause before the live search\n");
     {

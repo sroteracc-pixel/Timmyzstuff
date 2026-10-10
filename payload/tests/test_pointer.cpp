@@ -479,6 +479,94 @@ int main() {
         PanelState d8b; settingsFromText("aimdistance=30\naimjump=0\n", d8b);
         CHECK("the line the previous test version wrote (aimjump=0) is ignored, and nothing else is lost", d8b.aimHoldY && d8b.aimCapM == 30.0f);
     }
+    std::printf("== Troll page (Shot points, stage D10)\n");
+    {   PanelState m; Interaction mi; openMenu(mi, m);
+        PanelState fresh;
+        click(mi, m, HIT_TAB0 + 10);
+        CHECK("the Troll entry opens the Troll page", m.tab == kTabTroll);
+        const std::vector<HitRect> h = hitsFor(m);
+        CHECK("it has the Shot points switch and the slider", find(h, HIT_TOGGLE_POINTS).id != 0 && find(h, HIT_SLIDER_POINTS).id != 0);
+        CHECK("the controls of the other pages are not on this page", find(h, HIT_TOGGLE_AIM).id == 0 && find(h, HIT_SLIDER_AIMCAP).id == 0 && find(h, HIT_SOUND).id == 0 && find(h, HIT_TOGGLE_SPEED).id == 0 && find(h, HIT_SCAN_SHOT).id == 0);
+        bool inside = true, overlap = false;
+        for (size_t i = 0; i < h.size(); ++i) {
+            if (h[i].x < 0 || h[i].y < 0 || h[i].x + h[i].w > kWidth || h[i].y + h[i].h > kHeight) inside = false;
+            if (h[i].x >= 296 && h[i].id != HIT_CLOSE && h[i].y + h[i].h > 624) inside = false;
+            for (size_t j = i + 1; j < h.size(); ++j)
+                if (h[i].x < h[j].x + h[j].w && h[j].x < h[i].x + h[i].w && h[i].y < h[j].y + h[j].h && h[j].y < h[i].y + h[i].h) overlap = true;
+        }
+        CHECK("every clickable area is inside the picture and above the footer, and none overlap", inside && !overlap);
+        CHECK("the page has the Shot points switch OFF and the slider at 11", !fresh.pointsOn && !m.pointsOn && fresh.pointsStop == 11.0f && m.pointsStop == 11.0f && fresh.pointsLinkState == 0);
+        const bool sizeSame = hitsFor(m).size() == h.size();
+        click(mi, m, HIT_TOGGLE_POINTS);
+        CHECK("clicking the switch turns Shot points ON, it is NOT saved (an effect, like the Aimbot), and nothing else changes", m.pointsOn && !m.aimOn && !m.aimBank && !m.speedOn && m.gravityMode == 0 && sizeSame);
+        { PanelState t = m; Interaction ti; openMenu(ti, t); t.tab = kTabTroll; const HitRect r = find(hitsFor(t), HIT_TOGGLE_POINTS); const float cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+          step(ti, t, cx, cy, 0.0f); const Outcome o = step(ti, t, cx, cy, 0.9f);
+          CHECK("... the click asks for a redraw but not for a save", o.redraw && !o.saveNeeded); }
+        click(mi, m, HIT_TOGGLE_POINTS);
+        CHECK("clicking again turns it OFF", !m.pointsOn);
+        click(mi, m, HIT_TOGGLE_POINTS);                           // ON again for the rest
+        CHECK("the Aimbot switches on the Basketball page are not affected by it", !m.aimOn && !m.aimBank);
+
+        // the slider: every stop, whole numbers only, 12 positions
+        const std::vector<HitRect> bh = hitsFor(m);
+        auto stepH = [&](float xx, float yy, float trig) { HandAim a[2]; a[1].valid = true; a[1].onPlane = true; a[1].x = xx; a[1].y = yy; a[1].trigger = trig; a[0].valid = false; a[0].trigger = 0; return mi.update(m, bh, a); };
+        const HitRect sr = find(bh, HIT_SLIDER_POINTS);
+        const float y0 = sr.y + sr.h / 2, x0 = sr.x + 16, x1 = sr.x + sr.w - 16;
+        bool allWhole = true; float minSeen = 99, maxSeen = 0; std::set<int> values; bool textOk = true;
+        stepH(x0, y0, 0.0f); stepH(x0, y0, 0.9f);
+        for (int i = 0; i <= 600; ++i) {
+            const float xx = x0 + (x1 - x0) * i / 600.0f; stepH(xx, y0, 0.9f); const float v = m.pointsStop;
+            if (v != std::floor(v) || v < 1.0f || v > 12.0f) allWhole = false;
+            if (v < minSeen) minSeen = v; if (v > maxSeen) maxSeen = v; values.insert((int)v);
+            const std::string t = pointsStopText(v);
+            if (v <= 11.0f ? t != std::to_string((int)v) : t != "999") textOk = false;
+        }
+        const Outcome dragEnd = stepH(x1, y0, 0.0f);
+        CHECK("letting go of the slider asks for a save (its position is a setting)", dragEnd.saveNeeded);
+        CHECK("dragging from the far left to the far right only ever gives the stops 1 ... 12", allWhole && minSeen == 1.0f && maxSeen == 12.0f);
+        CHECK("... it passes through every one of the 12 stops", values.size() == 12);
+        CHECK("... the text is the number for stops 1 ... 11 and 999 for the last stop", textOk);
+        CHECK("... ends on the last stop = 999 points at the far right", m.pointsStop == 12.0f && pointsStopText(m.pointsStop) == "999" && tzpoints::pointsForStop(m.pointsStop) == 999);
+        stepH(x0, y0, 0.0f); stepH(x0, y0, 0.9f); stepH(x0 - 40, y0, 0.9f); stepH(x0 - 40, y0, 0.0f);
+        CHECK("dragging past the far left stays at 1", m.pointsStop == 1.0f && pointsStopText(m.pointsStop) == "1");
+        stepH(x1, y0, 0.0f); stepH(x1, y0, 0.9f); stepH(x1 + 60, y0, 0.9f); stepH(x1 + 60, y0, 0.0f);
+        CHECK("dragging past the far right stays at 999", m.pointsStop == 12.0f);
+        { const float tx = x0 + (x1 - x0) * (10.0f / 11.0f);        // the 11th stop is 10/11 of the way
+          stepH(tx, y0, 0.0f); stepH(tx, y0, 0.9f); stepH(tx, y0, 0.0f);
+          CHECK("the 11th mark of the slider is exactly 11 points (not 999)", m.pointsStop == 11.0f && tzpoints::pointsForStop(m.pointsStop) == 11); }
+        { const float tx = x0 + (x1 - x0) * (2.0f / 11.0f);
+          stepH(tx, y0, 0.0f); stepH(tx, y0, 0.9f); stepH(tx, y0, 0.0f);
+          CHECK("the 3rd mark is exactly 3 points", m.pointsStop == 3.0f); }
+        CHECK("moving the slider did not touch the switch", m.pointsOn);
+        CHECK("the slider changes no other setting", !m.aimOn && !m.speedOn && m.gravityMode == 0 && m.aimCapM == 50.0f && near(m.speedMul, 1.1f, 1e-4f));
+        {   PanelState a2, b2; a2.tab = b2.tab = kTabTroll; a2.pointsStop = 11; b2.pointsStop = 12;
+            Canvas ca(kWidth, kHeight), cb(kWidth, kHeight); drawPanel(ca, a2, nullptr); drawPanel(cb, b2, nullptr);
+            const HitRect r = find(hitsFor(a2), HIT_SLIDER_POINTS);
+            bool differs = false;
+            for (int yy = (int)r.y; yy < (int)(r.y + r.h) + 12 && !differs; ++yy)
+                for (int xx = (int)(r.x + r.w + 20); xx < (int)(r.x + r.w + 150) && !differs; ++xx)
+                    if (std::memcmp(ca.data() + (yy * kWidth + xx) * 4, cb.data() + (yy * kWidth + xx) * 4, 4) != 0) differs = true;
+            CHECK("the number next to the slider changes with the value (11 vs 999)", differs); }
+        {   PanelState a2, b2; a2.tab = b2.tab = kTabTroll; b2.pointsLast = "Basket! The ball carried 11 points when it went in"; b2.pointsLinkState = 1; b2.pointsHeadline = "connected - your ball is kept at 11 points";
+            Canvas ca(kWidth, kHeight), cb(kWidth, kHeight); drawPanel(ca, a2, nullptr); drawPanel(cb, b2, nullptr);
+            CHECK("the link card shows the texts from the game part (the picture changes)", std::memcmp(ca.data(), cb.data(), static_cast<size_t>(kWidth) * kHeight * 4) != 0); }
+    }
+    {   PanelState a; a.pointsStop = 7; a.pointsOn = true;
+        const std::string txt = settingsToText(a);
+        PanelState b; const bool ok = settingsFromText(txt, b);
+        CHECK("the slider position is saved and comes back exactly (stop 7)", ok && b.pointsStop == 7.0f && txt.find("pointsstop=7\n") != std::string::npos);
+        CHECK("the SWITCH is never saved: it starts OFF next time", !b.pointsOn && txt.find("pointson") == std::string::npos);
+        PanelState u; u.pointsStop = 12; CHECK("the 999 stop is saved as pointsstop=12 and comes back", settingsToText(u).find("pointsstop=12\n") != std::string::npos && [&] { PanelState x; settingsFromText(settingsToText(u), x); return x.pointsStop == 12.0f; }());
+        PanelState g; settingsFromText("pointsstop=0\npointsstop=13\npointsstop=abc\npointsstop=-4\n", g);
+        CHECK("out-of-range or garbage stops are ignored (stays 11)", g.pointsStop == 11.0f);
+        PanelState e1, e2; settingsFromText("pointsstop=1\n", e1); settingsFromText("pointsstop=12\n", e2);
+        CHECK("the exact end stops 1 and 12 are accepted", e1.pointsStop == 1.0f && e2.pointsStop == 12.0f);
+        PanelState o3; settingsFromText("pointsstop=7.4\n", o3);
+        CHECK("a hand-edited 7.4 is snapped to a whole stop (7)", o3.pointsStop == 7.0f);
+        PanelState old; const bool okOld = settingsFromText("sound=0\ncolor=2\naimdistance=20\n", old);
+        CHECK("an older settings file without the line leaves the slider at 11 and the switch off", okOld && old.pointsStop == 11.0f && !old.pointsOn && old.aimCapM == 20.0f);
+        CHECK("the other saved lines are unchanged by the new one (the aimbot distance comes back)", [&] { PanelState x; x.aimCapM = 23; x.pointsStop = 4; PanelState y; settingsFromText(settingsToText(x), y); return y.aimCapM == 23.0f && y.pointsStop == 4.0f; }());
+    }
     {   PanelState o; settingsFromText("transparency=0.60\n", o);
         CHECK("an old saved transparency of 0.60 is pulled down to the new maximum 0.25", near(o.transparency, 0.25f, 1e-4f)); }
     std::printf("\npassed: %d  failed: %d\n", passed, failed);

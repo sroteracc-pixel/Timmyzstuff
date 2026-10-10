@@ -9,6 +9,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <vector>
 
@@ -86,7 +87,8 @@ void buildFields() {       // called for every new scenario, so a scenario that 
     kBall.fields.push_back({"_properties", &tProps, 264, 0}); kBall.fields.push_back({"_originalAngularDrag", &tFloat, 356, 0});
     kBall.fields.push_back({"_lastBankAssistInTime", &tFloat, 364, 0}); kBall.fields.push_back({"_assistInGoal", &tGoal, 368, 0});
     kProps.fields = {{"_basketballRigidbody", &tRB, 88, 0}, {"_basketballCollider", &tSphere, 96, 0}, {"_basketballPhysicMaterial", &tPhysMat, 104, 0}, {"_runtimePhysicMaterial", &tPhysMat, 128, 0},
-                     {"_runtimeStaticFriction", &tFloat, 136, 0}, {"_runtimeDynamicFriction", &tFloat, 140, 0}, {"_runtimeBounciness", &tFloat, 144, 0}};
+                     {"_runtimeStaticFriction", &tFloat, 136, 0}, {"_runtimeDynamicFriction", &tFloat, 140, 0}, {"_runtimeBounciness", &tFloat, 144, 0},
+                     {"_shootingPlayerId", &tOther, 152, 0}, {"_distanceFromStart", &tFloat, 160, 0}, {"_pointValue", &tInt, 164, 0}};      // (stage D10: the real position of _pointValue is 164)
     kGoal.fields = {{"_rimCenter", &tTransform, 24, 0}, {"_rimYOffset", &tFloat, 32, 0}, {"_rimBankYOffset", &tFloat, 36, 0}, {"_rimRadius", &tFloat, 40, 0}, {"_backboardCenter", &tTransform, 48, 0},
                     {"_backboardNormal", &tVec3, 56, 0}, {"_bankGridRows", &tInt, 68, 0}, {"_bankGridCols", &tInt, 72, 0}, {"_bankShotBoundsSize", &tVec3, 76, 0}, {"_bankShotBoundsOffset", &tVec3, 88, 0},
                     {"_backboardSize", &tVec3, 100, 0}, {"_backboardOffset", &tVec3, 112, 0}};
@@ -210,6 +212,23 @@ struct Bank {
     double contactPos[3] = {0, 0, 0}, vInN = 0, vOutN = 0, eUsed = 0, muUsed = 0, apprUsed = 0;
 };
 Bank Bk;
+
+// ---------------------------------------------------------------- stage D10: the pretend scoring (what the game does with the ball's point value)
+// The game writes ITS OWN number into the ball's point value when a throw is released (like SetPointValue does). The pretend scoreboard then counts a basket in one of three ways:
+//   mode 0: it reads the ball's point value at the moment the ball goes in (the way the mod hopes the real game works)
+//   mode 1: it uses the number the game wrote at the release (a copy; later changes of the ball's number change nothing)
+//   mode 2: it ignores the ball and always counts 3
+struct Pts {
+    int gameNumber = 3;            // what the game writes at the release
+    int mode = 0;
+    int rewriteAt = -1, rewriteTo = 3;     // the game writes its own number AGAIN this many physics steps after the release (-1 = never)
+    int score = 0, baskets = 0, snapshot = 0;
+    unsigned char *ball2 = nullptr, *props2 = nullptr;     // "somebody else's" ball (never controlled by us)
+    unsigned char* roProps = nullptr;                      // a settings object on a read-only page (writes into it are refused by the system)
+};
+Pts Ps;
+int getPropsValue(unsigned char* props) { int v = 0; if (props) std::memcpy(&v, props + 164, 4); return v; }
+void setPropsValue(unsigned char* props, int v) { if (props) std::memcpy(props + 164, &v, 4); }
 
 double ballRadius() {
     auto c = Bk.cols.find(Bk.ballCol);
@@ -431,6 +450,8 @@ EXPORT void fake_aim_create(int withHoops) {
     setF(W.bcm, 200, 12.33f); setF(W.bcm, 204, 5.0f);
     const int st = 3; std::memcpy(W.gm + 856, &st, 4); W.gm[760] = 1;
     gTypeObjects.clear();
+    if (Ps.roProps) { munmap(Ps.roProps, 4096); }
+    Ps = Pts();
     buildBank(0);
 }
 EXPORT void* fake_aim_object(int which) { return which == 0 ? W.gm : (which == 1 ? W.bcm : (which == 2 ? W.ball : W.rb)); }
@@ -473,6 +494,7 @@ EXPORT void fake_aim_release(int hand, double vx, double vy, double vz) {
     setV(W.bcm, 388, vx, vy, vz);
     W.ball[80] = 1;
     for (int i = 0; i < 3; ++i) Bk.w[i] = Bk.relSpin[i];
+    setPropsValue(Bk.props, Ps.gameNumber); Ps.snapshot = Ps.gameNumber;          // stage D10: the game puts its own number into the ball (SetPointValue)
 }
 // one physics step (Unity's order: gravity, then drag, then move)
 EXPORT void fake_aim_step() {
@@ -482,6 +504,7 @@ EXPORT void fake_aim_step() {
     if (W.held) return;
     ++W.stepsSinceRelease;
     if (W.overrideAtStep >= 0 && W.stepsSinceRelease == W.overrideAtStep) { W.v[0] = W.ov[0]; W.v[1] = W.ov[1]; W.v[2] = W.ov[2]; }
+    if (Ps.rewriteAt >= 0 && W.stepsSinceRelease == Ps.rewriteAt) setPropsValue(Bk.props, Ps.rewriteTo);        // stage D10: the game writes its own number again
     const double qy = W.p[1];
     if (W.useGravity) W.v[1] -= W.gravity * W.fdt;
     const double damp = 1.0 - W.drag * W.fdt;
@@ -499,7 +522,11 @@ EXPORT void fake_aim_step() {
         if (qy >= 3.1 && W.p[1] < 3.1 && W.v[1] < 0) {
             const double k = (qy - 3.1) / (qy - W.p[1]);
             const double cx = W.p[0] - W.v[0] * W.fdt * (1 - k), cz = W.p[2] - W.v[2] * W.fdt * (1 - k);
-            if (std::sqrt(cx * cx + (cz - hz) * (cz - hz)) < 0.2286) W.ball[81] = 1;
+            if (std::sqrt(cx * cx + (cz - hz) * (cz - hz)) < 0.2286 && !W.ball[81]) {
+                W.ball[81] = 1;
+                Ps.score += Ps.mode == 0 ? getPropsValue(Bk.props) : (Ps.mode == 1 ? Ps.snapshot : 3);      // stage D10: the pretend scoreboard
+                ++Ps.baskets;
+            }
         }
     }
 }
@@ -582,6 +609,41 @@ EXPORT void fake_bank_state(double* out) {
 EXPORT void* fake_bank_object(int which, int goal) {      // 0 goal, 1 goal manager, 2 board collider, 3 board node, 4 props
     switch (which) { case 0: return Bk.goal[goal & 1]; case 1: return Bk.gman; case 2: return Bk.boardCol[goal & 1]; case 3: return Bk.board[goal & 1]; default: return Bk.props; }
 }
+
+// ---- stage D10: knobs and readings of the pretend scoring
+EXPORT void fake_pts_set(const char* key, double a, double b) {
+    const std::string k = key;
+    if (k == "game_number") Ps.gameNumber = static_cast<int>(a);
+    else if (k == "mode") Ps.mode = static_cast<int>(a);
+    else if (k == "rewrite") { Ps.rewriteAt = static_cast<int>(a); Ps.rewriteTo = static_cast<int>(b); }
+    else if (k == "value") setPropsValue(Bk.props, static_cast<int>(a));
+    else if (k == "other_value") setPropsValue(Ps.props2, static_cast<int>(a));
+    else if (k == "remove_pointvalue") { for (size_t i = 0; i < kProps.fields.size(); ++i) if (kProps.fields[i].name == "_pointValue") { kProps.fields.erase(kProps.fields.begin() + static_cast<long>(i)); break; } }
+    else if (k == "retype_pointvalue") { for (Field& f : kProps.fields) if (f.name == "_pointValue") f.type = &tFloat; }
+    else if (k == "remove_properties") { for (size_t i = 0; i < kBall.fields.size(); ++i) if (kBall.fields[i].name == "_properties") { kBall.fields.erase(kBall.fields.begin() + static_cast<long>(i)); break; } }
+    else if (k == "retype_properties") { for (Field& f : kBall.fields) if (f.name == "_properties") f.type = &tInt; }
+    else if (k == "destroy_props") { const uint64_t z = a != 0 ? 0 : reinterpret_cast<uint64_t>(Bk.props) + 0x40; std::memcpy(Bk.props + 16, &z, 8); }
+    else if (k == "props_null") putPtr(W.ball, 264, a != 0 ? nullptr : Bk.props);
+    else if (k == "props_readonly") {          // a copy of the settings object on a page the system will not let anybody write
+        void* pg = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (pg != MAP_FAILED) { std::memcpy(pg, Bk.props, 176); mprotect(pg, 4096, PROT_READ); Ps.roProps = static_cast<unsigned char*>(pg); putPtr(W.ball, 264, Ps.roProps); }
+    }
+    else if (k == "props_normal") putPtr(W.ball, 264, Bk.props);
+    (void)b;
+}
+EXPORT void fake_pts_state(double* out) {
+    out[0] = Ps.score; out[1] = Ps.baskets; out[2] = getPropsValue(Bk.props); out[3] = Ps.props2 ? getPropsValue(Ps.props2) : -1;
+    out[4] = Ps.roProps ? getPropsValue(Ps.roProps) : -1; out[5] = Ps.snapshot;
+}
+// "somebody else's" ball: a second Basketball object with its own settings object (point value 7), NOT linked from our ball control
+EXPORT void fake_pts_make_other() {
+    Ps.ball2 = makeObject(&kBall, 408); Ps.props2 = makeObject(&kProps, 176);
+    putPtr(Ps.ball2, 72, W.rb); putPtr(Ps.ball2, 264, Ps.props2); putPtr(Ps.props2, 88, W.rb); setPropsValue(Ps.props2, 7);
+    const int hl = 1; std::memcpy(Ps.ball2 + 164, &hl, 4);
+}
+// our ball control points at the other ball from now on (we "picked up another ball") / back at the first one
+EXPORT void fake_pts_switch_ball(int toSecond) { putPtr(W.bcm, 168, toSecond ? Ps.ball2 : W.ball); }
+EXPORT void* fake_pts_object(int which) { return which == 0 ? Bk.props : (which == 1 ? Ps.ball2 : (which == 2 ? Ps.props2 : Ps.roProps)); }
 
 // ---- the runtime functions the link uses
 EXPORT void* il2cpp_domain_get() { init(); return &gDomain; }

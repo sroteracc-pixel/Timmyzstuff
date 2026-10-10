@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "points.h"
+
 namespace tzpanel {
 
 const int kWidth = 1024;
@@ -69,6 +71,10 @@ const float kGravMin = 0.0f,  kGravMax = 90.0f, kGravStep = 5.0f;               
 const float kAimMin = 5.0f, kAimMax = 50.0f, kAimStep = 1.0f;                      // 5 m ... 50 m, 1 m per step; 50 is shown as "Unlimited"
 const float kAimDefault = 50.0f;
 std::string aimCapText(float capM);                                                // "Unlimited" or "23 m"
+// Troll page (stage D10): "Shot points" slider. The slider value is the STOP NUMBER 1 .. 12 (stops 1 .. 11 = that many points, stop 12 = 999); see points.h.
+const float kPointsMin = tzpoints::kStopMin, kPointsMax = tzpoints::kStopMax, kPointsStep = tzpoints::kStopStep;
+const float kPointsDefault = tzpoints::kStopDefault;
+std::string pointsStopText(float stop);                                            // "11" or "999"
 
 // Everything the picture depends on.
 struct PanelState {
@@ -102,6 +108,13 @@ struct PanelState {
     int aimLinkState = 0;           // stage D8: 0 = off (switch off), 1 = connected to the game's ball, 2 = looking for your ball control, 3 = failed
     std::string aimHeadline;        // short text from the game part: what it is doing right now (empty = the menu picks a default text)
     std::string aimLastShot;        // short text: what happened to your last throw (empty = no throw seen yet)
+
+    // ---- Troll page, "Shot points" (stage D10). The switch is NEVER saved (every launch starts with it off). The slider position IS saved. ----
+    bool pointsOn = false;          // every basket you score is set to the slider's number of points
+    float pointsStop = kPointsDefault;   // slider stop 1 .. 12 (1 .. 11 = that many points, 12 = 999)
+    int pointsLinkState = 0;        // 0 = off, 1 = connected to your ball, 2 = looking for it, 3 = failed
+    std::string pointsHeadline;     // short text from the game part: what it is doing right now (empty = the menu picks a default text)
+    std::string pointsLast;         // short text: what happened at your last basket (empty = none seen yet)
 };
 
 // Clickable areas (in picture pixels), so a pointer can find what it points at.
@@ -127,6 +140,8 @@ enum HitId {
     HIT_SCAN_SHOT = 48,             // Basketball page: "Scan ball and hoops" button
     HIT_TOGGLE_AIMY = 49,           // Basketball page: "Hold Y to aim" switch
     HIT_TOGGLE_AIMBANK = 50,        // Basketball page: "Aimbot Bank" switch (stage D9)
+    HIT_TOGGLE_POINTS = 51,         // Troll page: "Shot points" switch (stage D10)
+    HIT_SLIDER_POINTS = 52,         // Troll page: "Shot points" slider (stops 1 .. 11, then 999)
     HIT_COLOR0 = 60,                // 60 .. 69 = the 10 colours
 };
 struct HitRect { int id; float x, y, w, h; };
@@ -134,6 +149,7 @@ struct HitRect { int id; float x, y, w, h; };
 const int kTabCount = 11;
 const int kTabMovement = 3;      // index of the "Movement" page
 const int kTabBasketball = 4;    // index of the "Basketball" page (the Aimbot lives here)
+const int kTabTroll = 10;        // index of the "Troll" page ("Shot points" lives here)
 const char* tabName(int i);
 
 // Paints the whole menu. `hits` (optional) receives the clickable areas.

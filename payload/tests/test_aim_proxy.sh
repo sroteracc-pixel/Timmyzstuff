@@ -10,7 +10,7 @@ pass=0; failn=0
 check() { if eval "$2"; then pass=$((pass+1)); echo "  PASS  $1"; else failn=$((failn+1)); echo "  FAIL  $1"; fi; }
 
 g++ -std=c++17 -shared -fPIC -fvisibility=hidden -I"$HERE/fake_jni" -I"$HERE/../src" -I"$HERE/../../menu/src" -DTZ_FAST_TEST \
-  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/movement.cpp" "$HERE/../src/game_link.cpp" "$HERE/../src/aimbot.cpp" "$HERE/../src/aim_link.cpp" "$HERE/../src/aim_bank.cpp" "$HERE/../src/bank.cpp" "$HERE/../src/il2cpp_scan.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" "$HERE/../../menu/src/menu_input.cpp" \
+  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/movement.cpp" "$HERE/../src/game_link.cpp" "$HERE/../src/aimbot.cpp" "$HERE/../src/aim_link.cpp" "$HERE/../src/aim_bank.cpp" "$HERE/../src/aim_points.cpp" "$HERE/../src/bank.cpp" "$HERE/../src/il2cpp_scan.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" "$HERE/../../menu/src/menu_input.cpp" \
   -ldl -pthread -Wl,--version-script="$HERE/../exports.map" -o "$W/libmain.so" || exit 2
 echo 'extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void*, void*) { return 0x00010006; }' > "$W/orig.cpp"
 g++ -shared -fPIC "$W/orig.cpp" -o "$W/libmain_orig.so"
@@ -107,6 +107,9 @@ int main(int, char** argv) {
   usleep(500000);
   double s[10]; state(s);
   std::printf("STATE invokes=%.0f setvel=%.0f made=%.0f calls=%ld bad=%ld ygame=%ld pos=%.2f,%.2f,%.2f\n", s[6], s[7], s[8], calls, bad, yseen, s[0], s[1], s[2]);
+  void (*pstate)(double*) = (void (*)(double*))dlsym(il, "fake_pts_state");      // stage D10: the pretend scoreboard and the ball's point value
+  double p[8] = {0}; if (pstate) pstate(p);
+  std::printf("PTS score=%.0f baskets=%.0f value=%.0f\n", p[0], p[1], p[2]);
   return 0;
 }
 C
@@ -128,6 +131,9 @@ run ylate 50 2 4 TZ_TEST_AIM_Y=1 TZ_PRETEND_Y=both,13,19                    # "h
 run bank 50 0 6 TZ_TEST_AIM_BANK=1                                           # stage D9: Aimbot Bank ON (the Direct Aimbot is off), a weak crooked throw from 6.7 m in front of the hoop
 run bankno 50 -2.5 12.0 TZ_TEST_AIM_BANK=1                                   # Aimbot Bank ON, but the player is 1 m from the board: "Bank unavailable", the throw must stay exactly as thrown
 run bankynot 50 0 6 TZ_TEST_AIM_BANK=1 TZ_TEST_AIM_Y=1                       # Aimbot Bank ON with "hold Y to aim" ON and Y never pressed: left alone
+run pts "" 2 4 TZ_TEST_POINTS=11                                             # stage D10: Shot points ON at 11, the Aimbot never turns on, the same weak crooked throw
+run ptsaim 50 2 4 TZ_TEST_POINTS=11                                          # Shot points ON at 11 AND the Direct Aimbot ON: the throw goes in and the pretend scoreboard counts 11
+run ptsbig 50 2 4 TZ_TEST_POINTS=999                                         # Shot points at the last stop (999)
 wait
 
 echo "== aimbot ON, Unlimited: the real payload aims the pretend ball"
@@ -198,7 +204,7 @@ echo "== stage D9: Aimbot Bank ON: the real payload makes a bank shot with the p
 O="$W/bank.out"; F="$W/bank/timmyzstuff_facts.txt"; cp -f "$F" /tmp/facts_aim_bank.txt
 check "the game still starts (65542)" 'grep -q "RESULT=65542" "$O"'
 check "the game always got the real controller answer (BAD=0)" 'grep -q "bad=0" "$O"'
-check "the facts header says stage D9" 'grep -q "^Timmyzstuff facts (stage D9" "$F"'
+check "the facts header says stage D10" 'grep -q "^Timmyzstuff facts (stage D10" "$F"'
 check "the facts say what the menu asks: BANK mode" 'grep -q "^aimbot: menu asks aimbot=ON (BANK), max shot distance=Unlimited, hold Y to aim=off  \[stage D9:" "$F"'
 check "the bank code found the game's backboard code" 'grep -q "aim: BANK: found the game.s backboard code" "$F"'
 check "the backboards were measured" 'grep -q "aim: BANK: measured the backboard of the goal with its ring at" "$F"'
@@ -222,5 +228,30 @@ echo "== stage D9: Aimbot Bank ON + 'Hold Y to aim' ON, Y never pressed: left al
 O="$W/bankynot.out"; F="$W/bankynot/timmyzstuff_facts.txt"
 check "the throw was NOT changed (no speed set)" 'grep -q " setvel=0 " "$O"'
 check "the report says Y was not held (not 'Bank unavailable')" 'grep -q "the Y button was not held when you let go" "$F" && ! grep -q "Bank unavailable:" "$F"'
+
+echo "== stage D10: Shot points ON alone (the Aimbot never turns on)"
+O="$W/pts.out"; F="$W/pts/timmyzstuff_facts.txt"; cp -f "$F" /tmp/facts_points.txt
+check "the game still starts (65542)" 'grep -q "RESULT=65542" "$O"'
+check "the game always got the real controller answer (BAD=0)" 'grep -q "bad=0" "$O"'
+check "the facts say what the menu asks: Shot points ON at 11" 'grep -q "^points: menu asks Shot points=ON (11 points per basket)" "$F"'
+check "the points part found where the ball keeps its point value" 'grep -q "^points: found where the ball keeps its point value" "$F"'
+check "the points part connected and is kept at 11" 'grep -q "^t=[0-9]* points: link connected | asked 11 |" "$F"'
+check "the game put its own number into the ball when the throw was released, and the report says so" 'grep -q "^points: the game put its own number 3 into the ball.s point value" "$F"'
+check "the ball carries 11 at the end of the run (the game wrote 3 at the release)" 'grep -q "^PTS score=0 baskets=0 value=11" "$O"'
+check "the Aimbot did NOT wake up: no aim switch line, no speed set, no decision" '! grep -q "^aim: switch turned ON" "$F" && grep -q " setvel=0 " "$O" && ! grep -q "decision:" "$F"'
+check "the movement link was not woken either" '! grep -q "^link: " "$F" && ! grep -q "^movement: " "$F"'
+check "no memory addresses written except the short ball ids in points lines (no 0x)" '! grep -q "0x" "$F"'
+echo "== stage D10: Shot points + the Direct Aimbot: the throw goes in and the pretend scoreboard counts 11"
+O="$W/ptsaim.out"; F="$W/ptsaim/timmyzstuff_facts.txt"; cp -f "$F" /tmp/facts_points_aim.txt
+check "the throw was aimed (speed set once) and went in" 'grep -q " setvel=1 " "$O" && grep -q " made=1 " "$O"'
+check "the pretend scoreboard counted 11 points (not the game's 3)" 'grep -q "^PTS score=11 baskets=1 value=11" "$O"'
+check "the facts file has the basket line" 'grep -q "^points: BASKET on ball .*the ball.s point value was 11" "$F"'
+check "the points summary counts one basket" 'grep -q "points: link .* | asked 11 | .*baskets seen 1," "$F"'
+echo "== stage D10: Shot points at the last stop (999)"
+O="$W/ptsbig.out"; F="$W/ptsbig/timmyzstuff_facts.txt"
+check "the pretend scoreboard counted 999 points" 'grep -q "^PTS score=999 baskets=1 value=999" "$O"'
+echo "== the other runs never touched the points"
+check "Aimbot only: the scoreboard counted the game's own 3 (shot aimed) and there is no points activity" 'grep -q "^PTS score=3 baskets=1 value=3" "$W/on.out" || grep -q "^PTS score=0 baskets=0 value=3" "$W/on.out"; ! grep -q "points: switch turned ON" "$W/on/timmyzstuff_facts.txt"'
+check "Bank only: no points activity" '! grep -q "points: switch turned ON" "$W/bank/timmyzstuff_facts.txt"'
 
 echo; echo "passed: $pass  failed: $failn"; [ "$failn" -eq 0 ]

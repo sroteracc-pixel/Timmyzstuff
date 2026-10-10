@@ -385,6 +385,18 @@ AimAsk aimAsk() {
     return AimAsk{gState.aimOn, gState.aimCapM, gState.aimHoldY, gState.aimBank};
 }
 
+PointsAsk pointsAsk() {
+    std::lock_guard<std::mutex> g(gMutex);
+    return PointsAsk{gState.pointsOn, gState.pointsStop};
+}
+void setPointsInfo(int state, const char* headline, const char* lastBasket) {
+    const std::string h = headline ? headline : "", l = lastBasket ? lastBasket : "";
+    std::lock_guard<std::mutex> g(gMutex);
+    if (gState.pointsLinkState != state || gState.pointsHeadline != h || gState.pointsLast != l) {
+        gState.pointsLinkState = state; gState.pointsHeadline = h; gState.pointsLast = l; gDirty = true;
+    }
+}
+
 bool inputBlocked() { return gShow.load(std::memory_order_acquire) || nowMs() < gMaskUntilMs.load(std::memory_order_relaxed); }
 int filterControllerState(int rc, void* out) {
     const bool block = out && rc >= 0 && inputBlocked();
