@@ -2,7 +2,6 @@
 #include <dlfcn.h>
 #include <cstdarg>
 #include <cstdio>
-#include <chrono>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -18,91 +17,97 @@ static void dump() { for (const auto& l : gLines) std::printf("      | %s\n", l.
 
 int main(int, char** argv) {
     using namespace tzscan;
-    std::printf("== which class names count as ball / hoop / shot (used only for the optional index)\n");
+    std::printf("== which class names count as ball / hoop / shot\n");
     check("GymClassRimBend, RimSync, RimNet match (rim as a whole word part)", shotNameMatches("GymClassRimBend") && shotNameMatches("RimSync") && shotNameMatches("RimNet"));
+    check("BasketballManager, BallPool, ShotPreferences, ThrowPowerSlider, ScoreBoard, Grabbable, AimAssist, HoopTrigger match",
+          shotNameMatches("BasketballManager") && shotNameMatches("BallPool") && shotNameMatches("ShotPreferences") && shotNameMatches("ThrowPowerSlider") &&
+          shotNameMatches("ScoreBoard") && shotNameMatches("Grabbable") && shotNameMatches("AimAssist") && shotNameMatches("HoopTrigger"));
     check("'Primary' and 'Trim' contain 'rim' inside a word: no match", !shotNameMatches("PrimaryColor") && !shotNameMatches("TrimTool") && !shotNameMatches("Criminal"));
     check("other sports do not match (FootballBall, SoccerBall, BaseballBat, PaintballGun)", !shotNameMatches("FootballBall") && !shotNameMatches("SoccerBall") && !shotNameMatches("BaseballBat") && !shotNameMatches("PaintballGun"));
+    check("... unless the name says basketball too", shotNameMatches("FootballBasketballCombo"));
+    check("BallPhysics and BallPhysicsUtilities match (the ball's own physics: found in the real facts file)", shotNameMatches("BallPhysics") && shotNameMatches("BallPhysicsUtilities"));
+    check("unrelated names do not match (Menu, Network, Netting, PlayerMovement)", !shotNameMatches("Menu") && !shotNameMatches("Network") && !shotNameMatches("Netting") && !shotNameMatches("PlayerMovement"));
 
-    std::printf("== the REAL class names (copied from the stage D7b lobby file) are picked the right way\n");
+    std::printf("== the REAL class names (copied from your facts files) are picked the right way\n");
     {
-        struct Real { const char* name; const char* parent; bool target; bool live; };
-        // name (without namespace), parent class, written out in full?, running copy searched for?   (all are in Assembly-CSharp)
+        struct Real { const char* name; const char* parent; int rank; bool live; };
+        // name (without namespace), parent class, expected detail rank, running copy searched?   (all are in Assembly-CSharp)
         static const Real real[] = {
-            // the classes that matter
-            {"Basketball", "MonoBehaviour", true, true}, {"BasketballShotAssist", "MonoBehaviour", true, true}, {"ShotAssistParams", "Object", true, true}, {"PredictedShotResult", "ValueType", true, false},
-            {"BankShotCandidate", "ValueType", true, false}, {"RimTarget", "ValueType", true, false}, {"ShotData", "ValueType", true, false}, {"BasketballAssist", "Object", true, true},
-            {"ThrowAssist", "Object", true, true}, {"BasketballGoal", "MonoBehaviour", true, true}, {"BasketballGoalManager", "MonoBehaviour", true, false}, {"HoopManager", "MonoBehaviour", true, true},
-            {"NetRimReference", "MonoBehaviour", true, false}, {"BasketballGameContext", "Object", true, true}, {"GameManager", "MonoBehaviour", true, true}, {"BallControl", "MonoBehaviour", true, true},
-            {"BallControlManager", "MonoBehaviour", true, true}, {"BasketballProperties", "MonoBehaviour", true, false}, {"ShootGesture", "Gesture", true, false}, {"ShootGameBall", "Holdable", true, false},
-            {"BallPhysicsUtilities", "Object", true, false}, {"ReleasedBallCommand", "ACommand", true, false}, {"ShotManager", "MonoBehaviour", true, false}, {"ShotDetectionHelper", "MonoBehaviour", true, false},
-            {"SteveBallSync", "RealtimeComponent`1", true, false}, {"BallController", "MonoBehaviour", true, false}, {"BasketballStateSync", "RealtimeComponent`1", false, true},
-            // noise or already seen: not written out, not searched
-            {"ParameterBasketballAngularDrag", "MulticastDelegate", false, false}, {"ParameterBasketballMass", "MulticastDelegate", false, false}, {"ParameterRimPhysicsBounciness", "MulticastDelegate", false, false},
-            {"ParameterMaxThrowMultiplier", "MulticastDelegate", false, false}, {"CannonBall", "MonoBehaviour", false, false}, {"TetherBallCollision", "MonoBehaviour", false, false},
-            {"BallPhysics", "MonoBehaviour", false, false}, {"RimPhysics", "Object", false, false}, {"BasketballPlayer", "Object", false, false}, {"BasketballSinglePlayer", "MonoBehaviour", false, false},
-            {"SpawnGameBasketball", "MonoBehaviour", false, false}, {"BasketballMaterialSync", "RealtimeComponent`1", false, false}, {"PlayerNetworked", "MonoBehaviour", false, false},
-            {"RimSync", "RealtimeComponent`1", false, false}, {"HoopHeight", "MonoBehaviour", false, false}, {"GymClassRimBend", "MonoBehaviour", false, false}, {"BallVFXAnchor", "VFXAnchor", false, false},
-            {"PlayerLocomotion", "MonoBehaviour", false, false},
+            {"ParameterBasketballAngularDrag", "MulticastDelegate", -1, false}, {"ParameterBasketballBounciness", "MulticastDelegate", -1, false}, {"ParameterBasketballDrag", "MulticastDelegate", -1, false},
+            {"ParameterBasketballDynamicFriction", "MulticastDelegate", -1, false}, {"ParameterBasketballMass", "MulticastDelegate", -1, false}, {"ParameterBasketballStaticFriction", "MulticastDelegate", -1, false},
+            {"ParameterMaxThrowMultiplier", "MulticastDelegate", -1, false}, {"ParameterMinThrowAssistVelocity", "MulticastDelegate", -1, false}, {"ParameterRimPhysicsBounciness", "MulticastDelegate", -1, false},
+            {"ParameterRimPhysicsDynamicFriction", "MulticastDelegate", -1, false}, {"ParameterRimPhysicsStaticFriction", "MulticastDelegate", -1, false}, {"ParameterShortThrowDirectionThreshold", "MulticastDelegate", -1, false},
+            {"BallPhysics", "MonoBehaviour", 3, true}, {"BallPhysicsUtilities", "Object", 3, false}, {"BasketballPlayer", "Object", 3, true}, {"BasketballSinglePlayer", "MonoBehaviour", 3, true},
+            {"SpawnBasketballSinglePlayer", "MonoBehaviour", 3, true}, {"RimPhysics", "Object", 3, true}, {"ClientShootParameters", "ValueType", 2, false}, {"ShootParameters", "ValueType", 2, false},
+            {"HoldBallParameters", "ValueType", 3, false}, {"PlayerGivesShootOrderToBotCommand", "ACommand", 0, false}, {"SoccerBallPhysics", "MonoBehaviour", -1, false}, {"PlayerMovement", "MonoBehaviour", -1, false},
         };
-        int wrongT = 0, wrongL = 0; std::string firstBad;
+        int wrongRank = 0, wrongLive = 0; std::string firstBad;
         for (const Real& r : real) {
-            if (shotTargetName(r.name) != r.target) { ++wrongT; if (firstBad.empty()) firstBad = std::string("target:") + r.name; }
-            if (shotLiveWanted(r.name, true, r.parent) != r.live) { ++wrongL; if (firstBad.empty()) firstBad = std::string("live:") + r.name; }
+            if (shotDetailRank(r.name, r.parent) != r.rank) { ++wrongRank; if (firstBad.empty()) firstBad = r.name; }
+            if (shotLiveWanted(r.name, true, r.parent) != r.live) { ++wrongLive; if (firstBad.empty()) firstBad = std::string("live:") + r.name; }
         }
         if (!firstBad.empty()) std::printf("       (first wrong one: %s)\n", firstBad.c_str());
-        check("all real names get the right 'write it out in full' answer (the ball, the shot assist, the hoops yes; audio, tether ball, events, already-seen classes no)", wrongT == 0);
-        check("... and the right 'search the running copies' answer (structs, events and everything else no)", wrongL == 0);
-        check("a class of another assembly with a target name is never searched (ours=false)", !shotLiveWanted("Basketball", false, "MonoBehaviour"));
+        check("all 24 real class names get the right detail rank (the 12 'Parameter...' events are skipped; BallPhysics, RimPhysics, BasketballPlayer ... are written out)", wrongRank == 0);
+        check("... and the right live-search answer (BallPhysics, BasketballPlayer, BasketballSinglePlayer yes; events, structs, other classes no)", wrongLive == 0);
+        check("the network room and views are searched even though they are not 'our' code; the transforms are not", shotLiveWanted("Normal.Realtime.Realtime", false, "MonoBehaviour") && shotLiveWanted("Normal.Realtime.RealtimeView", false, "MonoBehaviour") &&
+              !shotLiveWanted("Normal.Realtime.RealtimeTransform", false, "MonoBehaviour") && !shotLiveWanted("Normal.Realtime.RealtimeVoice", false, "MonoBehaviour"));
     }
 
     void* lib = dlopen(argv[1], RTLD_NOW);
     if (!lib) { std::printf("cannot load the pretend runtime: %s\n", dlerror()); return 2; }
     auto setShot = reinterpret_cast<void (*)(int)>(dlsym(lib, "fake_set_shot_world"));
     auto makeObj = reinterpret_cast<void* (*)(int, int)>(dlsym(lib, "fake_make_shot_object"));
+    auto makePL = reinterpret_cast<void* (*)(int)>(dlsym(lib, "fake_make_player_locomotion"));
     Api api; std::string missing;
-    check("loadApi works and also finds the three optional functions", loadApi(lib, &api, &missing) && missing.empty() && api.runtime_invoke && api.class_get_method_from_name && api.resolve_icall);
+    check("loadApi works and also finds the three new optional functions", loadApi(lib, &api, &missing) && missing.empty() && api.runtime_invoke && api.class_get_method_from_name && api.resolve_icall);
     setShot(1);
 
-    // running copies, as in the real game: two balls (one held), two sync objects, two hoops (north / south), the game's shot assist and its settings, the game manager
-    // (+ some copies of decoy classes that must not be searched)
-    void* b0 = makeObj(7, 0); void* b1 = makeObj(7, 1);
-    void* st0 = makeObj(8, 0); void* st1 = makeObj(8, 1);
-    void* g0 = makeObj(9, 0); void* g1 = makeObj(9, 1);
-    void* sa = makeObj(10, 0); void* sp = makeObj(11, 0); void* gm = makeObj(12, 1);
-    void* d1 = makeObj(0, 0); void* d2 = makeObj(3, 0); void* d3 = makeObj(4, 0); void* d4 = makeObj(5, 0);
-    (void)b0; (void)b1; (void)st0; (void)st1; (void)g0; (void)g1; (void)sa; (void)sp; (void)gm; (void)d1; (void)d2; (void)d3; (void)d4;
+    // running copies: two RimSync, three GymClassRimBend, one ball (held), the player (holding a ball: the field at 1040 is set)
+    void* rs0 = makeObj(0, 0); void* rs1 = makeObj(0, 1);
+    void* rb0 = makeObj(1, 0); void* rb1 = makeObj(1, 1); void* rb2 = makeObj(1, 2);
+    void* ball = makeObj(2, 1);
+    unsigned char* player = static_cast<unsigned char*>(makePL(0));
+    { const uint64_t held = 0x7a12345000ULL; std::memcpy(player + 1040, &held, 8); }
+    (void)rs0; (void)rs1; (void)rb0; (void)rb1; (void)rb2; (void)ball;
+    void* bp0 = makeObj(3, 0); void* bp1 = makeObj(3, 1);              // the ball physics (two balls)
+    void* rt0 = makeObj(4, 0);                                         // the network room: connected
+    void* v0 = makeObj(5, 0); void* v1 = makeObj(5, 1); void* v2 = makeObj(5, 2);       // three network views
+    void* tr0 = makeObj(6, 0);                                         // a RealtimeTransform copy: must NOT be searched
+    (void)bp0; (void)bp1; (void)rt0; (void)v0; (void)v1; (void)v2; (void)tr0;
 
-    Options opt; opt.topic = Topic::Shot; opt.maxSeconds = 60; opt.listAssemblies = false;
-    const auto t0 = std::chrono::steady_clock::now();
+    Options opt; opt.topic = Topic::Shot; opt.maxSeconds = 60;
     const Summary s = run(api, opt, logFn);
-    const double secondsTaken = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     dump();
     check("run says ok", s.ok && s.error.empty());
     check("it says it is the ball and hoops scan", has("BALL AND HOOPS scan"));
-    std::printf("== what is left out\n");
-    check("no index lines (the long class-name list is left out) and it says so", countOf("scan: index ") == 0 && has("the class-name index is left out"));
-    check("no assembly list when it is switched off", countOf("scan: assembly ") == 0);
+    std::printf("== index\n");
+    check("index: the rims, the slider, the ball and the shot preferences are listed",
+          has("scan: index ShovelTools.RimSync : MonoBehaviour [IRL.GymFake] fields=3 methods=2") && has("scan: index ShovelTools.GymClassRimBend") && has("scan: index ShovelTools.GymClassSlider") &&
+          has("scan: index ShovelTools.BasketballBall") && has("scan: index ShovelTools.ShotPreferences"));
+    check("index: the hand-grab library classes are listed (they live in another assembly)", has("scan: index Autohand.GrabbableBase") && has("scan: index Autohand.Grabbable ") && has("scan: index Autohand.Hand "));
+    check("index: PrimaryColor, FootballBall, BaseballBat, HandMenu, RealtimeVoice and the movement classes are NOT listed",
+          !has("index ShovelTools.PrimaryColor") && !has("index ShovelTools.FootballBall") && !has("index ShovelTools.BaseballBat") && !has("index Autohand.HandMenu") && !has("index Normal.Realtime.RealtimeVoice") && !has("index Game."));
+    check("index: BallPhysics, the bot command and the (useless) event ParameterBasketballMass are listed by name", has("scan: index ShovelTools.BallPhysics : MonoBehaviour") && has("scan: index ShovelTools.PlayerShotCommand : ACommand") && has("scan: index ShovelTools.ParameterBasketballMass : MulticastDelegate"));
+    check("index: the three network classes are listed (they live in the Normal.Realtime assembly)", has("scan: index Normal.Realtime.Realtime : MonoBehaviour [Normal.Realtime]") && has("scan: index Normal.Realtime.RealtimeView ") && has("scan: index Normal.Realtime.RealtimeTransform "));
+    check("index: exactly 14 lines (8 from before + BallPhysics + event + command + 3 network)", countOf("scan: index ") == 14);
     check("no movement index or single-line hits in this report", !has("scan: field-hit") && !has("scan: type-hit") && !has("index of class names (the game's own code + Normal"));
     std::printf("== detail\n");
-    check("the ball (Basketball) is written out with every field and position", has("scan: CLASS ShovelTools.Basketball : MonoBehaviour") && has("field _rb : UnityEngine.Rigidbody @24") && has("field _isHeld : System.Boolean @36") && has("method OnRelease(1)") && has("method Shoot(2)"));
-    check("the game's shot assist is written out: assist object, its settings and the struct", has("scan: CLASS ShovelTools.BasketballShotAssist : MonoBehaviour") && has("method ComputeAssist(3) : UnityEngine.Vector3 rva=") &&
-          has("scan: CLASS ShovelTools.ShotAssistParams") && has("field AssistRadius : System.Single @16") && has("scan: CLASS ShovelTools.PredictedShotResult : ValueType") && has("field willScore : System.Boolean @0"));
-    check("the hoop (BasketballGoal) and the game manager are written out", has("scan: CLASS ShovelTools.BasketballGoal : MonoBehaviour") && has("field _isNorth : System.Boolean @32") && has("scan: CLASS ShovelTools.GameManager : MonoBehaviour") && has("field _officialMatch : System.Boolean @24"));
-    check("the network classes RealtimeView and RealtimeTransform are written out (ownership)", has("scan: CLASS Normal.Realtime.RealtimeView : MonoBehaviour") && has("method RequestOwnership(0)") && has("method get_isOwnedLocallySelf(0)") && has("scan: CLASS Normal.Realtime.RealtimeTransform"));
-    check("noise is NOT written out: CannonBall, TetherBallCollision, BallPhysics (a pitch system), BasketballBall, the event ParameterBasketballMass, RimSync, Realtime, PlayerLocomotion",
-          !has("CLASS CannonBall") && !has("CLASS TetherBallCollision") && !has("CLASS ShovelTools.BallPhysics") && !has("CLASS ShovelTools.BasketballBall") && !has("CLASS ShovelTools.ParameterBasketballMass") &&
-          !has("CLASS ShovelTools.RimSync") && !has("CLASS Normal.Realtime.Realtime :") && !has("CLASS ShovelTools.PlayerLocomotion") && !has("CLASS Autohand."));
-    check("exactly 8 classes written out in this pretend game (6 targets present + 2 network)", s.matchedClasses == 8);
-    check("the classes asked for but missing in this pretend game are named in one line (for example BankShotCandidate), the present ones are not", has("classes asked for by name but NOT found in this game:") && has("BankShotCandidate") && has("HoopManager") && !has("NOT found in this game: Basketball ") && !has("BasketballShotAssist BankShotCandidate"));
-    { int pBall = -1, pAssist = -1, pGoal = -1, pMgr = -1;
-      for (size_t i = 0; i < gLines.size(); ++i) {
-          const std::string& l = gLines[i];
-          if (l.find("scan: CLASS ShovelTools.Basketball :") != std::string::npos) pBall = (int)i;
-          if (l.find("scan: CLASS ShovelTools.BasketballShotAssist") != std::string::npos) pAssist = (int)i;
-          if (l.find("scan: CLASS ShovelTools.BasketballGoal :") != std::string::npos) pGoal = (int)i;
-          if (l.find("scan: CLASS ShovelTools.GameManager") != std::string::npos) pMgr = (int)i;
-      }
-      check("order: ball, then shot assist, then hoop, then game manager", pBall >= 0 && pAssist > pBall && pGoal > pAssist && pMgr > pGoal); }
+    check("RimSync is written out with every field and its position", has("scan: CLASS ShovelTools.RimSync : MonoBehaviour") && has("field _rimTransform : UnityEngine.Transform @24") && has("field _hoopHeight : System.Single @36"));
+    check("GymClassRimBend and GymClassSlider are written out", has("scan: CLASS ShovelTools.GymClassRimBend") && has("field _bendAmount : System.Single @32") && has("scan: CLASS ShovelTools.GymClassSlider"));
+    check("BasketballBall (strong name) is written out, with its Rigidbody field", has("scan: CLASS ShovelTools.BasketballBall : MonoBehaviour") && has("field _body : UnityEngine.Rigidbody @24") && has("method OnRelease(1) : System.Void rva="));
+    check("ShotPreferences (strong name) is written out", has("scan: CLASS ShovelTools.ShotPreferences"));
+    check("the hand-grab classes are written out (Hand, GrabbableBase, Grabbable)", has("scan: CLASS Autohand.GrabbableBase : MonoBehaviour") && has("field body : UnityEngine.Rigidbody @24") && has("scan: CLASS Autohand.Grabbable : GrabbableBase") && has("scan: CLASS Autohand.Hand : MonoBehaviour"));
+    check("PrimaryColor, FootballBall, BaseballBat, HandMenu, RealtimeVoice, and the movement classes are NOT written out",
+          !has("CLASS ShovelTools.PrimaryColor") && !has("CLASS ShovelTools.FootballBall") && !has("CLASS ShovelTools.BaseballBat") && !has("CLASS Autohand.HandMenu") && !has("CLASS Normal.Realtime.RealtimeVoice") && !has("CLASS Game.") && !has("CLASS ShovelTools.PlayerLocomotion"));
+    check("BallPhysics (the real ball physics class, only a name token 'ball') IS written out in full, with its fields", has("scan: CLASS ShovelTools.BallPhysics : MonoBehaviour") && has("field _drag : System.Single @32") && has("method OnThrown(1) : System.Void rva="));
+    check("an event delegate (ParameterBasketballMass) is NOT written out: it would only waste a place", !has("CLASS ShovelTools.ParameterBasketballMass"));
+    check("the bot command (parent ACommand) IS written out, but after the ball classes", has("scan: CLASS ShovelTools.PlayerShotCommand : ACommand"));
+    check("the network classes are written out (room, view, transform) with their ownership methods", has("scan: CLASS Normal.Realtime.Realtime : MonoBehaviour") && has("field _connected : System.Boolean @24") && has("scan: CLASS Normal.Realtime.RealtimeView") &&
+          has("method RequestOwnership(0)") && has("method get_isOwnedLocallySelf(0)") && has("scan: CLASS Normal.Realtime.RealtimeTransform"));
+    check("no network class is reported missing in this pretend game", !has("network class") || !has("NOT found in this game"));
+    check("13 classes written out in total (8 + BallPhysics + command + 3 network)", s.matchedClasses == 13);
+    { int posBall = -1, posCmd = -1; for (size_t i = 0; i < gLines.size(); ++i) { if (gLines[i].find("scan: CLASS ShovelTools.BallPhysics") != std::string::npos) posBall = (int)i; if (gLines[i].find("scan: CLASS ShovelTools.PlayerShotCommand") != std::string::npos) posCmd = (int)i; }
+      check("order: BallPhysics before the bot command", posBall >= 0 && posCmd > posBall); }
     std::printf("== engine functions (looked up only)\n");
     check("the report says which runtime functions exist", has("il2cpp_runtime_invoke=yes il2cpp_class_get_method_from_name=yes il2cpp_resolve_icall=yes il2cpp_thread_attach=yes"));
     check("Rigidbody is found in its engine assembly with the velocity functions", has("scan: engine class UnityEngine.Rigidbody found [assembly UnityEngine.PhysicsModule]") && has("method get_velocity(0) : UnityEngine.Vector3 rva=") && has("method set_velocity(1) : System.Void rva="));
@@ -114,62 +119,48 @@ int main(int, char** argv) {
     { int* invokes = static_cast<int*>(dlsym(lib, "fake_invoke_count"));
       check("nothing is ever CALLED in the game: runtime_invoke / class_get_method_from_name were never used", invokes && *invokes == 0); }
     std::printf("== live values\n");
-    check("the plan lists the 6 classes that exist here, the ball first", s.liveClasses == 6 && has("scan: step 5 done: 6 class(es) planned for the live search: ShovelTools.Basketball(4 fields)"));
-    check("the two balls are found; the held one is shown (_isHeld true, state 3)", has("scan: live ShovelTools.Basketball: ") && has("2 look like a real running copy") && has("live _isHeld = true   (") && has("live _state = 3   ("));
-    check("the sync objects are found: held-left flag, shot data (a text), game-ball flag", has("scan: live BasketballStateSync: ") && has("live _isHeldLeft = true   (") && has("live _shotData = set   (") && has("live _isGameBall = true   ("));
-    check("both hoops are found (north and south)", has("scan: live ShovelTools.BasketballGoal: ") && has("live _isNorth = true   (") && has("live _isNorth = false   ("));
-    check("the shot assist and its settings are found with their numbers", has("scan: live ShovelTools.BasketballShotAssist #1") && has("live _strength = 0.6   (") && has("live _maxDistance = 12.5   (") && has("scan: live ShovelTools.ShotAssistParams #1") && has("live AssistRadius = 0.3   ("));
-    check("the game manager is found: official-match flag", has("scan: live ShovelTools.GameManager #1") && has("live _officialMatch = true   ("));
-    check("copies of decoy classes, the struct and the network room / views are NOT searched",
-          !has("scan: live ShovelTools.RimSync") && !has("scan: live ShovelTools.BallPhysics") && !has("scan: live Normal.Realtime") && !has("scan: live ShovelTools.PredictedShotResult"));
-    check("the summary counts the live copies (2 balls + 2 syncs + 2 hoops + 1 assist + 1 settings + 1 manager = 9)", s.liveObjects == 9 && has("live-copies=9"));
-    check("no waiting without a delay setting (the scan was quick)", !has("scan: waiting") && secondsTaken < 20.0);
+    check("the two RimSync copies are found and written", has("scan: live ShovelTools.RimSync: ") && has("2 look like a real running copy") && has("scan: live ShovelTools.RimSync #1 size=48 native-link=set in ") && has("scan: live ShovelTools.RimSync #2"));
+    check("the three rim-bend copies are found and all three are written (up to 4 per class in this report)", has("scan: live ShovelTools.GymClassRimBend: ") && has("3 look like a real running copy") && has("GymClassRimBend #3"));
+    check("a field value of a rim is written (the second RimSync has bend 0.25)", has("live _bend = 0.25   ("));
+    check("a class whose name says basketball is looked for and found (the ball)", has("scan: live ShovelTools.BasketballBall: ") && has("live _isHeld = true   ("));
+    check("the player is looked for, and ONLY its ball / rim / grab fields are written", has("scan: live ShovelTools.PlayerLocomotion #1") && has("live _rimSync = ") && has("live _grabUpdateBasketball = set   (") && !has("live _forwardMaxSpeed") && !has("live _gravity"));
+    check("the ball physics are searched and found: both balls, with drag and held flag", has("scan: live ShovelTools.BallPhysics: ") && has("2 look like a real running copy") && has("live _drag = ") && has("live _inHand = true   ("));
+    check("the network room is searched and written: connected and the client id", has("scan: live Normal.Realtime.Realtime #1") && has("live _connected = true   (") && has("live _clientId = 3   ("));
+    check("the network views are searched and written: owner ids (up to 4 per class)", has("scan: live Normal.Realtime.RealtimeView: ") && has("3 look like a real running copy") && has("live _ownerId = "));
+    check("RealtimeTransform copies are NOT searched (there are very many and the view says who owns it)", !has("scan: live Normal.Realtime.RealtimeTransform"));
+    check("the event delegate and the bot command are NOT searched", !has("scan: live ShovelTools.ParameterBasketballMass") && !has("scan: live ShovelTools.PlayerShotCommand"));
+    check("the summary counts the live copies (2 rims + 3 bends + 1 ball + 1 player + 2 ball physics + 1 room + 3 views = 13)", s.liveObjects == 13 && has("live-copies=13"));
+    check("exactly 7 classes are planned for the live search (RimSync, GymClassRimBend, PlayerLocomotion, BallPhysics, Realtime, RealtimeView, BasketballBall) - never more than 12", s.liveClasses == 7);
+    { size_t a = std::string::npos, b = std::string::npos;       // the important ones come before the "also wanted" BasketballBall in the plan line
+      for (const auto& l : gLines) if (l.find("scan: step 5 done:") != std::string::npos) { a = l.find("Normal.Realtime.RealtimeView"); b = l.find("ShovelTools.BasketballBall"); }
+      check("the plan puts the network views before the ball class (priority order)", a != std::string::npos && b != std::string::npos && a < b); }
     check("DONE line is there", has("scan: DONE."));
-
-    std::printf("== the pause before the live search\n");
-    {
-        gLines.clear();
-        Options waiting = opt; waiting.liveDelaySeconds = 2;
-        const auto w0 = std::chrono::steady_clock::now();
-        const Summary sw = run(api, waiting, logFn);
-        const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count();
-        check("with a delay setting the scan says it is waiting (and why) and really waits", sw.ok && has("scan: waiting 2 seconds before looking at the running objects") && took >= 2.0);
-        check("... and still finds the live objects afterwards", sw.liveObjects == 9 && has("scan: DONE."));
-    }
 
     std::printf("== the size budget\n");
     {
-        gLines.clear();
-        const Summary base = run(api, opt, logFn);
-        size_t fullBytes = 0; for (const auto& l : gLines) fullBytes += l.size() + 1;
+        size_t fullBytes = 0; for (const auto& l : gLines) fullBytes += l.size() + 1;       // (the previous run's output)
         gLines.clear();
         Options small = opt; small.maxBytes = fullBytes * 8 / 10; small.reservedBytes = fullBytes * 6 / 10; small.maxLines = 2000; small.reservedLines = 450;
         const Summary sb = run(api, small, logFn);
         size_t bytes = 0; for (const auto& l : gLines) bytes += l.size() + 1;
         std::printf("       (%zu bytes written with a %zu-byte budget; the full report is %zu bytes)\n", bytes, small.maxBytes, fullBytes);
-        check("with a small byte budget the report stays inside it (plus the one closing DONE line)", base.ok && sb.ok && bytes <= small.maxBytes + 400);
-        check("... some ordinary lines were dropped, but the important lines (live summary, DONE) still got through", bytes < fullBytes && has("scan: DONE.") && has("scan: step 6 of 6") && has("scan: live ShovelTools.Basketball: "));
+        check("with a small byte budget the report stays inside it (plus the one closing DONE line)", sb.ok && bytes <= small.maxBytes + 400);
+        check("... some ordinary lines were dropped, but the important lines (live summary, DONE) still got through", bytes < fullBytes && has("scan: DONE.") && has("scan: step 6 of 6") && has("scan: live ShovelTools.RimSync: "));
     }
     {
         gLines.clear();
-        Options real = opt; real.maxLines = 3000; real.reservedLines = 500; real.maxBytes = 190000; real.reservedBytes = 45000;      // the budget the payload uses
-        run(api, real, logFn);
+        Options unlimited = opt;      // the real budget used by the payload
+        unlimited.maxLines = 2000; unlimited.reservedLines = 450; unlimited.maxBytes = 190000; unlimited.reservedBytes = 45000;
+        run(api, unlimited, logFn);
         size_t bytes = 0; for (const auto& l : gLines) bytes += l.size() + 1;
         check("the real budget (190 KB) is not hit by this small pretend game", bytes < 190000 && has("scan: DONE."));
-    }
-    std::printf("== the optional index still works when asked for\n");
-    {
-        gLines.clear();
-        Options withIndex = opt; withIndex.shotIndex = true;
-        const Summary si = run(api, withIndex, logFn);
-        check("with shotIndex the ball-and-hoop-like classes are listed (and the other sports are not)", si.ok && has("scan: index ShovelTools.RimSync") && has("scan: index ShovelTools.BasketballBall") && has("scan: index Autohand.GrabbableBase") && !has("index ShovelTools.FootballBall") && !has("index ShovelTools.PrimaryColor"));
     }
     std::printf("== the movement report is not changed by the new classes\n");
     {
         gLines.clear();
         Options mv; mv.brief = true; mv.maxSeconds = 60;
         const Summary sm = run(api, mv, logFn);
-        check("a movement scan in the same game writes no ball or hoop classes and no engine section", sm.ok && !has("CLASS ShovelTools.Basketball") && !has("engine functions the Aimbot would need") && has("scan: CLASS ShovelTools.PlayerLocomotion"));
+        check("a movement scan in the same game writes no ball or hoop classes and no engine section", sm.ok && !has("CLASS ShovelTools.RimSync") && !has("engine functions the Aimbot would need") && has("scan: CLASS ShovelTools.PlayerLocomotion"));
     }
     std::printf("\npassed: %d  failed: %d\n", pass, failn);
     return failn == 0 ? 0 : 1;

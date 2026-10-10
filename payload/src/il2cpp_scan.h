@@ -57,8 +57,6 @@ struct Api {
     void* (*runtime_invoke)(void* method, void* obj, void** params, void** exc) = nullptr;
     void* (*class_get_method_from_name)(void* klass, const char* name, int argsCount) = nullptr;
     void* (*resolve_icall)(const char* name) = nullptr;
-    // optional, stage D8: "is the calling thread known to the game's runtime?" (null result = no, the thread must not call into the game)
-    void* (*thread_current)() = nullptr;
 };
 
 // Looks the functions up in an already loaded libil2cpp.so. `missing` lists required ones that were not found.
@@ -74,10 +72,6 @@ struct Options {
     int maxSeconds = 90;          // the memory search stops after this long
     bool brief = false;           // short report: only the important classes (full detail) + the live values; no index, no single-line hits
     int stallSeconds = 10;        // ... and is given up on when it makes no progress at all for this long (a stuck read)
-    // ball-and-hoops report only (stage D7c):
-    int liveDelaySeconds = 0;     // wait this long before looking at the running objects (time to close the menu, pick up a ball and shoot)
-    bool shotIndex = false;       // write the (long) class-name index; the earlier report already has it
-    bool listAssemblies = true;   // one line per assembly
     // the size budget of the report (the facts file that reaches the person is cut at about 265 KB). maxBytes = 0: no byte budget.
     int maxLines = 7000, reservedLines = 80;
     size_t maxBytes = 0, reservedBytes = 0;
@@ -114,13 +108,9 @@ struct ClassInfo {
     bool unityObject = false;
     std::vector<FieldInfo> fields;    // the class's OWN instance fields (not static, not inherited)
     const FieldInfo* field(const char* name) const;
-    void* klass() const { return reinterpret_cast<void*>(static_cast<uintptr_t>(~klassInv)); }     // the class pointer (stage D8: needed to look up methods)
 };
 // Looks the class up by namespace + name in the game's own code. The calling thread is attached to the runtime for the call.
 ClassInfo findClass(const Api& api, const char* ns, const char* name);
-
-// stage D8: the raw class handle of ANY class (the engine's UnityEngine.Rigidbody too) by namespace + name; nullptr (and `error` filled) when there is none.
-void* findClassHandle(const Api& api, const char* ns, const char* name, std::string* error);
 
 struct Copy { uintptr_t addr = 0; std::vector<unsigned char> bytes; };
 struct CopySearch {
@@ -140,7 +130,7 @@ bool classNameMatches(const std::string& name);       // movement-ish class name
 bool indexNameMatches(const std::string& name);       // broader: also player / character / parameters ...
 bool fieldNameMatches(const std::string& name);
 bool shotNameMatches(const std::string& name);        // stage D7: classes about balls, hoops, rims, shots, throws, grabbing
-bool shotTargetName(const std::string& name);                                 // is this one of the exact ball / hoop / shot-assist classes that are written out in full?
-bool shotLiveWanted(const std::string& name, bool ours, const std::string& parent);   // is a running copy of this class searched for?
+int shotDetailRank(const std::string& name, const std::string& parent);     // 3 ball / hoop / rim, 2 shoot / throw / goal / shot, 0 bot commands, -1 not written out in full
+bool shotLiveWanted(const std::string& full, bool ours, const std::string& parent);   // is a running copy of this class searched for?
 
 }  // namespace tzscan

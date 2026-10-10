@@ -36,14 +36,5 @@ int main(int argc, char** argv) {
         PanelState b; b.tab = kTabBasketball; b.aimOn = true; b.aimCapM = 23; b.dragSlider = HIT_SLIDER_AIMCAP; b.scanState = 1;
         drawPanel(c, b, nullptr); save(argv[7], c);
     }
-    if (argc > 9) {   // stage D8: the game link card with a connected link and a shot result, then a failed link with a very long reason
-        PanelState a; a.tab = kTabBasketball; a.aimOn = true; a.aimLinkState = 1; a.aimCapM = 30;
-        a.aimHeadline = "connected - waiting for your shot"; a.aimLastShot = "shot #3: AIMED from 14 m - SCORED, 0.03 m off centre";
-        drawPanel(c, a, nullptr); save(argv[8], c);
-        PanelState b; b.tab = kTabBasketball; b.aimOn = true; b.aimLinkState = 3;
-        b.aimHeadline = "FAILED: the game's class ShovelTools.BallControlManager has no field called _releasedRightTimer and the memory search found no GameManager either";
-        b.aimLastShot = "shot #1: not aimed - 31 m is farther than your 20 m limit and some more words that cannot fit";
-        drawPanel(c, b, nullptr); save(argv[9], c);
-    }
     return 0;
 }

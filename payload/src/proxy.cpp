@@ -47,8 +47,7 @@
 #include "movement.h"     // the movement rules (stage D4)
 #include "il2cpp_scan.h"   // read-only scan of the game's code (stage D4)
 #include "game_link.h"     // the link that really changes speed / jump / gravity (stage D6)
-#include "aimbot.h"        // the Aimbot rules and maths (stage D7)
-#include "aim_link.h"      // the Aimbot's game part (stage D8): reads the ball when you let go and, if the rules say yes, aims it
+#include "aimbot.h"        // the Aimbot rules and maths (stage D7; the game part does not exist yet)
 #include "overlay.h"      // shows the menu picture in the headset (stage D2)  // counting doorways for ovrp_EndFrame4 / BeginFrame4 / WaitToBeginFrame
 
 #ifdef __ANDROID__
@@ -402,20 +401,12 @@ bool tryInstallWatches(void* ovr) {
 // NOT confirmed: the game may read its controllers a different way. The facts file says which.
 uint64_t gInputReal = 0;
 bool gInputPatched = false;
-// stage D8: the Aimbot's game part. It does nothing at all until the menu's Aimbot switch is on. Its onGameThread() is called from this doorway because
-// the facts file proved that the doorway is called ~185 times a second by the game's own thread "UnityMain" (the only caller) - the only place where
-// it is safe to call the game's own functions.
-// The three game-facing objects below are created once and NEVER destroyed on purpose: the probe thread and the game's threads keep using them while the
-// process is shutting down, and a destroyed object makes them call into nothing (a PC test showed "pure virtual method called" at exit).
-tzaimlink::AimLink& gAim = *new tzaimlink::AimLink;
 extern "C" int tzControllerState4Hook(unsigned int mask, void* out) {
     typedef int (*Fn)(unsigned int, void*);
     const Fn real = reinterpret_cast<Fn>(gInputReal);
     if (!real) return -1;
     tallyThread(gInputThreads);
-    const int rc = real(mask, out);
-    gAim.onGameThread();                         // returns at once when the switch is off; never waits, never writes a file
-    return tzoverlay::filterControllerState(rc, out);
+    return tzoverlay::filterControllerState(real(mask, out), out);
 }
 
 void installInputBlock(void* ovr, int attempt) {
@@ -585,12 +576,7 @@ void* scanMain(void* arg) {
             job->options.brief = true;          // stage D5c: short report about the headset movement classes (keeps the facts file small enough to send)
             if (topic == tzscan::Topic::Shot) {  // stage D7: balls, hoops, rims, shots. The facts file that reaches me is cut at about 265 KB, so this report has its own size budget.
                 job->options.topic = tzscan::Topic::Shot; job->options.brief = false;
-                job->options.maxLines = 3000; job->options.reservedLines = 500; job->options.maxBytes = 190000; job->options.reservedBytes = 45000;
-                job->options.shotIndex = false; job->options.listAssemblies = false;      // stage D7c: the earlier report already has the index and the assembly list
-                job->options.liveDelaySeconds = 25;                                       // time to close the menu, pick up a ball, take a shot and hold a ball again
-#ifdef TZ_FAST_TEST
-                job->options.liveDelaySeconds = std::getenv("TZ_SHOT_LIVE_DELAY_S") ? std::atoi(std::getenv("TZ_SHOT_LIVE_DELAY_S")) : 0;     // PC test only
-#endif
+                job->options.maxLines = 2000; job->options.reservedLines = 450; job->options.maxBytes = 190000; job->options.reservedBytes = 45000;
             }
             double deadline = job->options.maxSeconds + job->options.stallSeconds + 120.0;      // longer than the scan can honestly take
 #ifdef TZ_FAST_TEST
@@ -637,8 +623,8 @@ void startScan(tzscan::Topic topic = tzscan::Topic::Movement) {
 // The rules (tested on a PC) live in movement.cpp. Since stage D6 the controller talks to the game through game_link.cpp
 // (it finds the headset's PlayerLocomotion object when a switch is turned on and writes "original x factor" into it).
 // The requests and what the link does are written to the facts file.
-tzmove::Controller& gMove = *new tzmove::Controller;      // never destroyed on purpose (see gAim)
-tzgame::PlayerLink& gLink = *new tzgame::PlayerLink;
+tzmove::Controller gMove;
+tzgame::PlayerLink gLink;
 
 #ifdef TZ_FAST_TEST
 // PC test only: pretend the menu switches are set like this. TZ_TEST_ASK="speed,jump,gravityMode,pct" (speed / jump of 1 = switch off),
@@ -664,7 +650,7 @@ void* probeMain(void*) {
     if (!gOut) { logf_("facts: could not open a facts file anywhere"); return nullptr; }
     logf_("facts file: %s", where.c_str());
 
-    fact("Timmyzstuff facts (stage D8: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot (switch, distance slider, FIRST VERSION of the part that really aims the ball - not yet proven in the real game) + ball-and-hoops scan)");
+    fact("Timmyzstuff facts (stage D7b: clickable menu + Movement page (REAL game link for Speed Boost / Jump Boost / Low and High Gravity) + Basketball page with the Aimbot switch and distance slider (the part that moves the ball is NOT built yet) + ball-and-hoops scan)");
     fact("package: %s", packageName().c_str());
     fact("this file: %s", where.c_str());
     {   // saved menu settings (sound, colour, size) live next to this file
@@ -743,12 +729,6 @@ void* probeMain(void*) {
 #endif
         gMove.setAdapter(&gLink);
         gLink.start(lc);                                 // does nothing in the game until a movement switch is turned on
-    }
-    {   tzaimlink::Config ac; ac.provider = il2cppForLink; ac.note = fact;     // stage D8: the Aimbot's game part (does nothing until the Aimbot switch is on)
-#ifdef TZ_FAST_TEST
-        ac.retrySoonSeconds = 0.3; ac.minSearchGapSeconds = 0.3; ac.searchSeconds = 20; ac.stallSeconds = 5;     // PC test only: quicker
-#endif
-        gAim.start(ac);
     }
     MenuInput menu;                                      // the same rules the real menu will use
     alignas(16) unsigned char buf[kBufSize];
@@ -898,28 +878,16 @@ void* probeMain(void*) {
                 fact("t=%.0f %s", now, gLink.summary().c_str());
             }
         }
-        {   // ---- stage D8: the Aimbot switch and its distance go to the game part; its state and last shot go back to the menu.
+        {   // ---- stage D7: the Aimbot switch and its distance. The part that touches the game's ball does not exist yet, so this only writes down what the menu asks.
             tzoverlay::AimAsk aim = tzoverlay::aimAsk();
 #ifdef TZ_FAST_TEST
             if (const char* e = std::getenv("TZ_TEST_AIM")) { float cap = 50; std::sscanf(e, "%f", &cap); aim.on = now >= 3.0; aim.capM = cap; }     // PC test only: "TZ_TEST_AIM=23" = switch on at 23 m from 3 s on
 #endif
-            gAim.setAsk(aim.on, aim.capM);
-            const int aimUi = aim.on ? gAim.uiState() : 0;
-            tzoverlay::setAimInfo(aimUi, aim.on ? gAim.headline().c_str() : "", gAim.lastShotText().c_str());
             static bool lastOn = false; static float lastCap = -1; static int aimLogs = 0; static double lastAimLog = -10;
             if ((aim.on != lastOn || (aim.on && aim.capM != lastCap && now - lastAimLog > 1.0)) && aimLogs < 30) {
                 ++aimLogs; lastOn = aim.on; lastCap = aim.capM; lastAimLog = now;
-                fact("aimbot: menu asks aimbot=%s, max shot distance=%s  [stage D8: when ON, a throw that the rules accept gets a new launch speed; the link reports every throw below]",
+                fact("aimbot: menu asks aimbot=%s, max shot distance=%s  [stage D7: the part that moves the ball is not built yet, so nothing changes in the game]",
                      aim.on ? "ON" : "off", tzaim::capLabel(aim.capM).c_str());
-            }
-            // the game part's own numbers: whenever its state changes and then every 20 seconds while the switch is on (never more than 60 lines)
-            // ... and also whenever a throw was judged as a shot or its flight ended (the numbers change then)
-            static int lastAimUi = 0, aimSumLogs = 0; static double nextAimSum = 0; static unsigned long long lastShotKey = 0;
-            const tzaimlink::Counters ac = gAim.counters();
-            const unsigned long long shotKey = ac.shotLike + ac.scored + ac.missed;
-            if ((aimUi != lastAimUi || shotKey != lastShotKey || (aimUi != 0 && now >= nextAimSum)) && aimSumLogs < 60) {
-                ++aimSumLogs; lastAimUi = aimUi; lastShotKey = shotKey; nextAimSum = now + 20.0;
-                fact("t=%.0f %s", now, gAim.summary().c_str());
             }
         }
         tzoverlay::tick(now, fact);
@@ -950,7 +918,6 @@ void* probeMain(void*) {
     fact("summary: menu opened %d times, closed %d times", opens, closes);
     fact("threads (final): controller-state doorway: %s | EndFrame4 doorway: %s", describeTally(gInputThreads).c_str(), describeTally(gFrameThreads).c_str());
     fact("%s", gLink.summary().c_str());
-    fact("%s", gAim.summary().c_str());
     for (int i = 0; i < frameWatchCount(); ++i)
         fact("frame watch %s: %s, %llu calls counted in total", frameWatch(i)->name, gWatchPatched[i] ? "installed" : "NOT installed (the plugin never saved that address)", static_cast<unsigned long long>(*frameWatch(i)->count));
     fact("done: %ld samples, %d change lines", samples, lines);
@@ -971,7 +938,7 @@ void startProbe() {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    logf_("payload loaded (stage D8: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot with game link)");
+    logf_("payload loaded (stage D7b: pass-through + input probe + frame watcher + clickable menu panel + movement page + game link + aimbot page)");
 
     Dl_info info;
     if (!dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &info) || !info.dli_fname) {

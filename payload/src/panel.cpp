@@ -249,15 +249,6 @@ void Canvas::textCentered(const Font& f, float cx, float baselineY, const std::s
 namespace {
 const float kPi = 3.14159265f;
 
-// Makes a text fit into `maxW` pixels: too long -> cut and end with "..." (the picture only knows plain ASCII letters, so other characters are dropped first).
-std::string fitText(const Canvas& c, const Font& f, const std::string& in, float maxW) {
-    std::string s;
-    for (unsigned char ch : in) s += (ch >= 32 && ch <= 126) ? static_cast<char>(ch) : ' ';
-    if (c.textWidth(f, s) <= maxW) return s;
-    while (!s.empty() && c.textWidth(f, s + "...") > maxW) s.pop_back();
-    return s + "...";
-}
-
 void arcLine(Canvas& c, float cx, float cy, float r, float a0, float a1, float w, Color col) {
     const int steps = 14;
     float px = cx + r * std::cos(a0), py = cy + r * std::sin(a0);
@@ -591,29 +582,19 @@ void drawPanel(Canvas& c, const PanelState& s, std::vector<HitRect>* hits) {
             if (hits) hits->push_back({HIT_SLIDER_AIMCAP, sx0 - 16, ry + 66, sx1 - sx0 + 32, 34});
             y += rh + 8;
         }
-        // ---- stage D8: game link (state, what it is doing, what happened to your last throw) + scan button
+        // ---- game link + scan button (the part that touches the game's ball does not exist yet)
         {
-            const float ry = y, rh = 124;
+            const float ry = y, rh = 72;
             c.fillRoundRect(rx, ry, rw, rh, 16, card);
             c.strokeRoundRect(rx, ry, rw, rh, 16, 1.4f, cardEdge);
-            const int ls = s.aimLinkState;      // 0 off, 1 connected, 2 looking for your ball control, 3 failed
-            const Color dot = ls == 1 ? rgba(80, 220, 130) : (ls == 3 ? rgba(240, 90, 90) : (ls == 2 ? rgba(240, 170, 60) : rgba(150, 150, 170)));
-            c.fillCircle(rx + 28, ry + 26, 7, dot);
-            c.text(kFontLabel, rx + 46, ry + 32, ls == 1 ? "Aimbot link: connected" : (ls == 2 ? "Aimbot link: looking..." : (ls == 3 ? "Aimbot link: failed" : "Aimbot link: off")), white);
-            const float textW = rw - 44;
-            const std::string head = !s.aimHeadline.empty() ? s.aimHeadline :
-                ls == 1 ? "Connected. Shoot a ball and I will tell you what happened." :
-                ls == 2 ? "Looking for your ball in the game... a few seconds." :
-                ls == 3 ? "Could not connect. Press Get facts and send me the file." :
-                "Turn the Aimbot switch on and the menu connects to the game.";
-            c.text(kFontTiny, rx + 22, ry + 63, fitText(c, kFontTiny, head, textW), grey);
-            c.text(kFontSmall, rx + 22, ry + 88, fitText(c, kFontSmall, s.aimLastShot.empty() ? std::string("No throw seen yet.") : s.aimLastShot, textW), s.aimLastShot.empty() ? dimGrey : rgba(222, 222, 234));
+            c.fillCircle(rx + 28, ry + 26, 7, rgba(150, 150, 170));
+            c.text(kFontLabel, rx + 46, ry + 32, "Game link: not built yet", white);
             const char* note =
-                s.scanState == 1 ? "Scanning... close the menu, pick up a ball, shoot once, hold a ball (about 1 min)." :
+                s.scanState == 1 ? "Scanning the game's code... this can take about a minute." :
                 s.scanState == 2 ? "Scan done. Press Get facts in the patcher and send me the file." :
                 s.scanState == 3 ? "Scan failed. Press Get facts in the patcher and send me the file." :
-                "The scan is only for me to learn the game. The Aimbot does not need it.";
-            c.text(kFontTiny, rx + 22, ry + 112, note, dimGrey);
+                "The switch does not change the game yet. Press Scan, then Get facts.";
+            c.text(kFontTiny, rx + 22, ry + 63, note, grey);
             const float bw = 214, bh = 36, bx = rx + rw - bw - 18, by = ry + 8;
             const bool hv = s.hover == HIT_SCAN_SHOT, busy = s.scanState == 1;
             c.fillRoundRectGradient(bx, by, bw, bh, 13, busy ? rgba(48, 48, 60) : (hv ? accentHi : accent), busy ? rgba(38, 38, 50) : accentLo);

@@ -8,7 +8,7 @@ pass=0; failn=0
 check() { if eval "$2"; then pass=$((pass+1)); echo "  PASS  $1"; else failn=$((failn+1)); echo "  FAIL  $1"; fi; }
 
 g++ -std=c++17 -shared -fPIC -fvisibility=hidden -I"$HERE/fake_jni" -I"$HERE/../src" -I"$HERE/../../menu/src" -DTZ_FAST_TEST \
-  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/movement.cpp" "$HERE/../src/game_link.cpp" "$HERE/../src/aimbot.cpp" "$HERE/../src/aim_link.cpp" "$HERE/../src/il2cpp_scan.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" "$HERE/../../menu/src/menu_input.cpp" \
+  "$HERE/../src/proxy.cpp" "$HERE/../src/frame_stubs.cpp" "$HERE/../src/overlay.cpp" "$HERE/../src/pointer.cpp" "$HERE/../src/movement.cpp" "$HERE/../src/game_link.cpp" "$HERE/../src/aimbot.cpp" "$HERE/../src/il2cpp_scan.cpp" "$HERE/../src/panel.cpp" "$HERE/../src/panel_font.cpp" "$HERE/../../menu/src/menu_input.cpp" \
   -ldl -pthread -Wl,--version-script="$HERE/../exports.map" -o "$W/libmain.so" || exit 2
 echo 'extern "C" __attribute__((visibility("default"))) int JNI_OnLoad(void*, void*) { return 0x00010006; }' > "$W/orig.cpp"
 g++ -shared -fPIC "$W/orig.cpp" -o "$W/libmain_orig.so"
@@ -52,7 +52,7 @@ int main(int, char** argv) {
     if (getenv("HOST_SHOT_WORLD")) {                                         // stage D7: the pretend game also has rims, a ball and the engine classes
       void (*sw)(int) = (void (*)(int))dlsym(il, "fake_set_shot_world"); if (sw) sw(1);
       void* (*mo)(int, int) = (void* (*)(int, int))dlsym(il, "fake_make_shot_object");
-      if (mo) { mo(0, 0); mo(0, 1); mo(1, 0); mo(1, 1); mo(2, 1); mo(7, 0); mo(7, 1); mo(8, 0); mo(9, 0); mo(9, 1); mo(10, 0); mo(11, 0); mo(12, 1); }
+      if (mo) { mo(0, 0); mo(0, 1); mo(1, 0); mo(1, 1); mo(2, 1); }
     }
     if (getenv("HOST_PLAYER")) {                                             // the headset's player object (the one the movement link looks for)
       void* (*mkp)(int) = (void* (*)(int))dlsym(il, "fake_make_player_locomotion");
@@ -90,7 +90,7 @@ check "scan wrote a field hit and a type hit" 'grep -q "^scan: field-hit Game.Ga
 check "scan finished OK" 'grep -q "^--- scan finished: ok ---" "$F" && grep -q "^scan: DONE" "$F"'
 check "the index and the full detail of the important class are written" 'grep -q "^scan: index Game.MobilePlayerLocomotion" "$F" && grep -q "^scan: CLASS Game.MobilePlayerLocomotion" "$F" && grep -q "method SetJumpHeight(1) : System.Void rva=" "$F"'
 check "the running copy was found in memory and its values written" 'grep -q "^scan: live Game.MobilePlayerLocomotion #1 size=80" "$F" && grep -q "^scan:   live _maxSpeed = 4.25 " "$F" && grep -q "^scan:   live _jumpHeight = 1.5 " "$F"'
-check "the facts header says stage D8" 'head -1 "$F" | grep -q "stage D8"'
+check "the facts header says stage D7" 'head -1 "$F" | grep -q "stage D7"'
 check "no memory addresses written (no 0x)" '! grep -q "0x" "$F"'
 check "progress lines for every step are written" 'grep -q "^scan: step 3 of 6" "$F" && grep -q "^scan: step 4 done" "$F" && grep -q "^scan: step 5 done: 4 class" "$F" && grep -q "^scan: step 6 of 6" "$F"'
 check "the memory search line tells the pipe size and trouble count" 'grep -q "^scan: memory search read .* copy pipe=[0-9]* bytes (chunk [0-9]* KB); .*copy trouble=0" "$F"'
@@ -178,28 +178,19 @@ F9="$W/shot.txt"
 check "game still starts (65542)" '[[ "$out_last" == *"RESULT=65542"* ]]'
 check "the ball and hoops scan was requested and logged" 'grep -q "^--- BALL AND HOOPS scan requested from the menu" "$F9"'
 check "it says what it is" 'grep -q "^scan: BALL AND HOOPS scan (stage D7)" "$F9"'
-check "the ball, the game's shot assist and the hoop classes are written with their fields" 'grep -q "^scan: CLASS ShovelTools.Basketball : MonoBehaviour" "$F9" && grep -q "^scan:   field _isHeld : System.Boolean @36" "$F9" && grep -q "^scan: CLASS ShovelTools.BasketballShotAssist" "$F9" && grep -q "^scan: CLASS ShovelTools.BasketballGoal" "$F9" && grep -q "^scan: CLASS ShovelTools.GameManager" "$F9"'
-check "the long class index and the assembly list are left out of this report" '! grep -q "^scan: index " "$F9" && ! grep -q "^scan: assembly " "$F9" && grep -q "the class-name index is left out" "$F9"'
-check "the classes that were asked for by name but are missing are reported in one line" 'grep -q "^scan: classes asked for by name but NOT found in this game: .*BankShotCandidate" "$F9"'
+check "the rim, ball and hand-grab classes are written with their fields" 'grep -q "^scan: CLASS ShovelTools.RimSync : MonoBehaviour" "$F9" && grep -q "^scan:   field _hoopHeight : System.Single @36" "$F9" && grep -q "^scan: CLASS ShovelTools.BasketballBall" "$F9" && grep -q "^scan: CLASS Autohand.GrabbableBase" "$F9"'
 check "the engine functions are looked up and reported" 'grep -q "^scan: engine class UnityEngine.Rigidbody found" "$F9" && grep -q "^scan:   method set_velocity(1) : System.Void rva=" "$F9" && grep -q "^scan: icall UnityEngine.Rigidbody::get_velocity_Injected(UnityEngine.Vector3&) -> found" "$F9"'
-check "the running balls, hoops and the game's shot assist were found in memory and their values written" 'grep -q "^scan: live ShovelTools.Basketball #1 size=64" "$F9" && grep -q "^scan:   live _strength = 0.6 " "$F9" && grep -q "^scan: live ShovelTools.BasketballGoal #1" "$F9" && grep -q "^scan:   live _officialMatch = true " "$F9"'
-check "the 25-second pause is a test setting: off here (no 'waiting' line)" '! grep -q "^scan: waiting " "$F9"'
+check "the running rims and the ball were found in memory and their values written" 'grep -q "^scan: live ShovelTools.RimSync #1 size=48" "$F9" && grep -q "^scan:   live _hoopHeight = 3.05 " "$F9" && grep -q "^scan: live ShovelTools.BasketballBall #1" "$F9"'
 check "the scan finished OK and the menu was told" 'grep -q "^--- scan finished: ok ---" "$F9" && grep -q "^scan: DONE" "$F9"'
 check "no movement classes in this report" '! grep -q "^scan: CLASS Game.PlayerMovement" "$F9" && ! grep -q "^scan: field-hit" "$F9"'
 check "the report is small" '[ "$(wc -c < "$F9")" -lt 100000 ]'
 check "no memory addresses written with a 0x prefix" '! grep -q "0x[0-9a-f]\{4,\}" "$F9"'
 
-echo "== stage D7c: the pause before the live search, through the real path (3 s in this test; 25 s in the headset)"
-runscan shotwait TZ_SAMPLE_MS=20000 TZ_TEST_SHOT_SCAN=1 HOST_SHOT_WORLD=1 TZ_SHOT_LIVE_DELAY_S=3 "HOST_WAIT_LINE=--- scan finished"
-F9W="$W/shotwait.txt"
-check "the scan tells the person it is waiting, and why" 'grep -q "^scan: waiting 3 seconds before looking at the running objects, so you can close the menu, pick up a ball and take a shot" "$F9W"'
-check "after the pause the live objects are still found and the scan finishes OK" 'grep -q "^scan: live ShovelTools.Basketball #1" "$F9W" && grep -q "^--- scan finished: ok ---" "$F9W"'
-
 echo "== stage D7: the Aimbot switch is on at 23 m, then at Unlimited (pretend menu)"
 runscan aim TZ_SAMPLE_MS=7000 TZ_TEST_AIM=23 "HOST_WAIT_LINE=aimbot: menu asks aimbot=ON"
 F10="$W/aim.txt"
 check "game still starts (65542)" '[[ "$out_last" == *"RESULT=65542"* ]]'
-check "the facts say what the Aimbot page asks (stage D8 text)" 'grep -q "^aimbot: menu asks aimbot=ON, max shot distance=23 m  \[stage D8: when ON, a throw that the rules accept gets a new launch speed; the link reports every throw below\]" "$F10"'
+check "the facts say what the Aimbot page asks, and that nothing changes in the game yet" 'grep -q "^aimbot: menu asks aimbot=ON, max shot distance=23 m  \[stage D7: the part that moves the ball is not built yet, so nothing changes in the game\]" "$F10"'
 check "the Aimbot does not wake the movement link (no link lines)" '! grep -q "^link: " "$F10" && ! grep -q "^movement: " "$F10"'
 runscan aim50 TZ_SAMPLE_MS=7000 TZ_TEST_AIM=50 "HOST_WAIT_LINE=aimbot: menu asks aimbot=ON"
 check "at 50 the facts say Unlimited" 'grep -q "^aimbot: menu asks aimbot=ON, max shot distance=Unlimited " "$W/aim50.txt"'
